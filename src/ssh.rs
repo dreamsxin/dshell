@@ -572,6 +572,53 @@ mod tests {
                     })
                     .await?;
 
+                    let vim_text = "DSHELL_VIM_中文🙂e\u{301}";
+                    command_tx
+                        .send(TerminalRequest::Paste(
+                            "vim -Nu NONE -n /tmp/dshell-vim-smoke".to_owned(),
+                        ))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut events, |frame| {
+                        frame_text(frame).contains("[New File]")
+                    })
+                    .await?;
+                    command_tx
+                        .send(TerminalRequest::Key(text_key("i")))
+                        .await?;
+                    command_tx
+                        .send(TerminalRequest::Key(text_key(vim_text)))
+                        .await?;
+                    command_tx
+                        .send(TerminalRequest::Key(TerminalKeyInput {
+                            key: "escape".to_owned(),
+                            text: None,
+                            control: false,
+                            alt: false,
+                            shift: false,
+                            platform: false,
+                            function: false,
+                        }))
+                        .await?;
+                    next_screen(&mut events, |frame| frame_text(frame).contains(vim_text))
+                        .await?;
+                    command_tx
+                        .send(TerminalRequest::Key(text_key(":wq")))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    command_tx
+                        .send(TerminalRequest::Paste(
+                            "cat /tmp/dshell-vim-smoke; printf '\\nDSHELL_VIM_READBACK_DONE\\n'"
+                                .to_owned(),
+                        ))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut events, |frame| {
+                        let text = frame_text(frame);
+                        text.contains(vim_text) && text.contains("DSHELL_VIM_READBACK_DONE")
+                    })
+                    .await?;
+
                     command_tx
                         .send(TerminalRequest::Paste("exit".to_owned()))
                         .await?;
@@ -721,6 +768,18 @@ mod tests {
         TerminalKeyInput {
             key: "enter".to_owned(),
             text: None,
+            control: false,
+            alt: false,
+            shift: false,
+            platform: false,
+            function: false,
+        }
+    }
+
+    fn text_key(text: &str) -> TerminalKeyInput {
+        TerminalKeyInput {
+            key: text.to_owned(),
+            text: Some(text.to_owned()),
             control: false,
             alt: false,
             shift: false,

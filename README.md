@@ -52,7 +52,8 @@ container (Docker required):
 ```
 
 The script uses a random temporary password and an isolated `known_hosts` file,
-then removes both the test container and temporary host-key file.
+then removes both the test container and temporary host-key file. The SSH/PTY
+round trip also exercises Vim's full-screen buffer and Unicode input/save/readback.
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current
 implementation boundary and next-session handoff. [ROADMAP.md](ROADMAP.md)

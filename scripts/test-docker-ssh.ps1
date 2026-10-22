@@ -19,7 +19,7 @@ try {
         }
     }
 
-    $entrypoint = 'printf "#!/bin/sh\nexit 101\n" > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server && rm /usr/sbin/policy-rc.d && mkdir -p /run/sshd && useradd -m -s /bin/bash dshelltest && echo "dshelltest:$DSHELL_TEST_PASSWORD" | chpasswd && ssh-keygen -A && printf "\nPasswordAuthentication yes\nPermitRootLogin no\n" >> /etc/ssh/sshd_config && exec /usr/sbin/sshd -D -e'
+    $entrypoint = 'printf "#!/bin/sh\nexit 101\n" > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && apt-get update -o Acquire::Retries=3 && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server vim-tiny && rm /usr/sbin/policy-rc.d && mkdir -p /run/sshd && useradd -m -s /bin/bash dshelltest && echo "dshelltest:$DSHELL_TEST_PASSWORD" | chpasswd && ssh-keygen -A && printf "\nPasswordAuthentication yes\nPermitRootLogin no\n" >> /etc/ssh/sshd_config && exec /usr/sbin/sshd -D -e'
     docker run --detach --name $containerName --publish 127.0.0.1::22 --env "DSHELL_TEST_PASSWORD=$password" $image bash -lc $entrypoint | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Could not start the Ubuntu SSH container."
@@ -33,6 +33,12 @@ try {
 
     $hostKey = $null
     for ($attempt = 0; $attempt -lt 480; $attempt++) {
+        $containerState = docker inspect --format '{{.State.Running}}' $containerName 2>$null
+        if ($LASTEXITCODE -ne 0 -or $containerState -ne "true") {
+            $containerLogs = docker logs --tail 60 $containerName 2>&1 | Out-String
+            throw "Ubuntu SSH container exited before providing its host key. Container output: $containerLogs"
+        }
+
         $hostKey = docker exec $containerName cat /etc/ssh/ssh_host_ed25519_key.pub 2>$null
         if ($LASTEXITCODE -eq 0 -and $hostKey) {
             break

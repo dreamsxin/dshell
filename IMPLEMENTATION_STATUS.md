@@ -20,17 +20,17 @@
 - 会话状态明确区分连接中、已连接、断开中和已断开；连接期间可取消握手，已连接会话可主动断开，远端退出/连接失败/事件流关闭会清空旧终端帧。应用释放取消发送端时，SSH 任务会在握手或会话循环中收尾。
 - 鼠标左键拖动可选择终端网格文本，选中单元格有独立高亮；`Ctrl+Shift+C` 复制非空选择，`Ctrl+Shift+V` 从系统剪贴板粘贴，并遵循远端 bracketed-paste 模式。
 - scripts/verify-hard-constraints.ps1 固化格式、类型检查、测试和依赖边界检查命令。
-- scripts/test-docker-ssh.ps1 创建临时 Ubuntu 24.04 OpenSSH 服务，以容器实际 Ed25519 公钥和隔离的临时 known_hosts 执行应用 SSH/PTY 集成测试，测试后清理容器和临时密钥文件。
+- scripts/test-docker-ssh.ps1 创建临时 Ubuntu 24.04 OpenSSH 服务与 vim-tiny，以容器实际 Ed25519 公钥和隔离的临时 known_hosts 执行应用 SSH/PTY 集成测试，覆盖终端往返与 Vim 中 Unicode 文本输入、保存、shell 读回及会话断开，测试后清理容器和临时密钥文件。
 
 ## 验证记录
 
 2026-10-22，Windows/MSVC：`./scripts/verify-hard-constraints.ps1` 全部通过，包含格式检查、锁定依赖下的全目标类型检查、禁用依赖扫描及 17 项通过的单元测试（另有 2 项 Docker 专用测试由独立脚本运行）。测试覆盖握手取消/取消发送端释放、键盘序列与 Unicode UTF-8 输入、双宽字符/组合标记网格宽度、终端 resize 行列、ANSI 样式/模式、滚动历史、文本选择/bracketed paste、鼠标跟踪模式与 legacy/UTF-8/SGR 编码，以及已知/未知/变更 SSH 主机密钥。
 
-`./scripts/test-docker-ssh.ps1` 已通过：连接临时 Ubuntu 24.04 SSH 服务，验证 host-key 检查、密码认证、PTY resize（远端 `stty size` 返回 `30 100`）、终端输出与选择、粘贴输入、鼠标报告字节到达远端 PTY、远端 `exit` 和用户主动断开；测试凭据使用随机值，未写入仓库，且测试不读取或更改个人 known_hosts。Ubuntu 首次安装 OpenSSH 可能受包源速度影响，脚本等待窗口已延长。
+旧版 `./scripts/test-docker-ssh.ps1` 已通过：连接临时 Ubuntu 24.04 SSH 服务，验证 host-key 检查、密码认证、PTY resize（远端 `stty size` 返回 `30 100`）、终端输出与选择、粘贴输入、鼠标报告字节到达远端 PTY、远端 `exit` 和用户主动断开。新增 vim-tiny 全屏 Unicode 自动回归后重跑未能进入测试阶段：Ubuntu 包索引请求返回 HTTP 502，容器启动脚本现会尽早报告退出和容器日志；该场景尚未验证。测试凭据使用随机值，未写入仓库，且测试不读取或更改个人 known_hosts。
 
 Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility 警告；当前不影响检查或测试通过。
 
-2026-10-22，Windows 桌面烟测尝试：临时 Ubuntu 24.04 SSH 容器和 dshell 窗口均成功启动，SSH 主机密钥保存在隔离的临时 `USERPROFILE/.ssh/known_hosts` 中，个人 known_hosts 未修改。当前桌面自动化环境禁用了原生窗口控制，无法实际操作窗口；临时容器仅安装了 `vim-tiny`，tmux/htop 尚未验证。容器和应用进程已清理，vim、tmux、htop、Unicode 字形像素对齐及 IME/焦点交互仍待 Windows 桌面人工烟测。
+2026-10-22，Windows 桌面烟测尝试：临时 Ubuntu 24.04 SSH 容器和 dshell 窗口均成功启动，SSH 主机密钥保存在隔离的临时 `USERPROFILE/.ssh/known_hosts` 中，个人 known_hosts 未修改。当前桌面自动化环境禁用了原生窗口控制，无法实际操作窗口。自动化 Vim/Unicode PTY 回归已添加代码但因包源 HTTP 502 未验证；tmux/htop、Unicode 字形像素对齐及 IME/焦点交互仍待完成。
 
 ## 当前限制
 
@@ -42,4 +42,4 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 
 ## 下一段接力
 
-完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。下一步在 Windows 桌面烟测 vim、tmux、htop，全屏下的实际 Unicode 字形布局，以及 IME/焦点交互；据此校准字体宽度与重排。阶段 1 桌面验收后进入阶段 2 的主机资料和多会话工作区。继续遵守严格主机密钥拒绝策略和不落盘凭据约束。
+完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。下一步在 Ubuntu 包源恢复后运行 Docker SSH 回归，验证 vim 全屏 Unicode PTY 往返；之后在 Windows 桌面烟测 vim、tmux、htop、实际 Unicode 字形布局及 IME/焦点交互，并据此校准字体宽度与重排。阶段 1 桌面验收后进入阶段 2 的主机资料和多会话工作区。继续遵守严格主机密钥拒绝策略和不落盘凭据约束。
