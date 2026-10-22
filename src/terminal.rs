@@ -1,7 +1,8 @@
 use alacritty_terminal::{
     event::VoidListener,
     grid::{Dimensions, Scroll},
-    index::{Column, Line},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionType},
     term::{Config, Term, TermMode, cell::Flags},
     vte::ansi::{Color, NamedColor, Processor},
 };
@@ -44,6 +45,15 @@ pub enum TerminalRequest {
     Key(TerminalKeyInput),
     Resize(TerminalSize),
     Scroll(i32),
+    StartSelection(TerminalPosition),
+    UpdateSelection(TerminalPosition),
+    Paste(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalPosition {
+    pub row: u16,
+    pub column: u16,
 }
 
 impl TerminalKeyInput {
@@ -178,11 +188,13 @@ pub struct TerminalRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalFrame {
     pub rows: Vec<Vec<TerminalRun>>,
+    pub selection_text: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -243,6 +255,40 @@ impl TerminalEmulator {
         self.term.scroll_display(Scroll::Delta(rows));
     }
 
+    fn selection_point(&self, position: TerminalPosition) -> Point {
+        let row = usize::from(position.row).min(self.term.screen_lines().saturating_sub(1));
+        let column = usize::from(position.column).min(self.term.columns().saturating_sub(1));
+        Point::new(
+            Line(row as i32 - self.term.grid().display_offset() as i32),
+            Column(column),
+        )
+    }
+
+    pub fn start_selection(&mut self, position: TerminalPosition) {
+        let point = self.selection_point(position);
+        self.term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+    }
+
+    pub fn update_selection(&mut self, position: TerminalPosition) {
+        let point = self.selection_point(position);
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, Side::Right);
+        }
+    }
+
+    pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
+        let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
+        let mut bytes = Vec::with_capacity(text.len() + if bracketed { 12 } else { 0 });
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[200~");
+        }
+        bytes.extend_from_slice(text.as_bytes());
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[201~");
+        }
+        bytes
+    }
+
     pub fn application_cursor_mode(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
     }
@@ -250,6 +296,12 @@ impl TerminalEmulator {
     pub fn frame(&self) -> TerminalFrame {
         let cursor = self.term.grid().cursor.point;
         let show_cursor = self.term.mode().contains(TermMode::SHOW_CURSOR);
+        let selection = self
+            .term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&self.term));
+        let selection_text = self.term.selection_to_string();
         let first_line = -(self.term.grid().display_offset() as i32);
         let rows = (first_line..first_line + self.term.screen_lines() as i32)
             .map(|line| {
@@ -265,6 +317,9 @@ impl TerminalEmulator {
 
                     let is_cursor =
                         show_cursor && cursor.line.0 == line && cursor.column.0 == column;
+                    let selected = selection.as_ref().is_some_and(|selection| {
+                        selection.contains(Point::new(Line(line), Column(column)))
+                    });
                     let mut foreground = color_to_rgb(cell.fg);
                     let mut background = color_to_rgb(cell.bg);
                     if flags.contains(Flags::INVERSE) ^ is_cursor {
@@ -276,6 +331,7 @@ impl TerminalEmulator {
                         flags.contains(Flags::BOLD),
                         flags.contains(Flags::ITALIC),
                         flags.intersects(Flags::ALL_UNDERLINES),
+                        selected,
                     );
                     let width_cells = if flags.contains(Flags::WIDE_CHAR) {
                         2
@@ -295,6 +351,7 @@ impl TerminalEmulator {
                             run.bold,
                             run.italic,
                             run.underline,
+                            run.selected,
                         ) == style
                     }) {
                         run.text.push(character);
@@ -316,6 +373,7 @@ impl TerminalEmulator {
                             bold: style.2,
                             italic: style.3,
                             underline: style.4,
+                            selected: style.5,
                         });
                     }
                 }
@@ -323,7 +381,10 @@ impl TerminalEmulator {
             })
             .collect();
 
-        TerminalFrame { rows }
+        TerminalFrame {
+            rows,
+            selection_text,
+        }
     }
 }
 
@@ -382,7 +443,10 @@ fn named_color(color: NamedColor) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalEmulator, TerminalKeyInput, TerminalSize};
+    use super::{
+        CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalEmulator, TerminalKeyInput, TerminalPosition,
+        TerminalSize,
+    };
 
     fn key(key: &str, text: Option<&str>) -> TerminalKeyInput {
         TerminalKeyInput {
@@ -424,6 +488,37 @@ mod tests {
         assert!(terminal.frame().rows[0][0].text.starts_with("two"));
         terminal.scroll_display(-1);
         assert!(terminal.frame().rows[0][0].text.starts_with("three"));
+    }
+
+    #[test]
+    fn selection_extracts_and_marks_selected_text() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 16,
+            rows: 2,
+        });
+        terminal.feed(b"hello terminal");
+        terminal.start_selection(TerminalPosition { row: 0, column: 0 });
+        terminal.update_selection(TerminalPosition { row: 0, column: 4 });
+
+        let frame = terminal.frame();
+        assert_eq!(frame.selection_text.as_deref(), Some("hello"));
+        assert!(
+            frame.rows[0]
+                .iter()
+                .any(|run| run.selected && run.text.contains("hello"))
+        );
+    }
+
+    #[test]
+    fn paste_bytes_respect_bracketed_paste_mode() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 16,
+            rows: 2,
+        });
+        assert_eq!(terminal.paste_bytes("a\nb"), b"a\nb");
+
+        terminal.feed(b"\x1b[?2004h");
+        assert_eq!(terminal.paste_bytes("a\nb"), b"\x1b[200~a\nb\x1b[201~");
     }
 
     #[test]

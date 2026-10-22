@@ -1,6 +1,8 @@
 mod ssh;
 mod terminal;
 
+use std::{cell::RefCell, rc::Rc};
+
 use gpui::{prelude::*, *};
 use gpui_component::{
     Root,
@@ -9,8 +11,8 @@ use gpui_component::{
 };
 use ssh::{ConnectionSpec, UiEvent};
 use terminal::{
-    CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalFrame, TerminalKeyInput, TerminalRequest, TerminalRun,
-    TerminalSize,
+    CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalFrame, TerminalKeyInput, TerminalPosition,
+    TerminalRequest, TerminalRun, TerminalSize,
 };
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -25,6 +27,8 @@ struct AppView {
     terminal_message: String,
     terminal_size: TerminalSize,
     scroll_remainder: f32,
+    terminal_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    selection_position: Option<TerminalPosition>,
     terminal_focus: FocusHandle,
     command_tx: Option<mpsc::Sender<TerminalRequest>>,
     _bounds_subscription: Subscription,
@@ -52,6 +56,8 @@ impl AppView {
             terminal_message: "Connect to a server with a verified host key.".to_owned(),
             terminal_size,
             scroll_remainder: 0.0,
+            terminal_bounds: Rc::default(),
+            selection_position: None,
             terminal_focus: cx.focus_handle(),
             command_tx: None,
             _bounds_subscription: bounds_subscription,
@@ -89,6 +95,7 @@ impl AppView {
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().to_string();
         let password = Zeroizing::new(self.password.read(cx).text().to_string());
+        self.selection_position = None;
         self.password
             .update(cx, |state, cx| state.set_value("", window, cx));
 
@@ -153,10 +160,41 @@ impl AppView {
     }
 
     fn send_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let modifiers = event.keystroke.modifiers;
+        let key_name = event.keystroke.key.to_ascii_lowercase();
+        if self.command_tx.is_some() && modifiers.shift && (modifiers.control || modifiers.platform)
+        {
+            match key_name.as_str() {
+                "c" => {
+                    cx.stop_propagation();
+                    if let Some(text) = self
+                        .frame
+                        .as_ref()
+                        .and_then(|frame| frame.selection_text.clone())
+                        .filter(|text| !text.is_empty())
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                    return;
+                }
+                "v" => {
+                    cx.stop_propagation();
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        self.send_terminal_request(
+                            TerminalRequest::Paste(text),
+                            "Terminal paste",
+                            cx,
+                        );
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let Some(command_tx) = &self.command_tx else {
             return;
         };
-        let modifiers = event.keystroke.modifiers;
         let key = TerminalKeyInput {
             key: event.keystroke.key.clone(),
             text: event.keystroke.key_char.clone(),
@@ -176,6 +214,72 @@ impl AppView {
                 self.status = format!("Terminal input queue is unavailable: {error}");
                 cx.notify();
             }
+        }
+    }
+
+    fn terminal_position(&self, position: Point<Pixels>) -> Option<TerminalPosition> {
+        let bounds = self.terminal_bounds.borrow().clone()?;
+        let column = (((position.x - bounds.origin.x) / px(1.0)) / CELL_WIDTH_PX)
+            .floor()
+            .clamp(0.0, f32::from(self.terminal_size.columns.saturating_sub(1)))
+            as u16;
+        let row = (((position.y - bounds.origin.y) / px(1.0)) / CELL_HEIGHT_PX)
+            .floor()
+            .clamp(0.0, f32::from(self.terminal_size.rows.saturating_sub(1)))
+            as u16;
+        Some(TerminalPosition { row, column })
+    }
+
+    fn start_selection(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.terminal_focus);
+        if self.frame.is_none() {
+            return;
+        }
+        let Some(position) = self.terminal_position(event.position) else {
+            return;
+        };
+        self.selection_position = Some(position);
+        self.send_terminal_request(
+            TerminalRequest::StartSelection(position),
+            "Terminal selection",
+            cx,
+        );
+    }
+
+    fn update_selection(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !event.dragging() {
+            return;
+        }
+        let Some(position) = self.terminal_position(event.position) else {
+            return;
+        };
+        if self.selection_position == Some(position) {
+            return;
+        }
+        self.selection_position = Some(position);
+        self.send_terminal_request(
+            TerminalRequest::UpdateSelection(position),
+            "Terminal selection",
+            cx,
+        );
+    }
+
+    fn send_terminal_request(
+        &mut self,
+        request: TerminalRequest,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(command_tx) = &self.command_tx
+            && let Err(error) = command_tx.try_send(request)
+        {
+            self.status = format!("{action} queue is unavailable: {error}");
+            cx.notify();
         }
     }
 
@@ -217,6 +321,9 @@ fn render_terminal_run(run: &TerminalRun) -> impl IntoElement {
         .text_size(px(13.))
         .text_color(rgb(run.foreground))
         .bg(rgb(run.background));
+    if run.selected {
+        cell_run = cell_run.text_color(rgb(0xf4f6f8)).bg(rgb(0x315b80));
+    }
     if run.bold {
         cell_run = cell_run.font_weight(FontWeight::BOLD);
     }
@@ -231,6 +338,7 @@ fn render_terminal_run(run: &TerminalRun) -> impl IntoElement {
 
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let terminal_bounds = Rc::clone(&self.terminal_bounds);
         let mut terminal_view = div()
             .flex()
             .flex_col()
@@ -238,14 +346,18 @@ impl Render for AppView {
             .min_h_0()
             .font_family("monospace")
             .text_size(px(13.))
+            .on_children_prepainted(move |children, _, _| {
+                *terminal_bounds.borrow_mut() = children.first().cloned();
+            })
             .on_key_down(cx.listener(|this, event, _, cx| this.send_key(event, cx)))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_terminal(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, _| {
-                    window.focus(&this.terminal_focus);
+                cx.listener(|this, event, window, cx| {
+                    this.start_selection(event, window, cx);
                 }),
-            );
+            )
+            .on_mouse_move(cx.listener(|this, event, _, cx| this.update_selection(event, cx)));
 
         if let Some(frame) = &self.frame {
             let mut grid = div().flex().flex_col().flex_1().min_h_0();
