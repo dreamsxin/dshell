@@ -189,6 +189,12 @@ async fn run_connection(
                             .context("UI closed during terminal resize")?;
                         screen_dirty = false;
                     }
+                    Some(TerminalRequest::Scroll(rows)) => {
+                        terminal.scroll_display(rows);
+                        events.send(UiEvent::Screen(terminal.frame())).await
+                            .context("UI closed during terminal scroll")?;
+                        screen_dirty = false;
+                    }
                     None => break,
                 }
             }

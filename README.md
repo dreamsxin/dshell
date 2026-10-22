@@ -14,7 +14,8 @@ Run `cargo run --locked`, enter the host, port, user, and password, then
 connect. The password field is masked and cleared when connection starts.
 Passwords are used only for the current SSH authentication attempt and are not
 persisted. Click the terminal area to focus it, then use the keyboard as you
-would in a remote terminal. The terminal grid follows window resizing.
+would in a remote terminal. The terminal grid follows window resizing, and the
+mouse wheel scrolls through available terminal history.
 
 ## Test and Verify
 

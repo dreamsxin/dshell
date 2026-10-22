@@ -24,6 +24,7 @@ struct AppView {
     frame: Option<TerminalFrame>,
     terminal_message: String,
     terminal_size: TerminalSize,
+    scroll_remainder: f32,
     terminal_focus: FocusHandle,
     command_tx: Option<mpsc::Sender<TerminalRequest>>,
     _bounds_subscription: Subscription,
@@ -50,6 +51,7 @@ impl AppView {
             frame: None,
             terminal_message: "Connect to a server with a verified host key.".to_owned(),
             terminal_size,
+            scroll_remainder: 0.0,
             terminal_focus: cx.focus_handle(),
             command_tx: None,
             _bounds_subscription: bounds_subscription,
@@ -176,6 +178,28 @@ impl AppView {
             }
         }
     }
+
+    fn scroll_terminal(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let Some(command_tx) = &self.command_tx else {
+            return;
+        };
+        let delta_y = match event.delta {
+            ScrollDelta::Lines(delta) => delta.y,
+            ScrollDelta::Pixels(delta) => delta.y / px(CELL_HEIGHT_PX),
+        };
+        let accumulated = self.scroll_remainder - delta_y;
+        let rows = accumulated.trunc() as i32;
+        self.scroll_remainder = accumulated - rows as f32;
+        cx.stop_propagation();
+        if rows == 0 {
+            return;
+        }
+
+        if let Err(error) = command_tx.try_send(TerminalRequest::Scroll(rows)) {
+            self.status = format!("Terminal scroll queue is unavailable: {error}");
+            cx.notify();
+        }
+    }
 }
 
 impl Focusable for AppView {
@@ -215,6 +239,7 @@ impl Render for AppView {
             .font_family("monospace")
             .text_size(px(13.))
             .on_key_down(cx.listener(|this, event, _, cx| this.send_key(event, cx)))
+            .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_terminal(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, _| {

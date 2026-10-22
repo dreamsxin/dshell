@@ -1,6 +1,6 @@
 use alacritty_terminal::{
     event::VoidListener,
-    grid::Dimensions,
+    grid::{Dimensions, Scroll},
     index::{Column, Line},
     term::{Config, Term, TermMode, cell::Flags},
     vte::ansi::{Color, NamedColor, Processor},
@@ -43,6 +43,7 @@ pub struct TerminalKeyInput {
 pub enum TerminalRequest {
     Key(TerminalKeyInput),
     Resize(TerminalSize),
+    Scroll(i32),
 }
 
 impl TerminalKeyInput {
@@ -238,6 +239,10 @@ impl TerminalEmulator {
         self.term.resize(TerminalDimensions::from(size));
     }
 
+    pub fn scroll_display(&mut self, rows: i32) {
+        self.term.scroll_display(Scroll::Delta(rows));
+    }
+
     pub fn application_cursor_mode(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
     }
@@ -245,9 +250,10 @@ impl TerminalEmulator {
     pub fn frame(&self) -> TerminalFrame {
         let cursor = self.term.grid().cursor.point;
         let show_cursor = self.term.mode().contains(TermMode::SHOW_CURSOR);
-        let rows = (0..self.term.screen_lines())
+        let first_line = -(self.term.grid().display_offset() as i32);
+        let rows = (first_line..first_line + self.term.screen_lines() as i32)
             .map(|line| {
-                let row = &self.term.grid()[Line(line as i32)];
+                let row = &self.term.grid()[Line(line)];
                 let mut runs: Vec<TerminalRun> = Vec::new();
 
                 for column in 0..self.term.columns() {
@@ -258,7 +264,7 @@ impl TerminalEmulator {
                     }
 
                     let is_cursor =
-                        show_cursor && cursor.line.0 == line as i32 && cursor.column.0 == column;
+                        show_cursor && cursor.line.0 == line && cursor.column.0 == column;
                     let mut foreground = color_to_rgb(cell.fg);
                     let mut background = color_to_rgb(cell.bg);
                     if flags.contains(Flags::INVERSE) ^ is_cursor {
@@ -403,6 +409,21 @@ mod tests {
         assert_eq!(first_row[0].text, "ready");
         assert_eq!(first_row[0].foreground, 0xcd0000);
         assert!(terminal.application_cursor_mode());
+    }
+
+    #[test]
+    fn scrollback_viewport_shows_history_and_returns_to_live_screen() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 16,
+            rows: 2,
+        });
+        terminal.feed(b"one\r\ntwo\r\nthree\r\nfour");
+
+        assert!(terminal.frame().rows[0][0].text.starts_with("three"));
+        terminal.scroll_display(1);
+        assert!(terminal.frame().rows[0][0].text.starts_with("two"));
+        terminal.scroll_display(-1);
+        assert!(terminal.frame().rows[0][0].text.starts_with("three"));
     }
 
     #[test]
