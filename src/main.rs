@@ -6,7 +6,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::{AnyElement, StatefulInteractiveElement as _, prelude::*, *};
 use gpui_component::{
-    PixelsExt, Root,
+    PixelsExt, Root, StyledExt,
     button::{Button, ButtonVariants},
     input::{InputState, TextInput},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
@@ -37,6 +37,25 @@ enum SessionState {
 enum SplitOrientation {
     SideBySide,
     Stacked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionEditorSection {
+    Connection,
+    Authentication,
+    Security,
+}
+
+impl SessionEditorSection {
+    const ALL: [Self; 3] = [Self::Connection, Self::Authentication, Self::Security];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Connection => "Connection",
+            Self::Authentication => "Authentication",
+            Self::Security => "Security",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -449,6 +468,8 @@ struct AppView {
     profile_store: Option<ProfileStore>,
     profiles_ready: bool,
     selected_profile: Option<String>,
+    session_editor_open: bool,
+    session_editor_section: SessionEditorSection,
     confirm_delete: bool,
     profile_message: String,
     _bounds_subscription: Subscription,
@@ -508,6 +529,8 @@ impl AppView {
             profile_store,
             profiles_ready,
             selected_profile: None,
+            session_editor_open: false,
+            session_editor_section: SessionEditorSection::Connection,
             confirm_delete: false,
             profile_message,
             _bounds_subscription: bounds_subscription,
@@ -656,6 +679,8 @@ impl AppView {
         Self::set_input_value(&self.username, "", window, cx);
         Self::set_input_value(&self.password, "", window, cx);
         self.selected_profile = None;
+        self.session_editor_section = SessionEditorSection::Connection;
+        self.session_editor_open = true;
         self.confirm_delete = false;
         self.profile_message.clear();
         cx.notify();
@@ -668,6 +693,8 @@ impl AppView {
         Self::set_input_value(&self.username, &profile.username, window, cx);
         Self::set_input_value(&self.password, "", window, cx);
         self.selected_profile = Some(profile.name.clone());
+        self.session_editor_section = SessionEditorSection::Connection;
+        self.session_editor_open = true;
         self.confirm_delete = false;
         self.profile_message = format!("Loaded {}. Enter the password to connect.", profile.name);
         cx.notify();
@@ -769,7 +796,16 @@ impl AppView {
 
         self.profiles = profiles;
         self.new_profile(window, cx);
+        self.session_editor_open = false;
         self.profile_message = format!("Deleted {selected}.");
+        cx.notify();
+    }
+
+    fn cancel_session_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.password
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.confirm_delete = false;
+        self.session_editor_open = false;
         cx.notify();
     }
 
@@ -836,6 +872,7 @@ impl AppView {
                 self.split = None;
                 self.terminal_bounds.borrow_mut().clear();
                 self.active_session_id = Some(id);
+                self.session_editor_open = false;
                 self.resize_sessions(cx);
             }
             Err(error) => {
@@ -1326,6 +1363,224 @@ impl AppView {
             .into_any_element()
     }
 
+    fn session_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut navigation = div()
+            .flex()
+            .flex_col()
+            .w(px(176.))
+            .flex_shrink_0()
+            .gap(px(2.))
+            .p(px(8.))
+            .bg(rgb(0xe9edef));
+        for (index, section) in SessionEditorSection::ALL.into_iter().enumerate() {
+            let button = Button::new(("session-editor-section", index)).label(section.label());
+            let button = if self.session_editor_section == section {
+                button.primary()
+            } else {
+                button
+            };
+            navigation =
+                navigation.child(button.w_full().on_click(cx.listener(move |this, _, _, cx| {
+                    this.session_editor_section = section;
+                    cx.notify();
+                })));
+        }
+
+        let section_content = match self.session_editor_section {
+            SessionEditorSection::Connection => div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(labeled_input("Session name", &self.profile_name, false))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(10.))
+                        .child(div().flex_1().child(labeled_input("Host", &self.host, false)))
+                        .child(div().w(px(112.)).child(labeled_input("Port", &self.port, false))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(div().text_size(px(11.)).text_color(rgb(0x5b646b)).child("Protocol"))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .h(px(32.))
+                                .px(px(10.))
+                                .border_1()
+                                .border_color(rgb(0xc8ced2))
+                                .bg(rgb(0xe9edef))
+                                .text_size(px(12.))
+                                .child("SSH"),
+                        ),
+                ),
+            SessionEditorSection::Authentication => div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(labeled_input("Username", &self.username, false))
+                .child(labeled_input("Password", &self.password, true))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(0x657078))
+                        .child("Passwords are used for a connection and are never saved with host profiles."),
+                ),
+            SessionEditorSection::Security => div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(div().text_size(px(13.)).font_semibold().child("Server identity"))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(0x566168))
+                        .child("Host keys must already match an entry in the user's OpenSSH known_hosts file. Unknown and changed keys are rejected."),
+                )
+                .child(div().text_size(px(13.)).font_semibold().child("Credential handling"))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(0x566168))
+                        .child("The password field is cleared when you connect or cancel. Saved host profiles contain connection details only."),
+                ),
+        };
+
+        let mut profile_actions = div().flex().items_center().gap(px(6.));
+        if self.selected_profile.is_some() {
+            if self.confirm_delete {
+                profile_actions = profile_actions
+                    .child(
+                        Button::new("confirm-delete-profile")
+                            .label("Delete")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.delete_profile(window, cx)),
+                            ),
+                    )
+                    .child(Button::new("cancel-delete-profile").label("Keep").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.confirm_delete = false;
+                            cx.notify();
+                        }),
+                    ));
+            } else {
+                profile_actions = profile_actions.child(
+                    Button::new("delete-profile")
+                        .label("Delete")
+                        .on_click(cx.listener(|this, _, _, cx| this.request_profile_delete(cx))),
+                );
+            }
+        }
+
+        let title = if self.selected_profile.is_some() {
+            "Session Properties"
+        } else {
+            "New SSH Session"
+        };
+        div()
+            .id("session-editor-overlay")
+            .absolute()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(16.))
+            .bg(hsla(0., 0., 0., 0.42))
+            .child(
+                div()
+                    .id("session-editor")
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .max_w(px(760.))
+                    .h_full()
+                    .max_h(px(560.))
+                    .min_h_0()
+                    .border_1()
+                    .border_color(rgb(0xbfc7cc))
+                    .rounded(px(4.))
+                    .bg(rgb(0xf7f8f9))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(48.))
+                            .flex_shrink_0()
+                            .px(px(16.))
+                            .border_b_1()
+                            .border_color(rgb(0xd8dde0))
+                            .child(div().text_size(px(15.)).font_semibold().child(title))
+                            .child(Button::new("close-session-editor").label("Close").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.cancel_session_editor(window, cx);
+                                }),
+                            )),
+                    )
+                    .child(
+                        div().flex().flex_1().min_h_0().child(navigation).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .gap(px(16.))
+                                .p(px(20.))
+                                .child(
+                                    div()
+                                        .text_size(px(16.))
+                                        .font_semibold()
+                                        .child(self.session_editor_section.label()),
+                                )
+                                .child(section_content),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .h(px(60.))
+                            .flex_shrink_0()
+                            .gap(px(10.))
+                            .px(px(12.))
+                            .border_t_1()
+                            .border_color(rgb(0xd8dde0))
+                            .child(profile_actions)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(0x59636a))
+                                    .overflow_hidden()
+                                    .child(self.profile_message.clone()),
+                            )
+                            .child(
+                                Button::new("cancel-session-editor")
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel_session_editor(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("save-profile")
+                                    .label("Save")
+                                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
+                            )
+                            .child(Button::new("connect").primary().label("Connect").on_click(
+                                cx.listener(|this, _, window, cx| this.connect(window, cx)),
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn scroll_terminal(
         &mut self,
         session_id: u64,
@@ -1651,37 +1906,23 @@ impl Render for AppView {
             })
             .unwrap_or_default();
 
-        let mut actions = div().flex().items_center().gap(px(6.)).child(
-            Button::new("save-profile")
-                .label("Save")
-                .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
-        );
+        let mut toolbar_actions = div().flex().items_center().gap(px(6.));
         if self.selected_profile.is_some() {
-            if self.confirm_delete {
-                actions = actions
-                    .child(
-                        Button::new("confirm-delete-profile")
-                            .label("Confirm")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.delete_profile(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("cancel-delete-profile")
-                            .label("Cancel")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_delete = false;
-                                cx.notify();
-                            })),
-                    );
-            } else {
-                actions = actions.child(
-                    Button::new("delete-profile")
-                        .label("Delete")
-                        .on_click(cx.listener(|this, _, _, cx| this.request_profile_delete(cx))),
-                );
-            }
+            toolbar_actions = toolbar_actions.child(
+                Button::new("edit-session-profile")
+                    .label("Properties")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.session_editor_section = SessionEditorSection::Connection;
+                        this.session_editor_open = true;
+                        cx.notify();
+                    })),
+            );
         }
+        toolbar_actions = toolbar_actions.child(
+            Button::new("new-session")
+                .label("New session")
+                .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
+        );
         if let Some(session) = active_session
             && matches!(
                 session.state,
@@ -1694,19 +1935,19 @@ impl Render for AppView {
             } else {
                 "Disconnect"
             };
-            actions = actions.child(Button::new("disconnect-active").label(label).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.disconnect_session(active_id, cx);
-                }),
-            ));
+            toolbar_actions =
+                toolbar_actions.child(Button::new("disconnect-active").label(label).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.disconnect_session(active_id, cx);
+                    }),
+                ));
         }
-        actions = actions.child(Button::new("connect").primary().label("Connect").on_click(
-            cx.listener(|this, _, window, cx| {
-                this.connect(window, cx);
-            }),
-        ));
+        let workspace_title = self
+            .selected_profile
+            .clone()
+            .unwrap_or_else(|| "SSH workspace".to_owned());
 
-        div()
+        let workspace = div()
             .flex()
             .size_full()
             .bg(rgb(0xf3f5f6))
@@ -1754,58 +1995,20 @@ impl Render for AppView {
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap(px(6.))
+                            .items_center()
+                            .justify_between()
+                            .h(px(48.))
+                            .flex_shrink_0()
                             .px(px(10.))
-                            .py(px(8.))
                             .bg(rgb(0xf3f5f6))
                             .child(
                                 div()
-                                    .flex()
-                                    .items_end()
-                                    .gap(px(6.))
-                                    .child(div().w(px(150.)).child(labeled_input(
-                                        "Name",
-                                        &self.profile_name,
-                                        false,
-                                    )))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(140.))
-                                            .child(labeled_input("Host", &self.host, false)),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(76.))
-                                            .child(labeled_input("Port", &self.port, false)),
-                                    ),
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .font_semibold()
+                                    .child(workspace_title),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_end()
-                                    .gap(px(6.))
-                                    .child(div().w(px(150.)).child(labeled_input(
-                                        "Username",
-                                        &self.username,
-                                        false,
-                                    )))
-                                    .child(div().flex_1().min_w(px(130.)).child(labeled_input(
-                                        "Password",
-                                        &self.password,
-                                        true,
-                                    )))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(11.))
-                                            .text_color(rgb(0x59636a))
-                                            .child(self.profile_message.clone()),
-                                    )
-                                    .child(actions),
-                            ),
+                            .child(toolbar_actions),
                     )
                     .child(
                         div()
@@ -1839,7 +2042,12 @@ impl Render for AppView {
                                     .child(terminal_dimensions),
                             ),
                     ),
-            )
+            );
+        if self.session_editor_open {
+            workspace.child(self.session_editor(cx))
+        } else {
+            workspace
+        }
     }
 }
 
