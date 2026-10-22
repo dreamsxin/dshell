@@ -48,8 +48,10 @@ container (Docker required):
 The script uses a random temporary password and an isolated `known_hosts` file,
 then removes both the test container and temporary host-key file.
 
-See IMPLEMENTATION_STATUS.md for the current implementation boundary and the
-next-session handoff.
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current
+implementation boundary and next-session handoff. [ROADMAP.md](ROADMAP.md)
+documents the product direction, Xshell-inspired workflow priorities, and
+staged implementation and acceptance plan.
 
 ## License
 
