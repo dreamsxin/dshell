@@ -56,6 +56,203 @@ impl SshSession {
         self.mouse_position = None;
         self.scroll_remainder = 0.0;
     }
+
+    fn apply_event(&mut self, event: UiEvent) -> bool {
+        if self.state == SessionState::Disconnecting
+            && matches!(&event, UiEvent::Status(_) | UiEvent::Screen(_))
+        {
+            return false;
+        }
+        match event {
+            UiEvent::Status(status) => {
+                self.status = status;
+                self.state = SessionState::Connected;
+            }
+            UiEvent::Screen(frame) => {
+                self.frame = Some(frame);
+                self.terminal_message.clear();
+                self.state = SessionState::Connected;
+            }
+            UiEvent::Failed(error) => {
+                self.clear_terminal(
+                    error,
+                    "The SSH session ended. Verify the status and connect again.",
+                );
+                self.command_tx = None;
+                self.cancel_tx = None;
+                self.state = SessionState::Disconnected;
+            }
+            UiEvent::Disconnected => {
+                self.clear_terminal(
+                    "Disconnected",
+                    "Disconnected. Verify the host details and connect again.",
+                );
+                self.command_tx = None;
+                self.cancel_tx = None;
+                self.state = SessionState::Disconnected;
+            }
+        }
+        true
+    }
+}
+
+fn apply_session_event(sessions: &mut [SshSession], id: u64, event: UiEvent) -> bool {
+    sessions
+        .iter_mut()
+        .find(|session| session.id == id)
+        .is_some_and(|session| session.apply_event(event))
+}
+
+fn enqueue_session_request(
+    sessions: &[SshSession],
+    id: u64,
+    request: TerminalRequest,
+) -> Result<(), &'static str> {
+    let Some(session) = sessions.iter().find(|session| session.id == id) else {
+        return Err("SSH session is no longer available");
+    };
+    let Some(command_tx) = &session.command_tx else {
+        return Err("SSH session is not accepting input");
+    };
+    command_tx.try_send(request).map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => "Terminal request queue is full",
+        mpsc::error::TrySendError::Closed(_) => "SSH session is not accepting input",
+    })
+}
+
+fn remove_session(
+    sessions: &mut Vec<SshSession>,
+    active_session_id: &mut Option<u64>,
+    id: u64,
+) -> bool {
+    let Some(index) = sessions.iter().position(|session| session.id == id) else {
+        return false;
+    };
+    if let Some(cancel_tx) = &sessions[index].cancel_tx {
+        cancel_tx.send_replace(true);
+    }
+    sessions.remove(index);
+    if *active_session_id == Some(id) {
+        *active_session_id = sessions
+            .get(index)
+            .or_else(|| sessions.last())
+            .map(|session| session.id);
+    }
+    true
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::{
+        MouseTrackingMode, SessionState, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
+        UiEvent, apply_session_event, enqueue_session_request, mpsc, remove_session, watch,
+    };
+
+    fn test_session(
+        id: u64,
+    ) -> (
+        SshSession,
+        mpsc::Receiver<TerminalRequest>,
+        watch::Receiver<bool>,
+    ) {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        (
+            SshSession {
+                id,
+                title: format!("session {id}"),
+                host: "127.0.0.1".to_owned(),
+                port: 22,
+                username: "test".to_owned(),
+                status: format!("Session {id}"),
+                frame: None,
+                terminal_message: String::new(),
+                terminal_size: TerminalSize {
+                    columns: 80,
+                    rows: 24,
+                },
+                scroll_remainder: 0.0,
+                mouse_position: None,
+                command_tx: Some(command_tx),
+                cancel_tx: Some(cancel_tx),
+                state: SessionState::Connected,
+            },
+            command_rx,
+            cancel_rx,
+        )
+    }
+
+    #[test]
+    fn ssh_output_updates_only_the_target_session() {
+        let (mut first, _, _) = test_session(1);
+        first.state = SessionState::Connecting;
+        let (second, _, _) = test_session(2);
+        let mut sessions = vec![first, second];
+        let frame = TerminalFrame {
+            rows: Vec::new(),
+            selection_text: None,
+            mouse_tracking_mode: MouseTrackingMode::Disabled,
+        };
+
+        assert!(apply_session_event(
+            &mut sessions,
+            2,
+            UiEvent::Screen(frame)
+        ));
+        assert!(sessions[0].frame.is_none());
+        assert!(sessions[1].frame.is_some());
+        assert!(matches!(sessions[0].state, SessionState::Connecting));
+        assert!(matches!(sessions[1].state, SessionState::Connected));
+        assert!(!apply_session_event(
+            &mut sessions,
+            99,
+            UiEvent::Disconnected
+        ));
+    }
+
+    #[test]
+    fn terminal_input_is_enqueued_only_for_the_target_session() {
+        let (first, mut first_rx, _) = test_session(1);
+        let (second, mut second_rx, _) = test_session(2);
+        let sessions = vec![first, second];
+
+        assert!(
+            enqueue_session_request(
+                &sessions,
+                2,
+                TerminalRequest::Paste("target only".to_owned()),
+            )
+            .is_ok()
+        );
+        assert!(first_rx.try_recv().is_err());
+        assert!(matches!(
+            second_rx.try_recv(),
+            Ok(TerminalRequest::Paste(text)) if text == "target only"
+        ));
+    }
+
+    #[test]
+    fn closing_a_session_cancels_only_it_and_selects_a_neighbor() {
+        let (first, _, first_cancel_rx) = test_session(1);
+        let (second, _, second_cancel_rx) = test_session(2);
+        let (third, _, third_cancel_rx) = test_session(3);
+        let mut sessions = vec![first, second, third];
+        let mut active_session_id = Some(2);
+
+        assert!(remove_session(&mut sessions, &mut active_session_id, 2));
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(active_session_id, Some(3));
+        assert!(*second_cancel_rx.borrow());
+        assert!(!*first_cancel_rx.borrow());
+        assert!(!*third_cancel_rx.borrow());
+        assert!(!remove_session(&mut sessions, &mut active_session_id, 99));
+    }
 }
 
 struct AppView {
@@ -140,11 +337,6 @@ impl AppView {
         self.active_session_id.and_then(|id| self.session(id))
     }
 
-    fn active_session_mut(&mut self) -> Option<&mut SshSession> {
-        let id = self.active_session_id?;
-        self.session_mut(id)
-    }
-
     fn size_for_window(window: &Window) -> TerminalSize {
         let bounds = window.bounds();
         TerminalSize::for_window(
@@ -156,13 +348,20 @@ impl AppView {
     fn resize_terminal(&mut self, window: &Window, cx: &mut Context<Self>) {
         let size = Self::size_for_window(window);
         self.terminal_size = size;
+        let mut resize_session_ids = Vec::new();
         for session in &mut self.sessions {
             if session.terminal_size == size {
                 continue;
             }
             session.terminal_size = size;
-            if let Some(command_tx) = &session.command_tx
-                && let Err(error) = command_tx.try_send(TerminalRequest::Resize(size))
+            if session.command_tx.is_some() {
+                resize_session_ids.push(session.id);
+            }
+        }
+        for id in resize_session_ids {
+            if let Err(error) =
+                enqueue_session_request(&self.sessions, id, TerminalRequest::Resize(size))
+                && let Some(session) = self.session_mut(id)
             {
                 session.status = format!("Terminal resize queue is unavailable: {error}");
             }
@@ -374,60 +573,28 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             while let Some(event) = event_rx.recv().await {
                 let result = this.update(cx, |view, cx| {
-                    let Some(session) = view.session_mut(id) else {
-                        return;
-                    };
-                    if session.state == SessionState::Disconnecting
-                        && matches!(&event, UiEvent::Status(_) | UiEvent::Screen(_))
-                    {
-                        return;
+                    if apply_session_event(&mut view.sessions, id, event) {
+                        cx.notify();
                     }
-                    match event {
-                        UiEvent::Status(status) => {
-                            session.status = status;
-                            session.state = SessionState::Connected;
-                        }
-                        UiEvent::Screen(frame) => {
-                            session.frame = Some(frame);
-                            session.terminal_message.clear();
-                            session.state = SessionState::Connected;
-                        }
-                        UiEvent::Failed(error) => {
-                            session.clear_terminal(
-                                error,
-                                "The SSH session ended. Verify the status and connect again.",
-                            );
-                            session.command_tx = None;
-                            session.cancel_tx = None;
-                            session.state = SessionState::Disconnected;
-                        }
-                        UiEvent::Disconnected => {
-                            session.clear_terminal(
-                                "Disconnected",
-                                "Disconnected. Verify the host details and connect again.",
-                            );
-                            session.command_tx = None;
-                            session.cancel_tx = None;
-                            session.state = SessionState::Disconnected;
-                        }
-                    }
-                    cx.notify();
                 });
                 if result.is_err() {
                     break;
                 }
             }
             let _ = this.update(cx, |view, cx| {
-                if let Some(session) = view.session_mut(id)
-                    && session.state != SessionState::Disconnected
+                if view
+                    .session(id)
+                    .is_some_and(|session| session.state != SessionState::Disconnected)
+                    && apply_session_event(
+                        &mut view.sessions,
+                        id,
+                        UiEvent::Failed("Session event stream closed".to_owned()),
+                    )
                 {
-                    session.clear_terminal(
-                        "Session event stream closed",
-                        "The SSH session ended unexpectedly. Connect again.",
-                    );
-                    session.command_tx = None;
-                    session.cancel_tx = None;
-                    session.state = SessionState::Disconnected;
+                    if let Some(session) = view.session_mut(id) {
+                        session.terminal_message =
+                            "The SSH session ended unexpectedly. Connect again.".to_owned();
+                    }
                     cx.notify();
                 }
             });
@@ -470,21 +637,8 @@ impl AppView {
     }
 
     fn close_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.sessions.iter().position(|session| session.id == id) else {
+        if !remove_session(&mut self.sessions, &mut self.active_session_id, id) {
             return;
-        };
-        if let Some(session) = self.sessions.get(index)
-            && let Some(cancel_tx) = &session.cancel_tx
-        {
-            cancel_tx.send_replace(true);
-        }
-        self.sessions.remove(index);
-        if self.active_session_id == Some(id) {
-            self.active_session_id = self
-                .sessions
-                .get(index)
-                .or_else(|| self.sessions.last())
-                .map(|session| session.id);
         }
         if self.active_session_id.is_none() {
             self.status = "Ready".to_owned();
@@ -523,6 +677,7 @@ impl AppView {
                     cx.stop_propagation();
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                         self.send_terminal_request(
+                            session_id,
                             TerminalRequest::Paste(text),
                             "Terminal paste",
                             cx,
@@ -534,9 +689,6 @@ impl AppView {
             }
         }
 
-        let Some(session) = self.session_mut(session_id) else {
-            return;
-        };
         let key = TerminalKeyInput {
             key: event.keystroke.key.clone(),
             text: event.keystroke.key_char.clone(),
@@ -550,13 +702,12 @@ impl AppView {
             return;
         }
 
-        let Some(command_tx) = &session.command_tx else {
-            return;
-        };
-        match command_tx.try_send(TerminalRequest::Key(key)) {
+        match enqueue_session_request(&self.sessions, session_id, TerminalRequest::Key(key)) {
             Ok(()) => cx.stop_propagation(),
             Err(error) => {
-                session.status = format!("Terminal input queue is unavailable: {error}");
+                if let Some(session) = self.session_mut(session_id) {
+                    session.status = format!("Terminal input queue is unavailable: {error}");
+                }
                 cx.notify();
             }
         }
@@ -578,7 +729,10 @@ impl AppView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.terminal_focus);
-        if self.active_session().is_none_or(|session| {
+        let Some(session_id) = self.active_session_id else {
+            return;
+        };
+        if self.session(session_id).is_none_or(|session| {
             session.state != SessionState::Connected || session.frame.is_none()
         }) {
             return;
@@ -589,10 +743,11 @@ impl AppView {
         let Some(position) = self.terminal_position(event.position) else {
             return;
         };
-        if let Some(session) = self.active_session_mut() {
+        if let Some(session) = self.session_mut(session_id) {
             session.mouse_position = Some(position);
         }
         self.send_terminal_request(
+            session_id,
             TerminalRequest::Mouse(TerminalMouseEvent::Press {
                 button,
                 position,
@@ -608,8 +763,11 @@ impl AppView {
     }
 
     fn mouse_up(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
+        let Some(session_id) = self.active_session_id else {
+            return;
+        };
         if self
-            .active_session()
+            .session(session_id)
             .is_none_or(|session| session.state != SessionState::Connected)
         {
             return;
@@ -618,15 +776,16 @@ impl AppView {
             return;
         };
         let previous_position = self
-            .active_session()
+            .session(session_id)
             .and_then(|session| session.mouse_position);
         let Some(position) = self.terminal_position(event.position).or(previous_position) else {
             return;
         };
-        if let Some(session) = self.active_session_mut() {
+        if let Some(session) = self.session_mut(session_id) {
             session.mouse_position = Some(position);
         }
         self.send_terminal_request(
+            session_id,
             TerminalRequest::Mouse(TerminalMouseEvent::Release {
                 button,
                 position,
@@ -642,7 +801,10 @@ impl AppView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some(session) = self.active_session() else {
+        let Some(session_id) = self.active_session_id else {
+            return;
+        };
+        let Some(session) = self.session(session_id) else {
             return;
         };
         if session.state != SessionState::Connected {
@@ -667,15 +829,16 @@ impl AppView {
             return;
         };
         if self
-            .active_session()
+            .session(session_id)
             .is_some_and(|session| session.mouse_position == Some(position))
         {
             return;
         }
-        if let Some(session) = self.active_session_mut() {
+        if let Some(session) = self.session_mut(session_id) {
             session.mouse_position = Some(position);
         }
         self.send_terminal_request(
+            session_id,
             TerminalRequest::Mouse(TerminalMouseEvent::Move {
                 button,
                 position,
@@ -692,15 +855,15 @@ impl AppView {
 
     fn send_terminal_request(
         &mut self,
+        session_id: u64,
         request: TerminalRequest,
         action: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(session) = self.active_session_mut()
-            && let Some(command_tx) = &session.command_tx
-            && let Err(error) = command_tx.try_send(request)
-        {
-            session.status = format!("{action} queue is unavailable: {error}");
+        if let Err(error) = enqueue_session_request(&self.sessions, session_id, request) {
+            if let Some(session) = self.session_mut(session_id) {
+                session.status = format!("{action} queue is unavailable: {error}");
+            }
             cx.notify();
         }
     }
@@ -739,7 +902,7 @@ impl AppView {
                 event.modifiers.control,
             ),
         });
-        self.send_terminal_request(request, "Terminal scroll", cx);
+        self.send_terminal_request(session_id, request, "Terminal scroll", cx);
     }
 }
 
