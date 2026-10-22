@@ -102,9 +102,7 @@ Xshell 是功能和交互参照，不是逐像素复刻目标。优先覆盖高�
 2. 验证全屏终端、Unicode/IME、resize 和断连生命周期；更新自动化覆盖与实施状态。
 3. 阶段 1 验收后，先做阶段 2 的主机资料和独立多会话模型，再做可调整分屏。
 
-## 参考资料
+## SSH 参考资料
 
-- [Xshell 官方产品页](https://www.netsarang.com/en/xshell/)：会话、快速命令、标签、文件管理和可停靠面板。
-- [Xshell 8 官方手册](https://www.netsarang.com/docs/Xshell8_manual.pdf)：快速命令、状态栏、可停靠界面、文件管理和隧道面板等交互参考。
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。
 - [OpenBSD sftp(1)](https://man.openbsd.org/sftp.1)：SSH 文件传输客户端行为参考。
