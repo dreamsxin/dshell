@@ -16,15 +16,16 @@
 - ANSI 帧按颜色、粗体、斜体和下划线分组为单元格运行段，以 GPUI 原生元素绘制；SSH 输出以 16 ms 节拍合并后刷新。
 - 鼠标滚轮可浏览 alacritty_terminal 保留的历史行；向上滚动显示较早内容，向下滚动回到实时屏幕，并保留不足一行的像素滚动余量。
 - alacritty_terminal 的鼠标跟踪模式驱动远端鼠标输入：支持点击、按键拖动和全运动报告，以及 legacy、UTF-8、SGR 编码；报告模式下鼠标按下/释放/移动与滚轮转发给 SSH PTY，无报告模式保留本地左键选择和历史滚动。
+- 终端网格适配保留中文/emoji 双宽单元格和组合标记；Unicode 输入按 UTF-8 原样写入远端，终端缩放后的行列数由自动化测试覆盖。
 - 鼠标左键拖动可选择终端网格文本，选中单元格有独立高亮；`Ctrl+Shift+C` 复制非空选择，`Ctrl+Shift+V` 从系统剪贴板粘贴，并遵循远端 bracketed-paste 模式。
 - scripts/verify-hard-constraints.ps1 固化格式、类型检查、测试和依赖边界检查命令。
 - scripts/test-docker-ssh.ps1 创建临时 Ubuntu 24.04 OpenSSH 服务，以容器实际 Ed25519 公钥和隔离的临时 known_hosts 执行应用 SSH/PTY 集成测试，测试后清理容器和临时密钥文件。
 
 ## 验证记录
 
-2026-10-22，Windows/MSVC：`./scripts/verify-hard-constraints.ps1` 全部通过，包含格式检查、锁定依赖下的全目标类型检查、禁用依赖扫描及 13 项单元测试。测试覆盖键盘序列、终端尺寸、ANSI 样式/模式、滚动历史、文本选择/bracketed paste、鼠标跟踪模式与 legacy/UTF-8/SGR 编码，以及已知/未知/变更 SSH 主机密钥。
+2026-10-22，Windows/MSVC：`./scripts/verify-hard-constraints.ps1` 全部通过，包含格式检查、锁定依赖下的全目标类型检查、禁用依赖扫描及 15 项通过的单元测试（另有 1 项 Docker 专用测试由独立脚本运行）。测试覆盖键盘序列与 Unicode UTF-8 输入、双宽字符/组合标记网格宽度、终端 resize 行列、ANSI 样式/模式、滚动历史、文本选择/bracketed paste、鼠标跟踪模式与 legacy/UTF-8/SGR 编码，以及已知/未知/变更 SSH 主机密钥。
 
-`./scripts/test-docker-ssh.ps1` 已通过：连接临时 Ubuntu 24.04 SSH 服务，验证 host-key 检查、密码认证、PTY resize、终端输出与选择、粘贴输入、鼠标报告字节到达远端 PTY，以及正常退出；测试凭据使用随机值，未写入仓库，且测试不读取或更改个人 known_hosts。
+`./scripts/test-docker-ssh.ps1` 已通过：连接临时 Ubuntu 24.04 SSH 服务，验证 host-key 检查、密码认证、PTY resize（远端 `stty size` 返回 `30 100`）、终端输出与选择、粘贴输入、鼠标报告字节到达远端 PTY，以及正常退出；测试凭据使用随机值，未写入仓库，且测试不读取或更改个人 known_hosts。
 
 Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility 警告；当前不影响检查或测试通过。
 
@@ -38,4 +39,4 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 
 ## 下一段接力
 
-完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。下一步验证常见全屏终端程序、Unicode/IME、resize 和断连生命周期，并改善字素宽度与重排；阶段 1 验收后进入阶段 2 的主机资料和多会话工作区。继续遵守严格主机密钥拒绝策略和不落盘凭据约束。
+完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。下一步在 Windows 桌面烟测常见全屏终端程序、实际 Unicode 字形布局、IME/焦点和断连/重连生命周期；根据结果校准字体宽度与重排。阶段 1 验收后进入阶段 2 的主机资料和多会话工作区。继续遵守严格主机密钥拒绝策略和不落盘凭据约束。

@@ -732,6 +732,54 @@ mod tests {
     }
 
     #[test]
+    fn terminal_frame_preserves_wide_and_combining_unicode_cells() {
+        for (text, expected_width) in [("中", 2), ("🙂", 2), ("e\u{301}", 1)] {
+            let mut terminal = TerminalEmulator::new(TerminalSize {
+                columns: 8,
+                rows: 1,
+            });
+            terminal.feed(text.as_bytes());
+
+            let frame = terminal.frame();
+            let glyph = frame.rows[0]
+                .iter()
+                .find(|run| run.text.starts_with(text))
+                .expect("Unicode glyph should be present in the terminal frame");
+            assert_eq!(glyph.text, text);
+            assert_eq!(glyph.width_cells, expected_width);
+            assert_eq!(
+                frame.rows[0]
+                    .iter()
+                    .map(|run| run.width_cells)
+                    .sum::<usize>(),
+                8
+            );
+        }
+    }
+
+    #[test]
+    fn resizing_terminal_rebuilds_rows_and_columns() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 8,
+            rows: 2,
+        });
+        terminal.feed(b"abcdefghijk");
+        terminal.resize(TerminalSize {
+            columns: 5,
+            rows: 3,
+        });
+
+        let frame = terminal.frame();
+        assert_eq!(frame.rows.len(), 3);
+        assert!(
+            frame
+                .rows
+                .iter()
+                .all(|row| { row.iter().map(|run| run.width_cells).sum::<usize>() == 5 })
+        );
+    }
+
+    #[test]
     fn paste_bytes_respect_bracketed_paste_mode() {
         let mut terminal = TerminalEmulator::new(TerminalSize {
             columns: 16,
@@ -881,6 +929,10 @@ mod tests {
     #[test]
     fn key_input_encodes_text_control_and_terminal_modes() {
         assert_eq!(key("a", Some("a")).encode(false).unwrap(), b"a");
+        assert_eq!(
+            key("中", Some("中文🙂")).encode(false).unwrap(),
+            "中文🙂".as_bytes()
+        );
 
         let mut control_c = key("c", Some("c"));
         control_c.control = true;

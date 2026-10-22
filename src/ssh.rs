@@ -378,6 +378,12 @@ mod tests {
                         .await?;
                     command_tx.send(TerminalRequest::Key(enter_key())).await?;
                     tokio::time::sleep(Duration::from_millis(200)).await;
+                    command_tx
+                        .send(TerminalRequest::Paste("stty size".to_owned()))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut events, |frame| frame_text(frame).contains("30 100"))
+                        .await?;
 
                     command_tx
                         .send(TerminalRequest::Paste(
