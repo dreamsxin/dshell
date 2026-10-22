@@ -1,6 +1,8 @@
 $ErrorActionPreference = "Stop"
 
-$image = "ubuntu:24.04"
+$image = "dshell-ssh-test:ubuntu-24.04"
+$dockerContext = Join-Path $PSScriptRoot "docker-ssh"
+$dockerfile = Join-Path $dockerContext "Dockerfile"
 $containerName = "dshell-ssh-test-$([Guid]::NewGuid().ToString('N'))"
 $knownHostsPath = Join-Path $env:TEMP "$containerName-known_hosts"
 $passwordBytes = New-Object byte[] 24
@@ -11,16 +13,12 @@ $random.Dispose()
 [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
 
 try {
-    docker image inspect $image *> $null
+    docker build --tag $image --file $dockerfile $dockerContext
     if ($LASTEXITCODE -ne 0) {
-        docker pull $image
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not pull $image."
-        }
+        throw "Could not build the cached Ubuntu SSH test image."
     }
 
-    $entrypoint = 'printf "#!/bin/sh\nexit 101\n" > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && apt-get update -o Acquire::Retries=3 && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server vim-tiny && rm /usr/sbin/policy-rc.d && mkdir -p /run/sshd && useradd -m -s /bin/bash dshelltest && echo "dshelltest:$DSHELL_TEST_PASSWORD" | chpasswd && ssh-keygen -A && printf "\nPasswordAuthentication yes\nPermitRootLogin no\n" >> /etc/ssh/sshd_config && exec /usr/sbin/sshd -D -e'
-    docker run --detach --name $containerName --publish 127.0.0.1::22 --env "DSHELL_TEST_PASSWORD=$password" $image bash -lc $entrypoint | Out-Null
+    docker run --detach --name $containerName --publish 127.0.0.1::22 --env "DSHELL_TEST_PASSWORD=$password" $image | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Could not start the Ubuntu SSH container."
     }

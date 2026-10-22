@@ -27,6 +27,11 @@ Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
 active session. Remote exit and connection failure clear the terminal view so a
 new connection starts with a clean session.
 
+Saved hosts can be searched, loaded, updated, and deleted from the left panel.
+The profile file stores only the display name, host, port, and username. On
+Windows it is stored at `%APPDATA%\dshell\hosts.json`; passwords are requested
+for each connection and are never written to the profile file.
+
 ## Test and Verify
 
 Run the unit tests directly:
@@ -51,9 +56,12 @@ container (Docker required):
 .\scripts\test-docker-ssh.ps1
 ```
 
-The script uses a random temporary password and an isolated `known_hosts` file,
-then removes both the test container and temporary host-key file. The SSH/PTY
-round trip also exercises Vim's full-screen buffer and Unicode input/save/readback.
+The script builds a local `dshell-ssh-test:ubuntu-24.04` image with OpenSSH,
+Vim, tmux, and htop. Docker reuses the package-install layer on later runs, so
+`apt-get update` runs again only when that build layer is invalidated. Each test
+uses a random temporary password and isolated `known_hosts` file, then removes
+the container and temporary host-key file. The SSH/PTY round trip exercises
+Vim's full-screen buffer and Unicode input/save/readback.
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current
 implementation boundary and next-session handoff. [ROADMAP.md](ROADMAP.md)

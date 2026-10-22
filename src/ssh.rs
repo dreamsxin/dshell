@@ -480,7 +480,9 @@ mod tests {
                             rows: 30,
                         }))
                         .await?;
-                    next_screen(&mut events, |_| true).await?;
+                    next_screen(&mut events, |_| true)
+                        .await
+                        .context("waiting for the initial terminal screen")?;
 
                     command_tx
                         .send(TerminalRequest::Paste("stty -echo".to_owned()))
@@ -492,7 +494,8 @@ mod tests {
                         .await?;
                     command_tx.send(TerminalRequest::Key(enter_key())).await?;
                     next_screen(&mut events, |frame| frame_text(frame).contains("30 100"))
-                        .await?;
+                        .await
+                        .context("waiting for the resized terminal dimensions")?;
 
                     command_tx
                         .send(TerminalRequest::Paste(
@@ -503,7 +506,8 @@ mod tests {
                     let ready = next_screen(&mut events, |frame| {
                         frame_text(frame).contains("DSHELL_SSH_READY")
                     })
-                    .await?;
+                    .await
+                    .context("waiting for the shell command marker")?;
                     let position = find_text(&ready, "DSHELL_SSH_READY")
                         .context("SSH output marker was not found in the terminal grid")?;
                     command_tx
@@ -533,7 +537,8 @@ mod tests {
                             .as_deref()
                             .is_some_and(|text| text.contains("DSHELL_SSH_READY"))
                     })
-                    .await?;
+                    .await
+                    .context("waiting for terminal text selection")?;
 
                     command_tx
                         .send(TerminalRequest::Paste(
@@ -545,7 +550,8 @@ mod tests {
                     next_screen(&mut events, |frame| {
                         frame.mouse_tracking_mode == crate::terminal::MouseTrackingMode::Click
                     })
-                    .await?;
+                    .await
+                    .context("waiting for click mouse tracking mode")?;
                     command_tx
                         .send(TerminalRequest::Mouse(
                             crate::terminal::TerminalMouseEvent::Press {
@@ -559,7 +565,8 @@ mod tests {
                         frame.mouse_tracking_mode == crate::terminal::MouseTrackingMode::Disabled
                             && frame_text(frame).contains("1b 5b 4d 20 27 26")
                     })
-                    .await?;
+                    .await
+                    .context("waiting for the terminal mouse report")?;
 
                     command_tx
                         .send(TerminalRequest::Paste(
@@ -570,7 +577,21 @@ mod tests {
                     next_screen(&mut events, |frame| {
                         frame_text(frame).contains("DSHELL_PASTE_OK")
                     })
-                    .await?;
+                    .await
+                    .context("waiting for the pasted shell command marker")?;
+
+                    command_tx
+                        .send(TerminalRequest::Paste(
+                            "export PS1='DSHELL_SSH_PROMPT> '; printf 'DSHELL_SSH_PROMPT_READY\\n'"
+                                .to_owned(),
+                        ))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut events, |frame| {
+                        frame_text(frame).contains("DSHELL_SSH_PROMPT_READY")
+                    })
+                    .await
+                    .context("waiting for the test shell prompt setup")?;
 
                     let vim_text = "DSHELL_VIM_中文🙂e\u{301}";
                     command_tx
@@ -580,9 +601,11 @@ mod tests {
                         .await?;
                     command_tx.send(TerminalRequest::Key(enter_key())).await?;
                     next_screen(&mut events, |frame| {
-                        frame_text(frame).contains("[New File]")
+                        let text = frame_text(frame);
+                        text.contains("[New File]") || text.contains("[New]")
                     })
-                    .await?;
+                    .await
+                    .context("waiting for Vim to open the new file")?;
                     command_tx
                         .send(TerminalRequest::Key(text_key("i")))
                         .await?;
@@ -601,11 +624,17 @@ mod tests {
                         }))
                         .await?;
                     next_screen(&mut events, |frame| frame_text(frame).contains(vim_text))
-                        .await?;
+                        .await
+                        .context("waiting for Vim to display Unicode text")?;
                     command_tx
                         .send(TerminalRequest::Key(text_key(":wq")))
                         .await?;
                     command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut events, |frame| {
+                        frame_text(frame).contains("DSHELL_SSH_PROMPT> ")
+                    })
+                    .await
+                    .context("waiting for the shell prompt after Vim exits")?;
                     command_tx
                         .send(TerminalRequest::Paste(
                             "cat /tmp/dshell-vim-smoke; printf '\\nDSHELL_VIM_READBACK_DONE\\n'"
@@ -613,11 +642,15 @@ mod tests {
                         ))
                         .await?;
                     command_tx.send(TerminalRequest::Key(enter_key())).await?;
-                    next_screen(&mut events, |frame| {
-                        let text = frame_text(frame);
-                        text.contains(vim_text) && text.contains("DSHELL_VIM_READBACK_DONE")
+                    let readback = next_screen(&mut events, |frame| {
+                        frame_text(frame).contains("DSHELL_VIM_READBACK_DONE")
                     })
-                    .await?;
+                    .await
+                    .context("waiting for Vim file readback")?;
+                    let readback_text = frame_text(&readback);
+                    if !readback_text.contains(vim_text) {
+                        bail!("Vim file readback did not preserve Unicode text; screen:\n{readback_text}");
+                    }
 
                     command_tx
                         .send(TerminalRequest::Paste("exit".to_owned()))
@@ -748,18 +781,27 @@ mod tests {
         events: &mut mpsc::Receiver<UiEvent>,
         matches: impl Fn(&TerminalFrame) -> bool,
     ) -> Result<TerminalFrame> {
+        let mut last_screen = None;
         loop {
-            match timeout(Duration::from_secs(20), events.recv())
-                .await
-                .context("timed out waiting for terminal output")?
-                .context("SSH event stream closed while waiting for terminal output")?
-            {
+            let event = match timeout(Duration::from_secs(20), events.recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => bail!("SSH event stream closed while waiting for terminal output"),
+                Err(_) => {
+                    let screen = last_screen
+                        .as_ref()
+                        .map(frame_text)
+                        .unwrap_or_else(|| "<no terminal screen received>".to_owned());
+                    bail!("timed out waiting for terminal output; last screen:\n{screen}");
+                }
+            };
+            match event {
                 UiEvent::Screen(frame) if matches(&frame) => return Ok(frame),
+                UiEvent::Screen(frame) => last_screen = Some(frame),
                 UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                 UiEvent::Disconnected => {
                     bail!("SSH disconnected while waiting for terminal output")
                 }
-                UiEvent::Status(_) | UiEvent::Screen(_) => {}
+                UiEvent::Status(_) => {}
             }
         }
     }

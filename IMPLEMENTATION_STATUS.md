@@ -2,7 +2,7 @@
 
 ## 当前切片
 
-从空仓库开始实现附件中的 GPUI 原生路线。当前交付是阶段一的交互终端切片：桌面连接表单、严格 SSH 主机密钥校验、远端 PTY shell、键盘输入映射、窗口尺寸同步、ANSI 样式网格、滚动缓冲区浏览、鼠标文本选择和系统剪贴板复制/粘贴。
+从空仓库开始实现 GPUI 原生路线。阶段一核心实现已落实：严格 SSH 主机密钥校验、远端 PTY shell、键盘输入映射、窗口尺寸同步、ANSI 样式网格、滚动缓冲区浏览、鼠标文本选择和系统剪贴板复制/粘贴；Windows 桌面人工验收仍待隔离输入环境。阶段二开始交付主机资料工作区：可搜索、保存、载入、更新和删除主机资料，终端仍保持单活动会话。
 
 ## 已落实
 
@@ -19,18 +19,20 @@
 - 终端网格适配保留中文/emoji 双宽单元格和组合标记；Unicode 输入按 UTF-8 原样写入远端，终端缩放后的行列数由自动化测试覆盖。
 - 会话状态明确区分连接中、已连接、断开中和已断开；连接期间可取消握手，已连接会话可主动断开，远端退出/连接失败/事件流关闭会清空旧终端帧。应用释放取消发送端时，SSH 任务会在握手或会话循环中收尾。
 - 鼠标左键拖动可选择终端网格文本，选中单元格有独立高亮；`Ctrl+Shift+C` 复制非空选择，`Ctrl+Shift+V` 从系统剪贴板粘贴，并遵循远端 bracketed-paste 模式。
+- 左侧主机栏可按名称、用户名、地址和端口搜索资料，并新增、载入、更新或确认删除；连接状态、资料表单和终端分区显示。编辑资料时必须先断开活动 SSH 会话。
+- 主机资料写入用户配置目录的 `dshell/hosts.json`，只包含名称、主机、端口和用户名；密码不进入持久化结构。资料文件损坏或不可读时显示错误，并阻止覆盖保存。
 - scripts/verify-hard-constraints.ps1 固化格式、类型检查、测试和依赖边界检查命令。
-- scripts/test-docker-ssh.ps1 创建临时 Ubuntu 24.04 OpenSSH 服务与 vim-tiny，以容器实际 Ed25519 公钥和隔离的临时 known_hosts 执行应用 SSH/PTY 集成测试，覆盖终端往返与 Vim 中 Unicode 文本输入、保存、shell 读回及会话断开，测试后清理容器和临时密钥文件。
+- scripts/test-docker-ssh.ps1 构建本地可缓存 Ubuntu 24.04 SSH 测试镜像，包含 OpenSSH、Vim、tmux、htop；固定软件包索引和安装留在 Docker build layer，重复运行可复用。容器仍临时创建，以随机密码、实际 Ed25519 公钥和隔离的临时 known_hosts 执行 SSH/PTY 集成测试，结束后清理容器和临时密钥文件。
 
 ## 验证记录
 
-2026-10-22，Windows/MSVC：`./scripts/verify-hard-constraints.ps1` 全部通过，包含格式检查、锁定依赖下的全目标类型检查、禁用依赖扫描及 17 项通过的单元测试（另有 2 项 Docker 专用测试由独立脚本运行）。测试覆盖握手取消/取消发送端释放、键盘序列与 Unicode UTF-8 输入、双宽字符/组合标记网格宽度、终端 resize 行列、ANSI 样式/模式、滚动历史、文本选择/bracketed paste、鼠标跟踪模式与 legacy/UTF-8/SGR 编码，以及已知/未知/变更 SSH 主机密钥。
+2026-10-22，Windows/MSVC：`./scripts/verify-hard-constraints.ps1` 全部通过，包含格式检查、锁定依赖下的全目标类型检查、禁用依赖扫描及 20 项通过的单元测试（另有 2 项 Docker 专用测试由独立脚本运行）。新增主机资料 JSON 读写、空文件和重复名称测试；终端测试覆盖握手取消、键盘序列、Unicode 字素宽度、resize、ANSI、滚动、选择/粘贴、鼠标协议和主机密钥拒绝路径。
 
-旧版 `./scripts/test-docker-ssh.ps1` 已通过：连接临时 Ubuntu 24.04 SSH 服务，验证 host-key 检查、密码认证、PTY resize（远端 `stty size` 返回 `30 100`）、终端输出与选择、粘贴输入、鼠标报告字节到达远端 PTY、远端 `exit` 和用户主动断开。新增 vim-tiny 全屏 Unicode 自动回归后重跑未能进入测试阶段：Ubuntu 包索引请求返回 HTTP 502，容器启动脚本现会尽早报告退出和容器日志；该场景尚未验证。测试凭据使用随机值，未写入仓库，且测试不读取或更改个人 known_hosts。
+`./scripts/test-docker-ssh.ps1` 已连续通过两次。第一次构建可缓存的 Ubuntu 24.04 镜像，下载包索引并安装 OpenSSH、Vim、tmux、htop；两项 Docker SSH 测试均通过，覆盖 known_hosts 校验、密码认证、PTY resize（`stty size` 返回 `30 100`）、终端选择/粘贴/鼠标报告、Vim 全屏 Unicode 输入保存与 shell 读回，以及正常退出和主动断开。第二次运行耗时约 4 秒，Docker 日志中包安装层显示 `CACHED`，没有再次更新索引或下载软件包。测试使用随机密码和独立的临时 known_hosts，测试容器及临时密钥文件均清理。
 
 Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility 警告；当前不影响检查或测试通过。
 
-2026-10-22，Windows 桌面烟测尝试：临时 Ubuntu 24.04 SSH 容器和 dshell 窗口均成功启动，SSH 主机密钥保存在隔离的临时 `USERPROFILE/.ssh/known_hosts` 中，个人 known_hosts 未修改。当前桌面自动化环境禁用了原生窗口控制，无法实际操作窗口。自动化 Vim/Unicode PTY 回归已添加代码但因包源 HTTP 502 未验证；tmux/htop、Unicode 字形像素对齐及 IME/焦点交互仍待完成。
+2026-10-22，Windows 桌面烟测尝试：虚拟桌面只隔离窗口，不隔离指针和键盘；发现输入仍与用户共享后已停止桌面操作。个人 known_hosts 未修改。应用界面的实际像素布局、tmux/htop 全屏行为、Unicode 字形对齐及 IME/焦点交互仍待人工烟测。
 
 ## 当前限制
 
@@ -38,8 +40,8 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 - 当前通过 GPUI flex 元素绘制样式化网格，尚未实现自定义 `TerminalElement`、字体 shaping、精确字素宽度/重排或渲染性能优化。
 - 首期只接入密码认证；密钥/Agent 认证、SFTP、隧道、会话存储和录制尚未实现。
 - 首次连接不会弹出信任确认；用户需先通过独立可信渠道验证服务器指纹并写入 OpenSSH known_hosts。
-- 当前只有单会话视图；Windows 桌面中的真实 IME/焦点、全屏程序和 Unicode 字形像素对齐尚未人工烟测。
+- 当前只有单活动会话；多会话标签、分屏、分组、收藏和最近连接尚未实现。Windows 桌面中的真实 IME/焦点、全屏程序和 Unicode 字形像素对齐尚未人工烟测；虚拟桌面仍共享鼠标和键盘，不能作为隔离烟测环境。
 
 ## 下一段接力
 
-完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。下一步在 Ubuntu 包源恢复后运行 Docker SSH 回归，验证 vim 全屏 Unicode PTY 往返；之后在 Windows 桌面烟测 vim、tmux、htop、实际 Unicode 字形布局及 IME/焦点交互，并据此校准字体宽度与重排。阶段 1 桌面验收后进入阶段 2 的主机资料和多会话工作区。继续遵守严格主机密钥拒绝策略和不落盘凭据约束。
+完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。下一段先实现彼此独立的多会话标签与 SSH/终端状态，再做分屏；分组、收藏、最近连接仍未完成。Windows GUI 烟测只在真正隔离的交互环境可用后进行，继续遵守严格主机密钥拒绝策略和不落盘凭据约束。

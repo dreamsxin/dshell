@@ -1712,6 +1712,8 @@ dependencies = [
  "gpui",
  "gpui-component",
  "russh",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "zeroize",
