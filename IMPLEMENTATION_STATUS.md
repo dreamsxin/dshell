@@ -30,6 +30,8 @@
 
 Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility 警告；当前不影响检查或测试通过。
 
+2026-10-22，Windows 桌面烟测尝试：临时 Ubuntu 24.04 SSH 容器和 dshell 窗口均成功启动，SSH 主机密钥保存在隔离的临时 `USERPROFILE/.ssh/known_hosts` 中，个人 known_hosts 未修改。当前桌面自动化环境禁用了原生窗口控制，无法实际操作窗口；临时容器仅安装了 `vim-tiny`，tmux/htop 尚未验证。容器和应用进程已清理，vim、tmux、htop、Unicode 字形像素对齐及 IME/焦点交互仍待 Windows 桌面人工烟测。
+
 ## 当前限制
 
 - 键盘映射覆盖常见按键和修饰键，但尚未验证完整 IME 组合输入；文本选择仍按字符范围处理，终端图像协议未实现。
