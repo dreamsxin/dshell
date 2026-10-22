@@ -8,6 +8,10 @@ use gpui_component::{
     input::{InputState, TextInput},
 };
 use ssh::{ConnectionSpec, UiEvent};
+use terminal::{
+    CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalFrame, TerminalKeyInput, TerminalRequest, TerminalRun,
+    TerminalSize,
+};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
@@ -16,10 +20,13 @@ struct AppView {
     port: Entity<InputState>,
     username: Entity<InputState>,
     password: Entity<InputState>,
-    command: Entity<InputState>,
     status: String,
-    screen: String,
-    command_tx: Option<mpsc::Sender<String>>,
+    frame: Option<TerminalFrame>,
+    terminal_message: String,
+    terminal_size: TerminalSize,
+    terminal_focus: FocusHandle,
+    command_tx: Option<mpsc::Sender<TerminalRequest>>,
+    _bounds_subscription: Subscription,
 }
 
 impl AppView {
@@ -29,18 +36,44 @@ impl AppView {
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("user"));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
         password.update(cx, |state, cx| state.set_masked(true, window, cx));
-        let command = cx.new(|cx| InputState::new(window, cx).placeholder("Enter a command"));
+        let terminal_size = Self::size_for_window(window);
+        let bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
+            this.resize_terminal(window, cx);
+        });
 
         Self {
             host,
             port,
             username,
             password,
-            command,
             status: "Disconnected".to_owned(),
-            screen: "Connect to a server with a verified host key.".to_owned(),
+            frame: None,
+            terminal_message: "Connect to a server with a verified host key.".to_owned(),
+            terminal_size,
+            terminal_focus: cx.focus_handle(),
             command_tx: None,
+            _bounds_subscription: bounds_subscription,
         }
+    }
+
+    fn size_for_window(window: &Window) -> TerminalSize {
+        let bounds = window.bounds();
+        TerminalSize::for_window(bounds.size.width / px(1.0), bounds.size.height / px(1.0))
+    }
+
+    fn resize_terminal(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let size = Self::size_for_window(window);
+        if size == self.terminal_size {
+            return;
+        }
+
+        self.terminal_size = size;
+        if let Some(command_tx) = &self.command_tx
+            && let Err(error) = command_tx.try_send(TerminalRequest::Resize(size))
+        {
+            self.status = format!("Terminal resize queue is unavailable: {error}");
+        }
+        cx.notify();
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -72,12 +105,14 @@ impl AppView {
         }
 
         self.status = format!("Checking host key and connecting to {host}:{port}...");
-        self.screen.clear();
+        self.frame = None;
+        self.terminal_message.clear();
         let spec = ConnectionSpec {
             host,
             port,
             username,
             password,
+            terminal_size: self.terminal_size,
         };
         let (event_tx, mut event_rx) = mpsc::channel(16);
         match ssh::spawn_connection(spec, event_tx) {
@@ -94,7 +129,7 @@ impl AppView {
                 let result = this.update(cx, |view, cx| {
                     match event {
                         UiEvent::Status(status) => view.status = status,
-                        UiEvent::Screen(screen) => view.screen = screen,
+                        UiEvent::Screen(frame) => view.frame = Some(frame),
                         UiEvent::Failed(error) => {
                             view.status = error;
                             view.command_tx = None;
@@ -115,30 +150,92 @@ impl AppView {
         cx.notify();
     }
 
-    fn send_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn send_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(command_tx) = &self.command_tx else {
-            self.status = "Connect before sending a command.".to_owned();
-            cx.notify();
             return;
         };
-        let mut command = self.command.read(cx).value().to_string();
-        if command.is_empty() {
+        let modifiers = event.keystroke.modifiers;
+        let key = TerminalKeyInput {
+            key: event.keystroke.key.clone(),
+            text: event.keystroke.key_char.clone(),
+            control: modifiers.control,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+            platform: modifiers.platform,
+            function: modifiers.function,
+        };
+        if key.encode(false).is_none() {
             return;
         }
-        command.push('\r');
-        match command_tx.try_send(command) {
-            Ok(()) => {
-                self.command
-                    .update(cx, |state, cx| state.set_value("", window, cx));
+
+        match command_tx.try_send(TerminalRequest::Key(key)) {
+            Ok(()) => cx.stop_propagation(),
+            Err(error) => {
+                self.status = format!("Terminal input queue is unavailable: {error}");
+                cx.notify();
             }
-            Err(error) => self.status = format!("Input queue is unavailable: {error}"),
         }
-        cx.notify();
     }
+}
+
+impl Focusable for AppView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.terminal_focus.clone()
+    }
+}
+
+fn render_terminal_run(run: &TerminalRun) -> impl IntoElement {
+    let mut cell_run = div()
+        .flex_shrink_0()
+        .w(px(CELL_WIDTH_PX * run.width_cells as f32))
+        .h(px(CELL_HEIGHT_PX))
+        .font_family("monospace")
+        .text_size(px(13.))
+        .text_color(rgb(run.foreground))
+        .bg(rgb(run.background));
+    if run.bold {
+        cell_run = cell_run.font_weight(FontWeight::BOLD);
+    }
+    if run.italic {
+        cell_run = cell_run.italic();
+    }
+    if run.underline {
+        cell_run = cell_run.underline();
+    }
+    cell_run.child(run.text.clone())
 }
 
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut terminal_view = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .font_family("monospace")
+            .text_size(px(13.))
+            .on_key_down(cx.listener(|this, event, _, cx| this.send_key(event, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    window.focus(&this.terminal_focus);
+                }),
+            );
+
+        if let Some(frame) = &self.frame {
+            let mut grid = div().flex().flex_col().flex_1().min_h_0();
+            for row in &frame.rows {
+                let mut rendered_row = div().flex().h(px(CELL_HEIGHT_PX)).flex_shrink_0();
+                for run in row {
+                    rendered_row = rendered_row.child(render_terminal_run(run));
+                }
+                grid = grid.child(rendered_row);
+            }
+            terminal_view = terminal_view.child(grid);
+        } else {
+            terminal_view = terminal_view.child(self.terminal_message.clone());
+        }
+
         div()
             .flex()
             .flex_col()
@@ -160,12 +257,14 @@ impl Render for AppView {
                     .flex()
                     .items_end()
                     .gap(px(8.))
+                    .h(px(48.))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .w(px(240.))
+                            .flex_1()
+                            .min_w(px(160.))
                             .child("Host")
                             .child(TextInput::new(&self.host)),
                     )
@@ -174,7 +273,7 @@ impl Render for AppView {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .w(px(76.))
+                            .w(px(72.))
                             .child("Port")
                             .child(TextInput::new(&self.port)),
                     )
@@ -183,7 +282,8 @@ impl Render for AppView {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .w(px(150.))
+                            .flex_1()
+                            .min_w(px(110.))
                             .child("User")
                             .child(TextInput::new(&self.username)),
                     )
@@ -192,7 +292,8 @@ impl Render for AppView {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .w(px(180.))
+                            .flex_1()
+                            .min_w(px(110.))
                             .child("Password")
                             .child(TextInput::new(&self.password).mask_toggle()),
                     )
@@ -208,29 +309,9 @@ impl Render for AppView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .gap(px(8.))
                     .bg(rgb(0x0b0f13))
                     .p(px(12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .font_family("monospace")
-                            .text_size(px(13.))
-                            .child(self.screen.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(div().flex_1().child(TextInput::new(&self.command)))
-                            .child(Button::new("send").label("Send").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.send_command(window, cx);
-                                },
-                            ))),
-                    ),
+                    .child(terminal_view.track_focus(&self.terminal_focus).size_full()),
             )
     }
 }

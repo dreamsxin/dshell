@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     thread,
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -11,21 +12,25 @@ use russh::{
     client::{self, AuthResult, Handler},
     keys::{PublicKey, PublicKeyOrCertificate, check_known_hosts_path},
 };
-use tokio::sync::mpsc;
+use tokio::{
+    sync::mpsc,
+    time::{MissedTickBehavior, interval},
+};
 use zeroize::Zeroizing;
 
-use crate::terminal::TerminalEmulator;
+use crate::terminal::{TerminalEmulator, TerminalFrame, TerminalRequest, TerminalSize};
 
 pub struct ConnectionSpec {
     pub host: String,
     pub port: u16,
     pub username: String,
     pub password: Zeroizing<String>,
+    pub terminal_size: TerminalSize,
 }
 
 pub enum UiEvent {
     Status(String),
-    Screen(String),
+    Screen(TerminalFrame),
     Failed(String),
     Disconnected,
 }
@@ -80,8 +85,8 @@ fn is_known_host_key(host: &str, port: u16, key: &PublicKey, path: &Path) -> Res
 pub fn spawn_connection(
     spec: ConnectionSpec,
     events: mpsc::Sender<UiEvent>,
-) -> Result<mpsc::Sender<String>> {
-    let (command_tx, command_rx) = mpsc::channel(32);
+) -> Result<mpsc::Sender<TerminalRequest>> {
+    let (command_tx, command_rx) = mpsc::channel(128);
     let error_events = events.clone();
 
     thread::Builder::new()
@@ -112,7 +117,7 @@ pub fn spawn_connection(
 
 async fn run_connection(
     spec: ConnectionSpec,
-    mut commands: mpsc::Receiver<String>,
+    mut commands: mpsc::Receiver<TerminalRequest>,
     events: mpsc::Sender<UiEvent>,
 ) -> Result<()> {
     let ConnectionSpec {
@@ -120,6 +125,7 @@ async fn run_connection(
         port,
         username,
         mut password,
+        terminal_size,
     } = spec;
     let handler = KnownHostsHandler::new(host.clone(), port)?;
     let config = Arc::new(client::Config::default());
@@ -138,7 +144,15 @@ async fn run_connection(
 
     let channel = session.channel_open_session().await?;
     channel
-        .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+        .request_pty(
+            true,
+            "xterm-256color",
+            terminal_size.columns.into(),
+            terminal_size.rows.into(),
+            u32::from(terminal_size.columns) * 8,
+            u32::from(terminal_size.rows) * 18,
+            &[],
+        )
         .await?;
     channel.request_shell(true).await?;
     events
@@ -150,26 +164,48 @@ async fn run_connection(
         .context("UI closed while connecting")?;
 
     let (mut reader, writer) = channel.split();
-    let mut terminal = TerminalEmulator::new();
+    let mut terminal = TerminalEmulator::new(terminal_size);
+    let mut screen_dirty = false;
+    let mut render_tick = interval(Duration::from_millis(16));
+    render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            command = commands.recv() => {
-                match command {
-                    Some(command) => writer.data_bytes(command.into_bytes()).await?,
+            request = commands.recv() => {
+                match request {
+                    Some(TerminalRequest::Key(key)) => {
+                        if let Some(bytes) = key.encode(terminal.application_cursor_mode()) {
+                            writer.data_bytes(bytes).await?;
+                        }
+                    }
+                    Some(TerminalRequest::Resize(size)) => {
+                        terminal.resize(size);
+                        writer.window_change(
+                            size.columns.into(),
+                            size.rows.into(),
+                            u32::from(size.columns) * 8,
+                            u32::from(size.rows) * 18,
+                        ).await?;
+                        events.send(UiEvent::Screen(terminal.frame())).await
+                            .context("UI closed during terminal resize")?;
+                        screen_dirty = false;
+                    }
                     None => break,
                 }
+            }
+            _ = render_tick.tick(), if screen_dirty => {
+                events.send(UiEvent::Screen(terminal.frame())).await
+                    .context("UI closed during terminal output")?;
+                screen_dirty = false;
             }
             message = reader.wait() => {
                 match message {
                     Some(ChannelMsg::Data { data }) => {
                         terminal.feed(&data);
-                        events.send(UiEvent::Screen(terminal.snapshot())).await
-                            .context("UI closed during terminal output")?;
+                        screen_dirty = true;
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
                         terminal.feed(&data);
-                        events.send(UiEvent::Screen(terminal.snapshot())).await
-                            .context("UI closed during terminal output")?;
+                        screen_dirty = true;
                     }
                     Some(ChannelMsg::ExitStatus { .. }) | None => break,
                     Some(_) => {}
