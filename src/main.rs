@@ -2,13 +2,14 @@ mod profiles;
 mod ssh;
 mod terminal;
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use gpui::{StatefulInteractiveElement as _, prelude::*, *};
+use gpui::{AnyElement, StatefulInteractiveElement as _, prelude::*, *};
 use gpui_component::{
-    Root,
+    PixelsExt, Root,
     button::{Button, ButtonVariants},
     input::{InputState, TextInput},
+    resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
 };
 use profiles::{HostProfile, ProfileStore};
 use ssh::{ConnectionSpec, UiEvent};
@@ -22,6 +23,7 @@ use zeroize::Zeroizing;
 
 const HOSTS_SIDEBAR_WIDTH_PX: f32 = 228.0;
 const EXTRA_WORKSPACE_CHROME_PX: f32 = 172.0;
+const TERMINAL_PANEL_HEADER_PX: f32 = 28.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionState {
@@ -29,6 +31,83 @@ enum SessionState {
     Connecting,
     Connected,
     Disconnecting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitOrientation {
+    SideBySide,
+    Stacked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SessionSplit {
+    first_session_id: u64,
+    second_session_id: u64,
+    orientation: SplitOrientation,
+}
+
+impl SessionSplit {
+    fn contains(self, session_id: u64) -> bool {
+        self.first_session_id == session_id || self.second_session_id == session_id
+    }
+}
+
+fn split_panel_terminal_size(
+    full_size: TerminalSize,
+    orientation: SplitOrientation,
+    panel_extent: Option<f32>,
+    panel_index: usize,
+) -> TerminalSize {
+    match orientation {
+        SplitOrientation::SideBySide => {
+            let columns = panel_extent.map_or_else(
+                || {
+                    if panel_index == 0 {
+                        full_size.columns.saturating_add(1) / 2
+                    } else {
+                        (full_size.columns / 2).max(1)
+                    }
+                },
+                |width| (width / CELL_WIDTH_PX).floor().clamp(1.0, 240.0) as u16,
+            );
+            TerminalSize {
+                columns,
+                rows: full_size.rows,
+            }
+        }
+        SplitOrientation::Stacked => {
+            let rows = panel_extent.map_or_else(
+                || {
+                    if panel_index == 0 {
+                        full_size.rows.saturating_add(1) / 2
+                    } else {
+                        (full_size.rows / 2).max(1)
+                    }
+                },
+                |height| {
+                    ((height - TERMINAL_PANEL_HEADER_PX).max(0.0) / CELL_HEIGHT_PX)
+                        .floor()
+                        .clamp(1.0, 120.0) as u16
+                },
+            );
+            TerminalSize {
+                columns: full_size.columns,
+                rows,
+            }
+        }
+    }
+}
+
+fn session_terminal_size_for_split(
+    session_id: u64,
+    full_size: TerminalSize,
+    split_sizes: Option<(SessionSplit, TerminalSize, TerminalSize)>,
+) -> TerminalSize {
+    match split_sizes {
+        Some((split, first, _)) if session_id == split.first_session_id => first,
+        Some((split, _, second)) if session_id == split.second_session_id => second,
+        _ => full_size,
+    }
 }
 
 struct SshSession {
@@ -144,8 +223,9 @@ fn remove_session(
 #[cfg(test)]
 mod session_tests {
     use super::{
-        MouseTrackingMode, SessionState, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
-        UiEvent, apply_session_event, enqueue_session_request, mpsc, remove_session, watch,
+        MouseTrackingMode, SessionSplit, SessionState, SplitOrientation, SshSession, TerminalFrame,
+        TerminalRequest, TerminalSize, UiEvent, apply_session_event, enqueue_session_request, mpsc,
+        remove_session, session_terminal_size_for_split, split_panel_terminal_size, watch,
     };
 
     fn test_session(
@@ -253,6 +333,99 @@ mod session_tests {
         assert!(!*third_cancel_rx.borrow());
         assert!(!remove_session(&mut sessions, &mut active_session_id, 99));
     }
+
+    #[test]
+    fn split_resize_updates_the_axis_dimension_for_each_pane() {
+        let full_size = TerminalSize {
+            columns: 100,
+            rows: 40,
+        };
+
+        let left =
+            split_panel_terminal_size(full_size, SplitOrientation::SideBySide, Some(400.0), 0);
+        let right =
+            split_panel_terminal_size(full_size, SplitOrientation::SideBySide, Some(320.0), 1);
+        assert_eq!(
+            left,
+            TerminalSize {
+                columns: 50,
+                rows: 40
+            }
+        );
+        assert_eq!(
+            right,
+            TerminalSize {
+                columns: 40,
+                rows: 40
+            }
+        );
+
+        let top = split_panel_terminal_size(full_size, SplitOrientation::Stacked, Some(208.0), 0);
+        let bottom =
+            split_panel_terminal_size(full_size, SplitOrientation::Stacked, Some(190.0), 1);
+        assert_eq!(
+            top,
+            TerminalSize {
+                columns: 100,
+                rows: 10
+            }
+        );
+        assert_eq!(
+            bottom,
+            TerminalSize {
+                columns: 100,
+                rows: 9
+            }
+        );
+    }
+
+    #[test]
+    fn split_layout_contains_exactly_its_two_sessions() {
+        let split = SessionSplit {
+            first_session_id: 11,
+            second_session_id: 22,
+            orientation: SplitOrientation::SideBySide,
+        };
+
+        assert!(split.contains(11));
+        assert!(split.contains(22));
+        assert!(!split.contains(33));
+    }
+
+    #[test]
+    fn split_resize_is_scoped_to_its_two_sessions() {
+        let full_size = TerminalSize {
+            columns: 100,
+            rows: 40,
+        };
+        let first_size = TerminalSize {
+            columns: 50,
+            rows: 40,
+        };
+        let second_size = TerminalSize {
+            columns: 50,
+            rows: 40,
+        };
+        let split = SessionSplit {
+            first_session_id: 11,
+            second_session_id: 22,
+            orientation: SplitOrientation::SideBySide,
+        };
+        let split_sizes = Some((split, first_size, second_size));
+
+        assert_eq!(
+            session_terminal_size_for_split(11, full_size, split_sizes),
+            first_size
+        );
+        assert_eq!(
+            session_terminal_size_for_split(22, full_size, split_sizes),
+            second_size
+        );
+        assert_eq!(
+            session_terminal_size_for_split(33, full_size, split_sizes),
+            full_size
+        );
+    }
 }
 
 struct AppView {
@@ -265,10 +438,13 @@ struct AppView {
     status: String,
     sessions: Vec<SshSession>,
     active_session_id: Option<u64>,
+    split: Option<SessionSplit>,
     next_session_id: u64,
     terminal_size: TerminalSize,
-    terminal_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    terminal_bounds: Rc<RefCell<HashMap<u64, Bounds<Pixels>>>>,
     terminal_focus: FocusHandle,
+    side_by_side_state: Entity<ResizableState>,
+    stacked_state: Entity<ResizableState>,
     profiles: Vec<HostProfile>,
     profile_store: Option<ProfileStore>,
     profiles_ready: bool,
@@ -276,6 +452,8 @@ struct AppView {
     confirm_delete: bool,
     profile_message: String,
     _bounds_subscription: Subscription,
+    _side_by_side_subscription: Subscription,
+    _stacked_subscription: Subscription,
 }
 
 impl AppView {
@@ -300,6 +478,14 @@ impl AppView {
         let bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
             this.resize_terminal(window, cx);
         });
+        let side_by_side_state = ResizableState::new(cx);
+        let stacked_state = ResizableState::new(cx);
+        let side_by_side_subscription = cx.observe(&side_by_side_state, |this, _, cx| {
+            this.resize_sessions(cx);
+        });
+        let stacked_subscription = cx.observe(&stacked_state, |this, _, cx| {
+            this.resize_sessions(cx);
+        });
 
         Self {
             profile_name,
@@ -311,10 +497,13 @@ impl AppView {
             status: "Ready".to_owned(),
             sessions: Vec::new(),
             active_session_id: None,
+            split: None,
             next_session_id: 1,
             terminal_size,
             terminal_bounds: Rc::default(),
             terminal_focus: cx.focus_handle(),
+            side_by_side_state,
+            stacked_state,
             profiles,
             profile_store,
             profiles_ready,
@@ -322,6 +511,8 @@ impl AppView {
             confirm_delete: false,
             profile_message,
             _bounds_subscription: bounds_subscription,
+            _side_by_side_subscription: side_by_side_subscription,
+            _stacked_subscription: stacked_subscription,
         }
     }
 
@@ -346,27 +537,105 @@ impl AppView {
     }
 
     fn resize_terminal(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let size = Self::size_for_window(window);
-        self.terminal_size = size;
+        self.terminal_size = Self::size_for_window(window);
+        self.resize_sessions(cx);
+        cx.notify();
+    }
+
+    fn resize_sessions(&mut self, cx: &mut Context<Self>) {
+        let split_sizes = self.split.map(|split| {
+            let state = match split.orientation {
+                SplitOrientation::SideBySide => &self.side_by_side_state,
+                SplitOrientation::Stacked => &self.stacked_state,
+            };
+            let panel_sizes = state.read(cx).sizes();
+            let first = split_panel_terminal_size(
+                self.terminal_size,
+                split.orientation,
+                panel_sizes.first().map(|size| size.as_f32()),
+                0,
+            );
+            let second = split_panel_terminal_size(
+                self.terminal_size,
+                split.orientation,
+                panel_sizes.get(1).map(|size| size.as_f32()),
+                1,
+            );
+            (split, first, second)
+        });
+
         let mut resize_session_ids = Vec::new();
+        let mut changed = false;
         for session in &mut self.sessions {
+            let size = session_terminal_size_for_split(session.id, self.terminal_size, split_sizes);
             if session.terminal_size == size {
                 continue;
             }
             session.terminal_size = size;
+            changed = true;
             if session.command_tx.is_some() {
-                resize_session_ids.push(session.id);
+                resize_session_ids.push((session.id, size));
             }
         }
-        for id in resize_session_ids {
+        for (id, size) in resize_session_ids {
             if let Err(error) =
                 enqueue_session_request(&self.sessions, id, TerminalRequest::Resize(size))
                 && let Some(session) = self.session_mut(id)
             {
                 session.status = format!("Terminal resize queue is unavailable: {error}");
+                changed = true;
             }
         }
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn set_split(
+        &mut self,
+        second_session_id: u64,
+        orientation: SplitOrientation,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(first_session_id) = self.active_session_id else {
+            return;
+        };
+        if first_session_id == second_session_id || self.session(second_session_id).is_none() {
+            return;
+        }
+        self.split = Some(SessionSplit {
+            first_session_id,
+            second_session_id,
+            orientation,
+        });
+        self.terminal_bounds.borrow_mut().clear();
+        self.resize_terminal(window, cx);
+    }
+
+    fn set_split_orientation(
+        &mut self,
+        orientation: SplitOrientation,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(split) = &mut self.split else {
+            return;
+        };
+        if split.orientation == orientation {
+            return;
+        }
+        split.orientation = orientation;
+        self.terminal_bounds.borrow_mut().clear();
+        self.resize_terminal(window, cx);
+    }
+
+    fn close_split(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.split.take().is_none() {
+            return;
+        }
+        self.terminal_bounds.borrow_mut().clear();
+        self.resize_terminal(window, cx);
     }
 
     fn set_input_value(
@@ -535,12 +804,15 @@ impl AppView {
             requested_title
         };
         let status = format!("Checking host key and connecting to {host}:{port}...");
+        let terminal_size = self
+            .active_session()
+            .map_or(self.terminal_size, |session| session.terminal_size);
         let spec = ConnectionSpec {
             host,
             port,
             username: username.clone(),
             password,
-            terminal_size: self.terminal_size,
+            terminal_size,
         };
         let (event_tx, mut event_rx) = mpsc::channel(16);
         match ssh::spawn_connection(spec, event_tx) {
@@ -554,14 +826,17 @@ impl AppView {
                     status,
                     frame: None,
                     terminal_message: "Connecting...".to_owned(),
-                    terminal_size: self.terminal_size,
+                    terminal_size,
                     scroll_remainder: 0.0,
                     mouse_position: None,
                     command_tx: Some(command_tx),
                     cancel_tx: Some(cancel_tx),
                     state: SessionState::Connecting,
                 });
+                self.split = None;
+                self.terminal_bounds.borrow_mut().clear();
                 self.active_session_id = Some(id);
+                self.resize_sessions(cx);
             }
             Err(error) => {
                 self.profile_message = format!("Could not start SSH runtime: {error}");
@@ -609,6 +884,11 @@ impl AppView {
         if self.session(id).is_none() {
             return;
         }
+        if self.split.is_some_and(|split| !split.contains(id)) {
+            self.split = None;
+            self.terminal_bounds.borrow_mut().clear();
+            self.resize_sessions(cx);
+        }
         self.active_session_id = Some(id);
         window.focus(&self.terminal_focus);
         cx.notify();
@@ -637,20 +917,29 @@ impl AppView {
     }
 
     fn close_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let closes_split_pane = self.split.is_some_and(|split| split.contains(id));
         if !remove_session(&mut self.sessions, &mut self.active_session_id, id) {
             return;
         }
+        self.terminal_bounds.borrow_mut().remove(&id);
+        if closes_split_pane {
+            self.split = None;
+            self.terminal_bounds.borrow_mut().clear();
+        }
         if self.active_session_id.is_none() {
             self.status = "Ready".to_owned();
+        }
+        if closes_split_pane {
+            self.resize_terminal(window, cx);
         }
         window.focus(&self.terminal_focus);
         cx.notify();
     }
 
-    fn send_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(session_id) = self.active_session_id else {
+    fn send_key(&mut self, session_id: u64, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.session(session_id).is_none() {
             return;
-        };
+        }
         if self
             .session(session_id)
             .is_none_or(|session| session.state != SessionState::Connected)
@@ -713,10 +1002,26 @@ impl AppView {
         }
     }
 
-    fn terminal_position(&self, position: Point<Pixels>) -> Option<TerminalPosition> {
-        let bounds = self.terminal_bounds.borrow().clone()?;
+    fn activate_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session(id).is_none() {
+            return;
+        }
+        let changed = self.active_session_id != Some(id);
+        self.active_session_id = Some(id);
+        window.focus(&self.terminal_focus);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn terminal_position(
+        &self,
+        session_id: u64,
+        position: Point<Pixels>,
+    ) -> Option<TerminalPosition> {
+        let bounds = self.terminal_bounds.borrow().get(&session_id).cloned()?;
         let size = self
-            .active_session()
+            .session(session_id)
             .map_or(self.terminal_size, |session| session.terminal_size);
         let column = (((position.x - bounds.origin.x) / px(1.0)) / CELL_WIDTH_PX)
             .floor()
@@ -727,11 +1032,14 @@ impl AppView {
         Some(TerminalPosition { row, column })
     }
 
-    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.terminal_focus);
-        let Some(session_id) = self.active_session_id else {
-            return;
-        };
+    fn mouse_down(
+        &mut self,
+        session_id: u64,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_session(session_id, window, cx);
         if self.session(session_id).is_none_or(|session| {
             session.state != SessionState::Connected || session.frame.is_none()
         }) {
@@ -740,7 +1048,7 @@ impl AppView {
         let Some(button) = terminal_mouse_button(event.button) else {
             return;
         };
-        let Some(position) = self.terminal_position(event.position) else {
+        let Some(position) = self.terminal_position(session_id, event.position) else {
             return;
         };
         if let Some(session) = self.session_mut(session_id) {
@@ -762,10 +1070,7 @@ impl AppView {
         );
     }
 
-    fn mouse_up(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
-        let Some(session_id) = self.active_session_id else {
-            return;
-        };
+    fn mouse_up(&mut self, session_id: u64, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
         if self
             .session(session_id)
             .is_none_or(|session| session.state != SessionState::Connected)
@@ -778,7 +1083,10 @@ impl AppView {
         let previous_position = self
             .session(session_id)
             .and_then(|session| session.mouse_position);
-        let Some(position) = self.terminal_position(event.position).or(previous_position) else {
+        let Some(position) = self
+            .terminal_position(session_id, event.position)
+            .or(previous_position)
+        else {
             return;
         };
         if let Some(session) = self.session_mut(session_id) {
@@ -800,10 +1108,7 @@ impl AppView {
         );
     }
 
-    fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some(session_id) = self.active_session_id else {
-            return;
-        };
+    fn mouse_move(&mut self, session_id: u64, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         let Some(session) = self.session(session_id) else {
             return;
         };
@@ -825,7 +1130,7 @@ impl AppView {
         if !local_selection_drag && !tracking_mode.reports_motion(button.is_some()) {
             return;
         }
-        let Some(position) = self.terminal_position(event.position) else {
+        let Some(position) = self.terminal_position(session_id, event.position) else {
             return;
         };
         if self
@@ -868,10 +1173,167 @@ impl AppView {
         }
     }
 
-    fn scroll_terminal(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let Some(session_id) = self.active_session_id else {
-            return;
+    fn terminal_surface(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let terminal_bounds = Rc::clone(&self.terminal_bounds);
+        let mut terminal_view = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .font_family("monospace")
+            .text_size(px(13.))
+            .text_color(rgb(0xe1e5e8))
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(bounds) = children.first() {
+                    terminal_bounds
+                        .borrow_mut()
+                        .insert(session_id, bounds.clone());
+                }
+            })
+            .on_key_down(cx.listener(move |this, event, _, cx| {
+                this.send_key(session_id, event, cx);
+            }))
+            .on_scroll_wheel(cx.listener(move |this, event, window, cx| {
+                this.scroll_terminal(session_id, event, window, cx);
+            }))
+            .on_any_mouse_down(cx.listener(move |this, event, window, cx| {
+                this.mouse_down(session_id, event, window, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, event, _, cx| this.mouse_up(session_id, event, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, event, _, cx| this.mouse_up(session_id, event, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(move |this, event, _, cx| this.mouse_up(session_id, event, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, event, _, cx| this.mouse_up(session_id, event, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(move |this, event, _, cx| this.mouse_up(session_id, event, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
+                cx.listener(move |this, event, _, cx| this.mouse_up(session_id, event, cx)),
+            )
+            .on_mouse_move(cx.listener(move |this, event, _, cx| {
+                this.mouse_move(session_id, event, cx);
+            }))
+            .track_focus(&self.terminal_focus);
+
+        if let Some(frame) = self
+            .session(session_id)
+            .and_then(|session| session.frame.as_ref())
+        {
+            let mut grid = div().flex().flex_col().flex_1().min_h_0();
+            for row in &frame.rows {
+                let mut rendered_row = div().flex().h(px(CELL_HEIGHT_PX)).flex_shrink_0();
+                for run in row {
+                    rendered_row = rendered_row.child(render_terminal_run(run));
+                }
+                grid = grid.child(rendered_row);
+            }
+            terminal_view = terminal_view.child(grid);
+        } else {
+            let message = self
+                .session(session_id)
+                .map(|session| session.terminal_message.clone())
+                .unwrap_or_default();
+            terminal_view = terminal_view.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(14.))
+                    .text_color(rgb(0x859099))
+                    .child(message),
+            );
+        }
+        terminal_view.into_any_element()
+    }
+
+    fn terminal_panel(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let Some(session) = self.session(session_id) else {
+            return div().flex_1().min_w_0().min_h_0().into_any_element();
         };
+        let title = session.title.clone();
+        let state = session.state;
+        let focused = self.active_session_id == Some(session_id);
+        let state_label = match state {
+            SessionState::Disconnected => "Disconnected",
+            SessionState::Connecting => "Connecting",
+            SessionState::Connected => "Connected",
+            SessionState::Disconnecting => "Disconnecting",
+        };
+        let status_color = match state {
+            SessionState::Disconnected => rgb(0x7b858c),
+            SessionState::Connecting => rgb(0xc08b23),
+            SessionState::Connected => rgb(0x4eae7c),
+            SessionState::Disconnecting => rgb(0xc07a42),
+        };
+        let surface = self.terminal_surface(session_id, cx);
+        div()
+            .id(("terminal-panel", session_id))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .border_1()
+            .border_color(if focused {
+                rgb(0x4a956f)
+            } else {
+                rgb(0x343c42)
+            })
+            .bg(rgb(0x0b0f13))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(TERMINAL_PANEL_HEADER_PX))
+                    .flex_shrink_0()
+                    .px(px(8.))
+                    .bg(rgb(0x171d22))
+                    .text_size(px(11.))
+                    .on_any_mouse_down(cx.listener(move |this, _, window, cx| {
+                        this.activate_session(session_id, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_color(rgb(0xd4dade))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(status_color)
+                            .child(state_label),
+                    ),
+            )
+            .child(surface)
+            .into_any_element()
+    }
+
+    fn scroll_terminal(
+        &mut self,
+        session_id: u64,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_session(session_id, window, cx);
         let Some(session) = self.session_mut(session_id) else {
             return;
         };
@@ -889,7 +1351,7 @@ impl AppView {
         if rows == 0 {
             return;
         }
-        let Some(position) = self.terminal_position(event.position) else {
+        let Some(position) = self.terminal_position(session_id, event.position) else {
             return;
         };
 
@@ -1064,6 +1526,13 @@ impl Render for AppView {
                         .child(tab.on_click(cx.listener(move |this, _, window, cx| {
                             this.select_session(id, window, cx);
                         })))
+                        .when(self.active_session_id != Some(id), |tabs| {
+                            tabs.child(Button::new(("split-session", id)).label("Split").on_click(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.set_split(id, SplitOrientation::SideBySide, window, cx);
+                                }),
+                            ))
+                        })
                         .child(Button::new(("close-session", id)).label("x").on_click(
                             cx.listener(move |this, _, window, cx| {
                                 this.close_session(id, window, cx);
@@ -1081,68 +1550,74 @@ impl Render for AppView {
             );
         }
 
-        let terminal_bounds = Rc::clone(&self.terminal_bounds);
-        let mut terminal_view = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .font_family("monospace")
-            .text_size(px(13.))
-            .text_color(rgb(0xe1e5e8))
-            .on_children_prepainted(move |children, _, _| {
-                *terminal_bounds.borrow_mut() = children.first().cloned();
-            })
-            .on_key_down(cx.listener(|this, event, _, cx| this.send_key(event, cx)))
-            .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_terminal(event, cx)))
-            .on_any_mouse_down(cx.listener(|this, event, window, cx| {
-                this.mouse_down(event, window, cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
-            )
-            .on_mouse_up(
-                MouseButton::Middle,
-                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
-            )
-            .on_mouse_up(
-                MouseButton::Right,
-                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Middle,
-                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Right,
-                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
-            )
-            .on_mouse_move(cx.listener(|this, event, _, cx| this.mouse_move(event, cx)));
+        let mut split_controls = div().flex().items_center().gap(px(4.));
+        if let Some(split) = self.split {
+            let side_by_side = Button::new("split-side-by-side")
+                .label("Side by side")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_split_orientation(SplitOrientation::SideBySide, window, cx);
+                }));
+            let side_by_side = if split.orientation == SplitOrientation::SideBySide {
+                side_by_side.primary()
+            } else {
+                side_by_side
+            };
+            let stacked = Button::new("split-stacked")
+                .label("Stacked")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_split_orientation(SplitOrientation::Stacked, window, cx);
+                }));
+            let stacked = if split.orientation == SplitOrientation::Stacked {
+                stacked.primary()
+            } else {
+                stacked
+            };
+            split_controls = split_controls.child(side_by_side).child(stacked).child(
+                Button::new("close-split")
+                    .label("Close split")
+                    .on_click(cx.listener(|this, _, window, cx| this.close_split(window, cx))),
+            );
+        }
 
-        let active_frame = self
-            .active_session()
-            .and_then(|session| session.frame.as_ref());
-        if let Some(frame) = active_frame {
-            let mut grid = div().flex().flex_col().flex_1().min_h_0();
-            for row in &frame.rows {
-                let mut rendered_row = div().flex().h(px(CELL_HEIGHT_PX)).flex_shrink_0();
-                for run in row {
-                    rendered_row = rendered_row.child(render_terminal_run(run));
+        let mut terminal_workspace = div().flex().flex_1().min_h_0().bg(rgb(0x0b0f13)).p(px(8.));
+        if let Some(split) = self.split {
+            let first_panel = self.terminal_panel(split.first_session_id, cx);
+            let second_panel = self.terminal_panel(split.second_session_id, cx);
+            let panel_minimum = px(240.)..Pixels::MAX;
+            let group = match split.orientation {
+                SplitOrientation::SideBySide => h_resizable(
+                    "terminal-split-side-by-side",
+                    self.side_by_side_state.clone(),
+                )
+                .child(
+                    resizable_panel()
+                        .size_range(panel_minimum.clone())
+                        .child(first_panel),
+                )
+                .child(
+                    resizable_panel()
+                        .size_range(panel_minimum)
+                        .child(second_panel),
+                ),
+                SplitOrientation::Stacked => {
+                    v_resizable("terminal-split-stacked", self.stacked_state.clone())
+                        .child(
+                            resizable_panel()
+                                .size_range(panel_minimum.clone())
+                                .child(first_panel),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size_range(panel_minimum)
+                                .child(second_panel),
+                        )
                 }
-                grid = grid.child(rendered_row);
-            }
-            terminal_view = terminal_view.child(grid);
+            };
+            terminal_workspace = terminal_workspace.child(group);
+        } else if let Some(session_id) = self.active_session_id {
+            terminal_workspace = terminal_workspace.child(self.terminal_panel(session_id, cx));
         } else {
-            let message = self
-                .active_session()
-                .map(|session| session.terminal_message.clone())
-                .unwrap_or_default();
-            terminal_view = terminal_view.child(
+            terminal_workspace = terminal_workspace.child(
                 div()
                     .flex()
                     .flex_1()
@@ -1150,7 +1625,7 @@ impl Render for AppView {
                     .justify_center()
                     .text_size(px(14.))
                     .text_color(rgb(0x859099))
-                    .child(message),
+                    .child("No active terminal"),
             );
         }
 
@@ -1340,18 +1815,10 @@ impl Render for AppView {
                             .gap(px(4.))
                             .px(px(8.))
                             .bg(rgb(0xe4e7e9))
-                            .child(session_tabs),
+                            .child(session_tabs)
+                            .child(split_controls),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_h_0()
-                            .bg(rgb(0x0b0f13))
-                            .p(px(8.))
-                            .child(terminal_view.track_focus(&self.terminal_focus).size_full()),
-                    )
+                    .child(terminal_workspace)
                     .child(
                         div()
                             .flex()
