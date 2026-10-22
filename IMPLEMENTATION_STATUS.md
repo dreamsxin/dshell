@@ -15,21 +15,22 @@
 - 窗口尺寸按终端区域和单元格尺寸换算为列/行；连接时用于创建 PTY，运行中同时调整本地 Term 和远端 PTY。
 - ANSI 帧按颜色、粗体、斜体和下划线分组为单元格运行段，以 GPUI 原生元素绘制；SSH 输出以 16 ms 节拍合并后刷新。
 - 鼠标滚轮可浏览 alacritty_terminal 保留的历史行；向上滚动显示较早内容，向下滚动回到实时屏幕，并保留不足一行的像素滚动余量。
+- alacritty_terminal 的鼠标跟踪模式驱动远端鼠标输入：支持点击、按键拖动和全运动报告，以及 legacy、UTF-8、SGR 编码；报告模式下鼠标按下/释放/移动与滚轮转发给 SSH PTY，无报告模式保留本地左键选择和历史滚动。
 - 鼠标左键拖动可选择终端网格文本，选中单元格有独立高亮；`Ctrl+Shift+C` 复制非空选择，`Ctrl+Shift+V` 从系统剪贴板粘贴，并遵循远端 bracketed-paste 模式。
 - scripts/verify-hard-constraints.ps1 固化格式、类型检查、测试和依赖边界检查命令。
 - scripts/test-docker-ssh.ps1 创建临时 Ubuntu 24.04 OpenSSH 服务，以容器实际 Ed25519 公钥和隔离的临时 known_hosts 执行应用 SSH/PTY 集成测试，测试后清理容器和临时密钥文件。
 
 ## 验证记录
 
-2026-10-22，Windows/MSVC：`./scripts/verify-hard-constraints.ps1` 全部通过，包含格式检查、锁定依赖下的全目标类型检查、禁用依赖扫描及 9 项单元测试。测试覆盖键盘序列、终端尺寸、ANSI 样式/模式、滚动历史、文本选择/bracketed paste，以及已知/未知/变更 SSH 主机密钥。
+2026-10-22，Windows/MSVC：`./scripts/verify-hard-constraints.ps1` 全部通过，包含格式检查、锁定依赖下的全目标类型检查、禁用依赖扫描及 13 项单元测试。测试覆盖键盘序列、终端尺寸、ANSI 样式/模式、滚动历史、文本选择/bracketed paste、鼠标跟踪模式与 legacy/UTF-8/SGR 编码，以及已知/未知/变更 SSH 主机密钥。
 
-`./scripts/test-docker-ssh.ps1` 已通过：连接临时 Ubuntu 24.04 SSH 服务，验证 host-key 检查、密码认证、PTY resize、终端输出与选择、粘贴输入和正常退出；测试凭据使用随机值，未写入仓库，且测试不读取或更改个人 known_hosts。
+`./scripts/test-docker-ssh.ps1` 已通过：连接临时 Ubuntu 24.04 SSH 服务，验证 host-key 检查、密码认证、PTY resize、终端输出与选择、粘贴输入、鼠标报告字节到达远端 PTY，以及正常退出；测试凭据使用随机值，未写入仓库，且测试不读取或更改个人 known_hosts。
 
 Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility 警告；当前不影响检查或测试通过。
 
 ## 当前限制
 
-- 键盘映射覆盖常见按键和修饰键，但尚未实现完整 IME 组合输入、远端终端鼠标报告协议及终端图像协议；当前滚轮用于本地历史浏览，选择为简单字符范围。
+- 键盘映射覆盖常见按键和修饰键，但尚未验证完整 IME 组合输入；文本选择仍按字符范围处理，终端图像协议未实现。
 - 当前通过 GPUI flex 元素绘制样式化网格，尚未实现自定义 `TerminalElement`、字体 shaping、精确字素宽度/重排或渲染性能优化。
 - 首期只接入密码认证；密钥/Agent 认证、SFTP、隧道、会话存储和录制尚未实现。
 - 首次连接不会弹出信任确认；用户需先通过独立可信渠道验证服务器指纹并写入 OpenSSH known_hosts。
@@ -37,4 +38,4 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 
 ## 下一段接力
 
-完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。当前按阶段 1 接力：先补齐远端鼠标报告和应用鼠标模式下的滚轮切换；然后验证常见全屏终端程序、Unicode/IME、resize 与断连生命周期。阶段 1 验收后进入阶段 2 的主机资料和多会话工作区。继续遵守严格主机密钥拒绝策略和不落盘凭据约束。
+完整路线、阶段依赖和验收条件见 [ROADMAP.md](ROADMAP.md)。下一步验证常见全屏终端程序、Unicode/IME、resize 和断连生命周期，并改善字素宽度与重排；阶段 1 验收后进入阶段 2 的主机资料和多会话工作区。继续遵守严格主机密钥拒绝策略和不落盘凭据约束。

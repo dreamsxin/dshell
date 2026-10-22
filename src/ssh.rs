@@ -18,7 +18,10 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-use crate::terminal::{TerminalEmulator, TerminalFrame, TerminalRequest, TerminalSize};
+use crate::terminal::{
+    MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton, TerminalMouseEvent,
+    TerminalRequest, TerminalSize,
+};
 
 pub struct ConnectionSpec {
     pub host: String,
@@ -193,19 +196,39 @@ async fn run_connection_with_known_hosts(
                             .context("UI closed during terminal resize")?;
                         screen_dirty = false;
                     }
-                    Some(TerminalRequest::Scroll(rows)) => {
-                        terminal.scroll_display(rows);
-                        events.send(UiEvent::Screen(terminal.frame())).await
-                            .context("UI closed during terminal scroll")?;
-                        screen_dirty = false;
-                    }
-                    Some(TerminalRequest::StartSelection(position)) => {
-                        terminal.start_selection(position);
-                        screen_dirty = true;
-                    }
-                    Some(TerminalRequest::UpdateSelection(position)) => {
-                        terminal.update_selection(position);
-                        screen_dirty = true;
+                    Some(TerminalRequest::Mouse(event)) => {
+                        let tracking_mode = terminal.mouse_tracking_mode();
+                        if let Some(bytes) = terminal.mouse_report_bytes(event) {
+                            writer.data_bytes(bytes).await?;
+                        } else if tracking_mode == MouseTrackingMode::Disabled {
+                            match event {
+                                TerminalMouseEvent::Press {
+                                    button: TerminalMouseButton::Left,
+                                    position,
+                                    ..
+                                } => {
+                                    terminal.start_selection(position);
+                                    screen_dirty = true;
+                                }
+                                TerminalMouseEvent::Move {
+                                    button: Some(TerminalMouseButton::Left),
+                                    position,
+                                    ..
+                                } => {
+                                    terminal.update_selection(position);
+                                    screen_dirty = true;
+                                }
+                                TerminalMouseEvent::Wheel { rows, .. } => {
+                                    terminal.scroll_display(rows);
+                                    events.send(UiEvent::Screen(terminal.frame())).await
+                                        .context("UI closed during terminal scroll")?;
+                                    screen_dirty = false;
+                                }
+                                TerminalMouseEvent::Press { .. }
+                                | TerminalMouseEvent::Release { .. }
+                                | TerminalMouseEvent::Move { .. } => {}
+                            }
+                        }
                     }
                     Some(TerminalRequest::Paste(text)) => {
                         writer.data_bytes(terminal.paste_bytes(&text)).await?;
@@ -369,19 +392,57 @@ mod tests {
                     let position = find_text(&ready, "DSHELL_SSH_READY")
                         .context("SSH output marker was not found in the terminal grid")?;
                     command_tx
-                        .send(TerminalRequest::StartSelection(position))
+                        .send(TerminalRequest::Mouse(
+                            crate::terminal::TerminalMouseEvent::Press {
+                                button: crate::terminal::TerminalMouseButton::Left,
+                                position,
+                                modifiers: crate::terminal::TerminalMouseModifiers::default(),
+                            },
+                        ))
                         .await?;
                     command_tx
-                        .send(TerminalRequest::UpdateSelection(TerminalPosition {
-                            row: position.row,
-                            column: position.column + "DSHELL_SSH_READY".len() as u16 - 1,
-                        }))
+                        .send(TerminalRequest::Mouse(
+                            crate::terminal::TerminalMouseEvent::Move {
+                                button: Some(crate::terminal::TerminalMouseButton::Left),
+                                position: TerminalPosition {
+                                    row: position.row,
+                                    column: position.column + "DSHELL_SSH_READY".len() as u16 - 1,
+                                },
+                                modifiers: crate::terminal::TerminalMouseModifiers::default(),
+                            },
+                        ))
                         .await?;
                     next_screen(&mut events, |frame| {
                         frame
                             .selection_text
                             .as_deref()
                             .is_some_and(|text| text.contains("DSHELL_SSH_READY"))
+                    })
+                    .await?;
+
+                    command_tx
+                        .send(TerminalRequest::Paste(
+                            r"stty -echo -icanon min 1 time 0; printf '\033[?1000h'; dd bs=1 count=6 2>/dev/null | od -An -tx1; printf '\033[?1000l'; stty echo icanon; printf 'DSHELL_MOUSE_READY\n'"
+                                .to_owned(),
+                        ))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut events, |frame| {
+                        frame.mouse_tracking_mode == crate::terminal::MouseTrackingMode::Click
+                    })
+                    .await?;
+                    command_tx
+                        .send(TerminalRequest::Mouse(
+                            crate::terminal::TerminalMouseEvent::Press {
+                                button: crate::terminal::TerminalMouseButton::Left,
+                                position: TerminalPosition { row: 5, column: 6 },
+                                modifiers: crate::terminal::TerminalMouseModifiers::default(),
+                            },
+                        ))
+                        .await?;
+                    next_screen(&mut events, |frame| {
+                        frame.mouse_tracking_mode == crate::terminal::MouseTrackingMode::Disabled
+                            && frame_text(frame).contains("1b 5b 4d 20 27 26")
                     })
                     .await?;
 

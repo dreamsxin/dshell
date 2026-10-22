@@ -44,9 +44,7 @@ pub struct TerminalKeyInput {
 pub enum TerminalRequest {
     Key(TerminalKeyInput),
     Resize(TerminalSize),
-    Scroll(i32),
-    StartSelection(TerminalPosition),
-    UpdateSelection(TerminalPosition),
+    Mouse(TerminalMouseEvent),
     Paste(String),
 }
 
@@ -54,6 +52,62 @@ pub enum TerminalRequest {
 pub struct TerminalPosition {
     pub row: u16,
     pub column: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseTrackingMode {
+    Disabled,
+    Click,
+    ButtonMotion,
+    AnyMotion,
+}
+
+impl MouseTrackingMode {
+    pub fn reports_motion(self, button_pressed: bool) -> bool {
+        match self {
+            Self::Disabled | Self::Click => false,
+            Self::ButtonMotion => button_pressed,
+            Self::AnyMotion => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalMouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalMouseModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub control: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalMouseEvent {
+    Press {
+        button: TerminalMouseButton,
+        position: TerminalPosition,
+        modifiers: TerminalMouseModifiers,
+    },
+    Release {
+        button: TerminalMouseButton,
+        position: TerminalPosition,
+        modifiers: TerminalMouseModifiers,
+    },
+    Move {
+        button: Option<TerminalMouseButton>,
+        position: TerminalPosition,
+        modifiers: TerminalMouseModifiers,
+    },
+    Wheel {
+        rows: i32,
+        position: TerminalPosition,
+        modifiers: TerminalMouseModifiers,
+    },
 }
 
 impl TerminalKeyInput {
@@ -195,6 +249,7 @@ pub struct TerminalRun {
 pub struct TerminalFrame {
     pub rows: Vec<Vec<TerminalRun>>,
     pub selection_text: Option<String>,
+    pub mouse_tracking_mode: MouseTrackingMode,
 }
 
 #[derive(Clone, Copy)]
@@ -229,6 +284,14 @@ impl Dimensions for TerminalDimensions {
 pub struct TerminalEmulator {
     term: Term<VoidListener>,
     processor: Processor,
+    reported_mouse_encodings: [Option<MouseEncoding>; 3],
+}
+
+#[derive(Clone, Copy)]
+enum MouseEncoding {
+    Legacy,
+    Utf8,
+    Sgr,
 }
 
 impl TerminalEmulator {
@@ -240,6 +303,7 @@ impl TerminalEmulator {
                 VoidListener,
             ),
             processor: Processor::new(),
+            reported_mouse_encodings: [None; 3],
         }
     }
 
@@ -253,6 +317,102 @@ impl TerminalEmulator {
 
     pub fn scroll_display(&mut self, rows: i32) {
         self.term.scroll_display(Scroll::Delta(rows));
+    }
+
+    pub fn mouse_tracking_mode(&self) -> MouseTrackingMode {
+        let mode = self.term.mode();
+        if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseTrackingMode::AnyMotion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseTrackingMode::ButtonMotion
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseTrackingMode::Click
+        } else {
+            MouseTrackingMode::Disabled
+        }
+    }
+
+    fn mouse_encoding(&self) -> MouseEncoding {
+        let mode = self.term.mode();
+        if mode.contains(TermMode::SGR_MOUSE) {
+            MouseEncoding::Sgr
+        } else if mode.contains(TermMode::UTF8_MOUSE) {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::Legacy
+        }
+    }
+
+    pub fn mouse_report_bytes(&mut self, event: TerminalMouseEvent) -> Option<Vec<u8>> {
+        let tracking = self.mouse_tracking_mode();
+        let encoding = self.mouse_encoding();
+        match event {
+            TerminalMouseEvent::Press {
+                button,
+                position,
+                modifiers,
+            } => {
+                if tracking == MouseTrackingMode::Disabled {
+                    return None;
+                }
+                let bytes = encode_mouse_report(
+                    encoding,
+                    mouse_button_code(button) + mouse_modifier_bits(modifiers),
+                    position,
+                    false,
+                )?;
+                self.reported_mouse_encodings[mouse_button_index(button)] = Some(encoding);
+                Some(bytes)
+            }
+            TerminalMouseEvent::Release {
+                button,
+                position,
+                modifiers,
+            } => {
+                let encoding = self.reported_mouse_encodings[mouse_button_index(button)]
+                    .take()
+                    .or_else(|| (tracking != MouseTrackingMode::Disabled).then_some(encoding))?;
+                let button_code = if matches!(encoding, MouseEncoding::Sgr) {
+                    mouse_button_code(button)
+                } else {
+                    3
+                };
+                encode_mouse_report(
+                    encoding,
+                    button_code + mouse_modifier_bits(modifiers),
+                    position,
+                    true,
+                )
+            }
+            TerminalMouseEvent::Move {
+                button,
+                position,
+                modifiers,
+            } => {
+                if !tracking.reports_motion(button.is_some()) {
+                    return None;
+                }
+                let code =
+                    button.map_or(3, mouse_button_code) + 32 + mouse_modifier_bits(modifiers);
+                encode_mouse_report(encoding, code, position, false)
+            }
+            TerminalMouseEvent::Wheel {
+                rows,
+                position,
+                modifiers,
+            } => {
+                if tracking == MouseTrackingMode::Disabled || rows == 0 {
+                    return None;
+                }
+                let code = (if rows > 0 { 64 } else { 65 }) + mouse_modifier_bits(modifiers);
+                let reports = rows.unsigned_abs().min(64);
+                let mut bytes = Vec::with_capacity(reports as usize * 16);
+                for _ in 0..reports {
+                    bytes.extend(encode_mouse_report(encoding, code, position, false)?);
+                }
+                Some(bytes)
+            }
+        }
     }
 
     fn selection_point(&self, position: TerminalPosition) -> Point {
@@ -384,8 +544,70 @@ impl TerminalEmulator {
         TerminalFrame {
             rows,
             selection_text,
+            mouse_tracking_mode: self.mouse_tracking_mode(),
         }
     }
+}
+
+fn mouse_button_index(button: TerminalMouseButton) -> usize {
+    match button {
+        TerminalMouseButton::Left => 0,
+        TerminalMouseButton::Middle => 1,
+        TerminalMouseButton::Right => 2,
+    }
+}
+
+fn mouse_button_code(button: TerminalMouseButton) -> u16 {
+    mouse_button_index(button) as u16
+}
+
+fn mouse_modifier_bits(modifiers: TerminalMouseModifiers) -> u16 {
+    (if modifiers.shift { 4 } else { 0 })
+        + (if modifiers.alt { 8 } else { 0 })
+        + (if modifiers.control { 16 } else { 0 })
+}
+
+fn encode_mouse_report(
+    encoding: MouseEncoding,
+    code: u16,
+    position: TerminalPosition,
+    release: bool,
+) -> Option<Vec<u8>> {
+    let column = u32::from(position.column) + 1;
+    let row = u32::from(position.row) + 1;
+    match encoding {
+        MouseEncoding::Sgr => Some(
+            format!(
+                "\x1b[<{code};{column};{row}{}",
+                if release { 'm' } else { 'M' }
+            )
+            .into_bytes(),
+        ),
+        MouseEncoding::Legacy | MouseEncoding::Utf8 => {
+            let mut bytes = vec![0x1b, b'[', b'M', u8::try_from(code + 32).ok()?];
+            encode_mouse_coordinate(column, encoding, &mut bytes)?;
+            encode_mouse_coordinate(row, encoding, &mut bytes)?;
+            Some(bytes)
+        }
+    }
+}
+
+fn encode_mouse_coordinate(
+    coordinate: u32,
+    encoding: MouseEncoding,
+    bytes: &mut Vec<u8>,
+) -> Option<()> {
+    let value = coordinate + 32;
+    match encoding {
+        MouseEncoding::Legacy => bytes.push(u8::try_from(value).ok()?),
+        MouseEncoding::Utf8 => {
+            let character = char::from_u32(value)?;
+            let mut buffer = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+        }
+        MouseEncoding::Sgr => return None,
+    }
+    Some(())
 }
 
 fn color_to_rgb(color: Color) -> u32 {
@@ -519,6 +741,141 @@ mod tests {
 
         terminal.feed(b"\x1b[?2004h");
         assert_eq!(terminal.paste_bytes("a\nb"), b"\x1b[200~a\nb\x1b[201~");
+    }
+
+    #[test]
+    fn mouse_tracking_modes_follow_remote_dec_modes() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 80,
+            rows: 24,
+        });
+        assert_eq!(
+            terminal.mouse_tracking_mode(),
+            super::MouseTrackingMode::Disabled
+        );
+
+        terminal.feed(b"\x1b[?1000h");
+        assert_eq!(
+            terminal.mouse_tracking_mode(),
+            super::MouseTrackingMode::Click
+        );
+        terminal.feed(b"\x1b[?1002h");
+        assert_eq!(
+            terminal.mouse_tracking_mode(),
+            super::MouseTrackingMode::ButtonMotion
+        );
+        terminal.feed(b"\x1b[?1003h");
+        assert_eq!(
+            terminal.frame().mouse_tracking_mode,
+            super::MouseTrackingMode::AnyMotion
+        );
+        terminal.feed(b"\x1b[?1003l");
+        assert_eq!(
+            terminal.mouse_tracking_mode(),
+            super::MouseTrackingMode::Disabled
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_reports_encode_press_release_and_motion() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 80,
+            rows: 24,
+        });
+        let position = TerminalPosition { row: 3, column: 4 };
+        let modifiers = super::TerminalMouseModifiers::default();
+        terminal.feed(b"\x1b[?1000h");
+
+        assert_eq!(
+            terminal.mouse_report_bytes(super::TerminalMouseEvent::Press {
+                button: super::TerminalMouseButton::Left,
+                position,
+                modifiers,
+            }),
+            Some(b"\x1b[M %$".to_vec())
+        );
+        assert_eq!(
+            terminal.mouse_report_bytes(super::TerminalMouseEvent::Release {
+                button: super::TerminalMouseButton::Left,
+                position,
+                modifiers,
+            }),
+            Some(b"\x1b[M#%$".to_vec())
+        );
+
+        terminal.feed(b"\x1b[?1002h");
+        assert_eq!(
+            terminal.mouse_report_bytes(super::TerminalMouseEvent::Move {
+                button: Some(super::TerminalMouseButton::Left),
+                position,
+                modifiers,
+            }),
+            Some(b"\x1b[M@%$".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_reports_preserve_modifiers_and_wheel_steps() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 80,
+            rows: 24,
+        });
+        let position = TerminalPosition { row: 0, column: 0 };
+        let modifiers = super::TerminalMouseModifiers {
+            shift: true,
+            alt: false,
+            control: true,
+        };
+        terminal.feed(b"\x1b[?1000h\x1b[?1006h");
+
+        assert_eq!(
+            terminal.mouse_report_bytes(super::TerminalMouseEvent::Press {
+                button: super::TerminalMouseButton::Left,
+                position,
+                modifiers,
+            }),
+            Some(b"\x1b[<20;1;1M".to_vec())
+        );
+        assert_eq!(
+            terminal.mouse_report_bytes(super::TerminalMouseEvent::Wheel {
+                rows: 2,
+                position,
+                modifiers,
+            }),
+            Some(b"\x1b[<84;1;1M\x1b[<84;1;1M".to_vec())
+        );
+        assert_eq!(
+            terminal.mouse_report_bytes(super::TerminalMouseEvent::Release {
+                button: super::TerminalMouseButton::Left,
+                position,
+                modifiers,
+            }),
+            Some(b"\x1b[<20;1;1m".to_vec())
+        );
+    }
+
+    #[test]
+    fn utf8_mouse_encoding_supports_columns_beyond_legacy_limit() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 240,
+            rows: 24,
+        });
+        terminal.feed(b"\x1b[?1000h\x1b[?1005h");
+        let report = terminal
+            .mouse_report_bytes(super::TerminalMouseEvent::Press {
+                button: super::TerminalMouseButton::Left,
+                position: TerminalPosition {
+                    row: 0,
+                    column: 224,
+                },
+                modifiers: super::TerminalMouseModifiers::default(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            report,
+            [b"\x1b[M ".as_slice(), &[0xc4, 0x81, b'!']].concat()
+        );
     }
 
     #[test]

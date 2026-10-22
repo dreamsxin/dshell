@@ -18,8 +18,10 @@ Run `cargo run --locked`, enter the host, port, user, and password, then
 connect. The password field is masked and cleared when connection starts.
 Passwords are used only for the current SSH authentication attempt and are not
 persisted. Click the terminal area to focus it, then use the keyboard as you
-would in a remote terminal. The terminal grid follows window resizing, and the
-mouse wheel scrolls through available terminal history.
+would in a remote terminal. The terminal grid follows window resizing. When the
+remote application enables mouse tracking, clicks, motion, and the wheel are
+sent to it; otherwise, left-button dragging selects text and the wheel browses
+terminal history.
 
 ## Test and Verify
 
@@ -50,7 +52,7 @@ then removes both the test container and temporary host-key file.
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current
 implementation boundary and next-session handoff. [ROADMAP.md](ROADMAP.md)
-documents the product direction, Xshell-inspired workflow priorities, and
+documents the product direction, SSH workflow priorities, and
 staged implementation and acceptance plan.
 
 ## License

@@ -11,7 +11,8 @@ use gpui_component::{
 };
 use ssh::{ConnectionSpec, UiEvent};
 use terminal::{
-    CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalFrame, TerminalKeyInput, TerminalPosition,
+    CELL_HEIGHT_PX, CELL_WIDTH_PX, MouseTrackingMode, TerminalFrame, TerminalKeyInput,
+    TerminalMouseButton, TerminalMouseEvent, TerminalMouseModifiers, TerminalPosition,
     TerminalRequest, TerminalRun, TerminalSize,
 };
 use tokio::sync::mpsc;
@@ -28,7 +29,7 @@ struct AppView {
     terminal_size: TerminalSize,
     scroll_remainder: f32,
     terminal_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
-    selection_position: Option<TerminalPosition>,
+    mouse_position: Option<TerminalPosition>,
     terminal_focus: FocusHandle,
     command_tx: Option<mpsc::Sender<TerminalRequest>>,
     _bounds_subscription: Subscription,
@@ -57,7 +58,7 @@ impl AppView {
             terminal_size,
             scroll_remainder: 0.0,
             terminal_bounds: Rc::default(),
-            selection_position: None,
+            mouse_position: None,
             terminal_focus: cx.focus_handle(),
             command_tx: None,
             _bounds_subscription: bounds_subscription,
@@ -95,7 +96,7 @@ impl AppView {
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().to_string();
         let password = Zeroizing::new(self.password.read(cx).text().to_string());
-        self.selection_position = None;
+        self.mouse_position = None;
         self.password
             .update(cx, |state, cx| state.set_value("", window, cx));
 
@@ -230,41 +231,93 @@ impl AppView {
         Some(TerminalPosition { row, column })
     }
 
-    fn start_selection(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.terminal_focus);
         if self.frame.is_none() {
             return;
         }
+        let Some(button) = terminal_mouse_button(event.button) else {
+            return;
+        };
         let Some(position) = self.terminal_position(event.position) else {
             return;
         };
-        self.selection_position = Some(position);
+        self.mouse_position = Some(position);
         self.send_terminal_request(
-            TerminalRequest::StartSelection(position),
-            "Terminal selection",
+            TerminalRequest::Mouse(TerminalMouseEvent::Press {
+                button,
+                position,
+                modifiers: terminal_mouse_modifiers(
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                ),
+            }),
+            "Terminal mouse input",
             cx,
         );
     }
 
-    fn update_selection(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if !event.dragging() {
+    fn mouse_up(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
+        let Some(button) = terminal_mouse_button(event.button) else {
+            return;
+        };
+        let Some(position) = self
+            .terminal_position(event.position)
+            .or(self.mouse_position)
+        else {
+            return;
+        };
+        self.mouse_position = Some(position);
+        self.send_terminal_request(
+            TerminalRequest::Mouse(TerminalMouseEvent::Release {
+                button,
+                position,
+                modifiers: terminal_mouse_modifiers(
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                ),
+            }),
+            "Terminal mouse input",
+            cx,
+        );
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let tracking_mode = self
+            .frame
+            .as_ref()
+            .map_or(MouseTrackingMode::Disabled, |frame| {
+                frame.mouse_tracking_mode
+            });
+        let button = event.pressed_button.and_then(terminal_mouse_button);
+        if event.pressed_button.is_some() && button.is_none() {
+            return;
+        }
+        let local_selection_drag = tracking_mode == MouseTrackingMode::Disabled
+            && button == Some(TerminalMouseButton::Left);
+        if !local_selection_drag && !tracking_mode.reports_motion(button.is_some()) {
             return;
         }
         let Some(position) = self.terminal_position(event.position) else {
             return;
         };
-        if self.selection_position == Some(position) {
+        if self.mouse_position == Some(position) {
             return;
         }
-        self.selection_position = Some(position);
+        self.mouse_position = Some(position);
         self.send_terminal_request(
-            TerminalRequest::UpdateSelection(position),
-            "Terminal selection",
+            TerminalRequest::Mouse(TerminalMouseEvent::Move {
+                button,
+                position,
+                modifiers: terminal_mouse_modifiers(
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                ),
+            }),
+            "Terminal mouse input",
             cx,
         );
     }
@@ -298,11 +351,40 @@ impl AppView {
         if rows == 0 {
             return;
         }
+        let Some(position) = self.terminal_position(event.position) else {
+            return;
+        };
 
-        if let Err(error) = command_tx.try_send(TerminalRequest::Scroll(rows)) {
+        let request = TerminalRequest::Mouse(TerminalMouseEvent::Wheel {
+            rows,
+            position,
+            modifiers: terminal_mouse_modifiers(
+                event.modifiers.shift,
+                event.modifiers.alt,
+                event.modifiers.control,
+            ),
+        });
+        if let Err(error) = command_tx.try_send(request) {
             self.status = format!("Terminal scroll queue is unavailable: {error}");
             cx.notify();
         }
+    }
+}
+
+fn terminal_mouse_button(button: MouseButton) -> Option<TerminalMouseButton> {
+    match button {
+        MouseButton::Left => Some(TerminalMouseButton::Left),
+        MouseButton::Middle => Some(TerminalMouseButton::Middle),
+        MouseButton::Right => Some(TerminalMouseButton::Right),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn terminal_mouse_modifiers(shift: bool, alt: bool, control: bool) -> TerminalMouseModifiers {
+    TerminalMouseModifiers {
+        shift,
+        alt,
+        control,
     }
 }
 
@@ -351,13 +433,34 @@ impl Render for AppView {
             })
             .on_key_down(cx.listener(|this, event, _, cx| this.send_key(event, cx)))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_terminal(event, cx)))
-            .on_mouse_down(
+            .on_any_mouse_down(cx.listener(|this, event, window, cx| {
+                this.mouse_down(event, window, cx);
+            }))
+            .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event, window, cx| {
-                    this.start_selection(event, window, cx);
-                }),
+                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
             )
-            .on_mouse_move(cx.listener(|this, event, _, cx| this.update_selection(event, cx)));
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
+                cx.listener(|this, event, _, cx| this.mouse_up(event, cx)),
+            )
+            .on_mouse_move(cx.listener(|this, event, _, cx| this.mouse_move(event, cx)));
 
         if let Some(frame) = &self.frame {
             let mut grid = div().flex().flex_col().flex_1().min_h_0();
