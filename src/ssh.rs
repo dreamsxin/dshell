@@ -13,7 +13,7 @@ use russh::{
     keys::{PublicKey, PublicKeyOrCertificate, check_known_hosts_path},
 };
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
 use zeroize::Zeroizing;
@@ -78,8 +78,9 @@ fn is_known_host_key(host: &str, port: u16, key: &PublicKey, path: &Path) -> Res
 pub fn spawn_connection(
     spec: ConnectionSpec,
     events: mpsc::Sender<UiEvent>,
-) -> Result<mpsc::Sender<TerminalRequest>> {
+) -> Result<(mpsc::Sender<TerminalRequest>, watch::Sender<bool>)> {
     let (command_tx, command_rx) = mpsc::channel(128);
+    let (cancel_tx, cancel_rx) = watch::channel(false);
     let error_events = events.clone();
 
     thread::Builder::new()
@@ -98,23 +99,26 @@ pub fn spawn_connection(
                 }
             };
 
-            if let Err(error) = runtime.block_on(run_connection(spec, command_rx, events.clone())) {
+            if let Err(error) =
+                runtime.block_on(run_connection(spec, command_rx, events.clone(), cancel_rx))
+            {
                 let _ =
                     events.blocking_send(UiEvent::Failed(format!("Connection failed: {error}")));
             }
         })
         .context("could not start the SSH runtime thread")?;
 
-    Ok(command_tx)
+    Ok((command_tx, cancel_tx))
 }
 
 async fn run_connection(
     spec: ConnectionSpec,
     commands: mpsc::Receiver<TerminalRequest>,
     events: mpsc::Sender<UiEvent>,
+    cancellation: watch::Receiver<bool>,
 ) -> Result<()> {
     let known_hosts_path = default_known_hosts_path()?;
-    run_connection_with_known_hosts(spec, commands, events, known_hosts_path).await
+    run_connection_with_known_hosts(spec, commands, events, known_hosts_path, cancellation).await
 }
 
 async fn run_connection_with_known_hosts(
@@ -122,6 +126,7 @@ async fn run_connection_with_known_hosts(
     mut commands: mpsc::Receiver<TerminalRequest>,
     events: mpsc::Sender<UiEvent>,
     known_hosts_path: PathBuf,
+    mut cancellation: watch::Receiver<bool>,
 ) -> Result<()> {
     let ConnectionSpec {
         host,
@@ -130,38 +135,49 @@ async fn run_connection_with_known_hosts(
         mut password,
         terminal_size,
     } = spec;
-    let handler = KnownHostsHandler {
-        host: host.clone(),
-        port,
-        path: known_hosts_path,
+    let setup = async {
+        let handler = KnownHostsHandler {
+            host: host.clone(),
+            port,
+            path: known_hosts_path,
+        };
+        let config = Arc::new(client::Config::default());
+        let mut session = client::connect(config, (host.as_str(), port), handler)
+            .await
+            .context("SSH handshake failed")?;
+
+        let auth = session
+            .authenticate_password(username.clone(), std::mem::take(&mut *password))
+            .await
+            .context("SSH password authentication failed")?;
+        drop(password);
+        if !matches!(auth, AuthResult::Success) {
+            bail!("SSH password authentication was rejected");
+        }
+
+        let channel = session.channel_open_session().await?;
+        channel
+            .request_pty(
+                true,
+                "xterm-256color",
+                terminal_size.columns.into(),
+                terminal_size.rows.into(),
+                u32::from(terminal_size.columns) * 8,
+                u32::from(terminal_size.rows) * 18,
+                &[],
+            )
+            .await?;
+        channel.request_shell(true).await?;
+        Ok::<_, anyhow::Error>((session, channel))
     };
-    let config = Arc::new(client::Config::default());
-    let mut session = client::connect(config, (host.as_str(), port), handler)
-        .await
-        .context("SSH handshake failed")?;
-
-    let auth = session
-        .authenticate_password(username.clone(), std::mem::take(&mut *password))
-        .await
-        .context("SSH password authentication failed")?;
-    drop(password);
-    if !matches!(auth, AuthResult::Success) {
-        bail!("SSH password authentication was rejected");
-    }
-
-    let channel = session.channel_open_session().await?;
-    channel
-        .request_pty(
-            true,
-            "xterm-256color",
-            terminal_size.columns.into(),
-            terminal_size.rows.into(),
-            u32::from(terminal_size.columns) * 8,
-            u32::from(terminal_size.rows) * 18,
-            &[],
-        )
-        .await?;
-    channel.request_shell(true).await?;
+    tokio::pin!(setup);
+    let (session, channel) = tokio::select! {
+        result = &mut setup => result?,
+        _ = wait_for_cancellation(&mut cancellation) => {
+            let _ = events.send(UiEvent::Disconnected).await;
+            return Ok(());
+        }
+    };
     events
         .send(UiEvent::Status(format!(
             "Connected to {}:{} as {}",
@@ -236,6 +252,7 @@ async fn run_connection_with_known_hosts(
                     None => break,
                 }
             }
+            _ = wait_for_cancellation(&mut cancellation) => break,
             _ = render_tick.tick(), if screen_dirty => {
                 events.send(UiEvent::Screen(terminal.frame())).await
                     .context("UI closed during terminal output")?;
@@ -265,6 +282,13 @@ async fn run_connection_with_known_hosts(
     Ok(())
 }
 
+async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
+    if *cancellation.borrow() {
+        return;
+    }
+    let _ = cancellation.changed().await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ConnectionSpec, UiEvent, is_known_host_key, run_connection_with_known_hosts};
@@ -274,7 +298,10 @@ mod tests {
     use anyhow::{Context, Result, bail};
     use russh::keys::PublicKey;
     use std::{env, path::PathBuf, time::Duration};
-    use tokio::{sync::mpsc, time::timeout};
+    use tokio::{
+        sync::{mpsc, watch},
+        time::timeout,
+    };
     use zeroize::Zeroizing;
 
     const KEY_A: &str =
@@ -312,6 +339,81 @@ mod tests {
         assert!(is_known_host_key("localhost", 13265, &changed_key, &path).is_err());
     }
 
+    #[tokio::test]
+    async fn cancellation_interrupts_ssh_handshake() {
+        assert_handshake_cancellation(false).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_cancellation_sender_interrupts_ssh_handshake() {
+        assert_handshake_cancellation(true).await;
+    }
+
+    async fn assert_handshake_cancellation(drop_sender: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let spec = ConnectionSpec {
+            host: address.ip().to_string(),
+            port: address.port(),
+            username: "test".to_owned(),
+            password: Zeroizing::new("secret".to_owned()),
+            terminal_size: TerminalSize {
+                columns: 80,
+                rows: 24,
+            },
+        };
+        let connection = run_connection_with_known_hosts(
+            spec,
+            command_rx,
+            event_tx,
+            directory.path().join("known_hosts"),
+            cancel_rx,
+        );
+        tokio::pin!(connection);
+
+        let exercise = async {
+            accepted_rx.await.unwrap();
+            if drop_sender {
+                drop(cancel_tx);
+            } else {
+                cancel_tx.send_replace(true);
+            }
+            assert!(matches!(
+                timeout(Duration::from_secs(1), event_rx.recv())
+                    .await
+                    .unwrap(),
+                Some(UiEvent::Disconnected)
+            ));
+            Ok::<(), anyhow::Error>(())
+        };
+        let result = timeout(Duration::from_secs(2), async {
+            let (exercise_result, connection_result) = tokio::join!(exercise, &mut connection);
+            exercise_result?;
+            connection_result?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+        server.abort();
+
+        assert!(
+            result.is_ok(),
+            "cancellation did not interrupt SSH setup: {result:?}"
+        );
+        result.unwrap().unwrap();
+        drop(command_tx);
+    }
+
     #[test]
     #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
     fn docker_ssh_terminal_round_trip() {
@@ -336,6 +438,7 @@ mod tests {
             .block_on(async move {
                 let (command_tx, command_rx) = mpsc::channel(32);
                 let (event_tx, event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
                 let spec = ConnectionSpec {
                     host,
                     port,
@@ -346,9 +449,15 @@ mod tests {
                         rows: 24,
                     },
                 };
-                let connection =
-                    run_connection_with_known_hosts(spec, command_rx, event_tx, known_hosts_path);
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    known_hosts_path,
+                    cancel_rx,
+                );
                 tokio::pin!(connection);
+                let _cancel_tx = cancel_tx;
 
                 let exercise = async {
                     let mut events = event_rx;
@@ -492,6 +601,96 @@ mod tests {
                 })
                 .await
                 .context("Docker SSH terminal test exceeded 60 seconds")?;
+                result?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_explicit_disconnect() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (_command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let spec = ConnectionSpec {
+                    host,
+                    port,
+                    username,
+                    password: Zeroizing::new(password),
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for SSH connection")?
+                            .context("SSH event stream closed during connection")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_) | UiEvent::Screen(_) => {}
+                        }
+                    }
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for explicit disconnect")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_) | UiEvent::Screen(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(45), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker SSH explicit-disconnect test exceeded 45 seconds")?;
                 result?;
                 Ok::<(), anyhow::Error>(())
             })

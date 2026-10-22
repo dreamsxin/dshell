@@ -23,6 +23,10 @@ remote application enables mouse tracking, clicks, motion, and the wheel are
 sent to it; otherwise, left-button dragging selects text and the wheel browses
 terminal history.
 
+Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
+active session. Remote exit and connection failure clear the terminal view so a
+new connection starts with a clean session.
+
 ## Test and Verify
 
 Run the unit tests directly:

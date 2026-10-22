@@ -15,8 +15,16 @@ use terminal::{
     TerminalMouseButton, TerminalMouseEvent, TerminalMouseModifiers, TerminalPosition,
     TerminalRequest, TerminalRun, TerminalSize,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use zeroize::Zeroizing;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Disconnecting,
+}
 
 struct AppView {
     host: Entity<InputState>,
@@ -32,6 +40,9 @@ struct AppView {
     mouse_position: Option<TerminalPosition>,
     terminal_focus: FocusHandle,
     command_tx: Option<mpsc::Sender<TerminalRequest>>,
+    cancel_tx: Option<watch::Sender<bool>>,
+    session_state: SessionState,
+    session_generation: u64,
     _bounds_subscription: Subscription,
 }
 
@@ -61,8 +72,19 @@ impl AppView {
             mouse_position: None,
             terminal_focus: cx.focus_handle(),
             command_tx: None,
+            cancel_tx: None,
+            session_state: SessionState::Disconnected,
+            session_generation: 0,
             _bounds_subscription: bounds_subscription,
         }
+    }
+
+    fn clear_terminal_session(&mut self, status: impl Into<String>, message: impl Into<String>) {
+        self.status = status.into();
+        self.frame = None;
+        self.terminal_message = message.into();
+        self.mouse_position = None;
+        self.scroll_remainder = 0.0;
     }
 
     fn size_for_window(window: &Window) -> TerminalSize {
@@ -86,7 +108,7 @@ impl AppView {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.command_tx.is_some() {
+        if self.session_state != SessionState::Disconnected {
             self.status = "A session is already active.".to_owned();
             cx.notify();
             return;
@@ -126,7 +148,11 @@ impl AppView {
         };
         let (event_tx, mut event_rx) = mpsc::channel(16);
         match ssh::spawn_connection(spec, event_tx) {
-            Ok(command_tx) => self.command_tx = Some(command_tx),
+            Ok((command_tx, cancel_tx)) => {
+                self.command_tx = Some(command_tx);
+                self.cancel_tx = Some(cancel_tx);
+                self.session_state = SessionState::Connecting;
+            }
             Err(error) => {
                 self.status = format!("Could not start SSH runtime: {error}");
                 cx.notify();
@@ -134,19 +160,46 @@ impl AppView {
             }
         }
 
+        self.session_generation = self.session_generation.wrapping_add(1);
+        let session_generation = self.session_generation;
         cx.spawn(async move |this, cx| {
             while let Some(event) = event_rx.recv().await {
                 let result = this.update(cx, |view, cx| {
+                    if view.session_generation != session_generation {
+                        return;
+                    }
+                    if view.session_state == SessionState::Disconnecting
+                        && matches!(&event, UiEvent::Status(_) | UiEvent::Screen(_))
+                    {
+                        return;
+                    }
                     match event {
-                        UiEvent::Status(status) => view.status = status,
-                        UiEvent::Screen(frame) => view.frame = Some(frame),
+                        UiEvent::Status(status) => {
+                            view.status = status;
+                            view.session_state = SessionState::Connected;
+                        }
+                        UiEvent::Screen(frame) => {
+                            view.frame = Some(frame);
+                            view.terminal_message.clear();
+                            view.session_state = SessionState::Connected;
+                        }
                         UiEvent::Failed(error) => {
-                            view.status = error;
+                            view.clear_terminal_session(
+                                error,
+                                "The SSH session ended. Verify the status and connect again.",
+                            );
                             view.command_tx = None;
+                            view.cancel_tx = None;
+                            view.session_state = SessionState::Disconnected;
                         }
                         UiEvent::Disconnected => {
-                            view.status = "Disconnected".to_owned();
+                            view.clear_terminal_session(
+                                "Disconnected",
+                                "Disconnected. Verify the host details and connect again.",
+                            );
                             view.command_tx = None;
+                            view.cancel_tx = None;
+                            view.session_state = SessionState::Disconnected;
                         }
                     }
                     cx.notify();
@@ -155,12 +208,48 @@ impl AppView {
                     break;
                 }
             }
+            let _ = this.update(cx, |view, cx| {
+                if view.session_generation == session_generation
+                    && view.session_state != SessionState::Disconnected
+                {
+                    view.clear_terminal_session(
+                        "Session event stream closed",
+                        "The SSH session ended unexpectedly. Connect again.",
+                    );
+                    view.command_tx = None;
+                    view.cancel_tx = None;
+                    view.session_state = SessionState::Disconnected;
+                    cx.notify();
+                }
+            });
         })
         .detach();
         cx.notify();
     }
 
+    fn disconnect(&mut self, cx: &mut Context<Self>) {
+        if self.session_state == SessionState::Disconnected
+            || self.session_state == SessionState::Disconnecting
+        {
+            return;
+        }
+
+        if let Some(cancel_tx) = &self.cancel_tx {
+            cancel_tx.send_replace(true);
+        }
+        self.session_state = SessionState::Disconnecting;
+        self.frame = None;
+        self.terminal_message = "Disconnecting from the SSH session...".to_owned();
+        self.mouse_position = None;
+        self.scroll_remainder = 0.0;
+        self.status = "Disconnecting...".to_owned();
+        cx.notify();
+    }
+
     fn send_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.session_state != SessionState::Connected {
+            return;
+        }
         let modifiers = event.keystroke.modifiers;
         let key_name = event.keystroke.key.to_ascii_lowercase();
         if self.command_tx.is_some() && modifiers.shift && (modifiers.control || modifiers.platform)
@@ -233,7 +322,7 @@ impl AppView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.terminal_focus);
-        if self.frame.is_none() {
+        if self.session_state != SessionState::Connected || self.frame.is_none() {
             return;
         }
         let Some(button) = terminal_mouse_button(event.button) else {
@@ -259,6 +348,9 @@ impl AppView {
     }
 
     fn mouse_up(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
+        if self.session_state != SessionState::Connected {
+            return;
+        }
         let Some(button) = terminal_mouse_button(event.button) else {
             return;
         };
@@ -285,6 +377,9 @@ impl AppView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.session_state != SessionState::Connected {
+            return;
+        }
         let tracking_mode = self
             .frame
             .as_ref()
@@ -337,6 +432,9 @@ impl AppView {
     }
 
     fn scroll_terminal(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if self.session_state != SessionState::Connected {
+            return;
+        }
         let Some(command_tx) = &self.command_tx else {
             return;
         };
@@ -537,11 +635,23 @@ impl Render for AppView {
                             .child("Password")
                             .child(TextInput::new(&self.password).mask_toggle()),
                     )
-                    .child(Button::new("connect").primary().label("Connect").on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.connect(window, cx);
-                        }),
-                    )),
+                    .child(match self.session_state {
+                        SessionState::Disconnected => Button::new("connect")
+                            .primary()
+                            .label("Connect")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.connect(window, cx);
+                            })),
+                        SessionState::Connecting => Button::new("cancel-connection")
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
+                        SessionState::Connected => Button::new("disconnect")
+                            .label("Disconnect")
+                            .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
+                        SessionState::Disconnecting => {
+                            Button::new("disconnecting").label("Disconnecting...")
+                        }
+                    }),
             )
             .child(
                 div()

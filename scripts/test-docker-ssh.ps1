@@ -32,7 +32,7 @@ try {
     $port = [int]($portMapping.Trim().Split(":")[-1])
 
     $hostKey = $null
-    for ($attempt = 0; $attempt -lt 180; $attempt++) {
+    for ($attempt = 0; $attempt -lt 480; $attempt++) {
         $hostKey = docker exec $containerName cat /etc/ssh/ssh_host_ed25519_key.pub 2>$null
         if ($LASTEXITCODE -eq 0 -and $hostKey) {
             break
@@ -49,7 +49,7 @@ try {
     }
 
     $ready = $false
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    for ($attempt = 0; $attempt -lt 240; $attempt++) {
         $client = [System.Net.Sockets.TcpClient]::new()
         try {
             $connect = $client.ConnectAsync("127.0.0.1", $port)
@@ -82,7 +82,7 @@ try {
     $env:DSHELL_DOCKER_SSH_PASSWORD = $password
     $env:DSHELL_DOCKER_SSH_KNOWN_HOSTS = $knownHostsPath
 
-    cargo test --locked docker_ssh_terminal_round_trip -- --ignored --nocapture
+    cargo test --locked docker_ssh_ -- --ignored --nocapture
     if ($LASTEXITCODE -ne 0) {
         throw "The application SSH terminal integration test failed."
     }
