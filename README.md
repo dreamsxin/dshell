@@ -1,6 +1,6 @@
 # dshell
 
-dshell is a Rust-native SSH terminal prototype built with GPUI, russh, and
+dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime.
 
@@ -14,23 +14,26 @@ The server host key must already be present in the current user's OpenSSH
 known_hosts file. Unknown or changed keys are rejected. Verify a key out of
 band before adding it to known_hosts.
 
-Run `cargo run --locked`, enter the host, port, user, and password, then
-connect. The password field is masked and cleared when connection starts.
-Passwords are used only for the current SSH authentication attempt and are not
-persisted. Click the terminal area to focus it, then use the keyboard as you
-would in a remote terminal. The terminal grid follows window resizing. When the
-remote application enables mouse tracking, clicks, motion, and the wheel are
-sent to it; otherwise, left-button dragging selects text and the wheel browses
-terminal history.
+Run `cargo run --locked`, enter the host, port, user, and password in the
+connection bar, then connect. Each connection opens an independent session tab;
+switching tabs preserves each session's terminal state, and closing a tab ends
+only that SSH session. The password field is masked and cleared when connection
+starts. Passwords are used only for the current SSH authentication attempt and
+are not persisted. Click the terminal area to focus it, then use the keyboard
+as you would in a remote terminal. The terminal grid follows window resizing.
+When the remote application enables mouse tracking, clicks, motion, and the
+wheel are sent to it; otherwise, left-button dragging selects text and the
+wheel browses terminal history.
 
 Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
 active session. Remote exit and connection failure clear the terminal view so a
 new connection starts with a clean session.
 
-Saved hosts can be searched, loaded, updated, and deleted from the left panel.
-The profile file stores only the display name, host, port, and username. On
-Windows it is stored at `%APPDATA%\dshell\hosts.json`; passwords are requested
-for each connection and are never written to the profile file.
+Saved hosts can be searched, loaded into the connection bar, updated, and
+deleted from the left panel. The profile file stores only the display name,
+host, port, and username. On Windows it is stored at
+`%APPDATA%\dshell\hosts.json`; passwords are requested for each connection
+and are never written to the profile file.
 
 ## Test and Verify
 

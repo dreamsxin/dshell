@@ -20,8 +20,8 @@ use terminal::{
 use tokio::sync::{mpsc, watch};
 use zeroize::Zeroizing;
 
-const HOSTS_SIDEBAR_WIDTH_PX: f32 = 236.0;
-const EXTRA_WORKSPACE_CHROME_PX: f32 = 88.0;
+const HOSTS_SIDEBAR_WIDTH_PX: f32 = 228.0;
+const EXTRA_WORKSPACE_CHROME_PX: f32 = 172.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionState {
@@ -29,6 +29,33 @@ enum SessionState {
     Connecting,
     Connected,
     Disconnecting,
+}
+
+struct SshSession {
+    id: u64,
+    title: String,
+    host: String,
+    port: u16,
+    username: String,
+    status: String,
+    frame: Option<TerminalFrame>,
+    terminal_message: String,
+    terminal_size: TerminalSize,
+    scroll_remainder: f32,
+    mouse_position: Option<TerminalPosition>,
+    command_tx: Option<mpsc::Sender<TerminalRequest>>,
+    cancel_tx: Option<watch::Sender<bool>>,
+    state: SessionState,
+}
+
+impl SshSession {
+    fn clear_terminal(&mut self, status: impl Into<String>, message: impl Into<String>) {
+        self.status = status.into();
+        self.frame = None;
+        self.terminal_message = message.into();
+        self.mouse_position = None;
+        self.scroll_remainder = 0.0;
+    }
 }
 
 struct AppView {
@@ -39,17 +66,12 @@ struct AppView {
     username: Entity<InputState>,
     password: Entity<InputState>,
     status: String,
-    frame: Option<TerminalFrame>,
-    terminal_message: String,
+    sessions: Vec<SshSession>,
+    active_session_id: Option<u64>,
+    next_session_id: u64,
     terminal_size: TerminalSize,
-    scroll_remainder: f32,
     terminal_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
-    mouse_position: Option<TerminalPosition>,
     terminal_focus: FocusHandle,
-    command_tx: Option<mpsc::Sender<TerminalRequest>>,
-    cancel_tx: Option<watch::Sender<bool>>,
-    session_state: SessionState,
-    session_generation: u64,
     profiles: Vec<HostProfile>,
     profile_store: Option<ProfileStore>,
     profiles_ready: bool,
@@ -89,18 +111,13 @@ impl AppView {
             port,
             username,
             password,
-            status: "Disconnected".to_owned(),
-            frame: None,
-            terminal_message: "Connect to a server with a verified host key.".to_owned(),
+            status: "Ready".to_owned(),
+            sessions: Vec::new(),
+            active_session_id: None,
+            next_session_id: 1,
             terminal_size,
-            scroll_remainder: 0.0,
             terminal_bounds: Rc::default(),
-            mouse_position: None,
             terminal_focus: cx.focus_handle(),
-            command_tx: None,
-            cancel_tx: None,
-            session_state: SessionState::Disconnected,
-            session_generation: 0,
             profiles,
             profile_store,
             profiles_ready,
@@ -111,12 +128,21 @@ impl AppView {
         }
     }
 
-    fn clear_terminal_session(&mut self, status: impl Into<String>, message: impl Into<String>) {
-        self.status = status.into();
-        self.frame = None;
-        self.terminal_message = message.into();
-        self.mouse_position = None;
-        self.scroll_remainder = 0.0;
+    fn session(&self, id: u64) -> Option<&SshSession> {
+        self.sessions.iter().find(|session| session.id == id)
+    }
+
+    fn session_mut(&mut self, id: u64) -> Option<&mut SshSession> {
+        self.sessions.iter_mut().find(|session| session.id == id)
+    }
+
+    fn active_session(&self) -> Option<&SshSession> {
+        self.active_session_id.and_then(|id| self.session(id))
+    }
+
+    fn active_session_mut(&mut self) -> Option<&mut SshSession> {
+        let id = self.active_session_id?;
+        self.session_mut(id)
     }
 
     fn size_for_window(window: &Window) -> TerminalSize {
@@ -129,15 +155,17 @@ impl AppView {
 
     fn resize_terminal(&mut self, window: &Window, cx: &mut Context<Self>) {
         let size = Self::size_for_window(window);
-        if size == self.terminal_size {
-            return;
-        }
-
         self.terminal_size = size;
-        if let Some(command_tx) = &self.command_tx
-            && let Err(error) = command_tx.try_send(TerminalRequest::Resize(size))
-        {
-            self.status = format!("Terminal resize queue is unavailable: {error}");
+        for session in &mut self.sessions {
+            if session.terminal_size == size {
+                continue;
+            }
+            session.terminal_size = size;
+            if let Some(command_tx) = &session.command_tx
+                && let Err(error) = command_tx.try_send(TerminalRequest::Resize(size))
+            {
+                session.status = format!("Terminal resize queue is unavailable: {error}");
+            }
         }
         cx.notify();
     }
@@ -153,20 +181,7 @@ impl AppView {
         });
     }
 
-    fn require_disconnected(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.session_state == SessionState::Disconnected {
-            return true;
-        }
-        self.profile_message =
-            "Disconnect the active session before changing host profiles.".to_owned();
-        cx.notify();
-        false
-    }
-
     fn new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.require_disconnected(cx) {
-            return;
-        }
         Self::set_input_value(&self.profile_name, "", window, cx);
         Self::set_input_value(&self.host, "", window, cx);
         Self::set_input_value(&self.port, "22", window, cx);
@@ -179,9 +194,6 @@ impl AppView {
     }
 
     fn load_profile(&mut self, profile: &HostProfile, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.require_disconnected(cx) {
-            return;
-        }
         Self::set_input_value(&self.profile_name, &profile.name, window, cx);
         Self::set_input_value(&self.host, &profile.host, window, cx);
         Self::set_input_value(&self.port, &profile.port.to_string(), window, cx);
@@ -194,9 +206,6 @@ impl AppView {
     }
 
     fn save_profile(&mut self, cx: &mut Context<Self>) {
-        if !self.require_disconnected(cx) {
-            return;
-        }
         if !self.profiles_ready {
             self.profile_message =
                 "Host profiles could not be loaded; fix the profile file before saving.".to_owned();
@@ -266,7 +275,7 @@ impl AppView {
     }
 
     fn request_profile_delete(&mut self, cx: &mut Context<Self>) {
-        if self.require_disconnected(cx) && self.selected_profile.is_some() {
+        if self.selected_profile.is_some() {
             self.confirm_delete = true;
             self.profile_message.clear();
             cx.notify();
@@ -274,9 +283,6 @@ impl AppView {
     }
 
     fn delete_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.require_disconnected(cx) {
-            return;
-        }
         let Some(selected) = self.selected_profile.clone() else {
             return;
         };
@@ -300,98 +306,109 @@ impl AppView {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session_state != SessionState::Disconnected {
-            self.status = "A session is already active.".to_owned();
-            cx.notify();
-            return;
-        }
-
-        let host = self.host.read(cx).value().to_string();
+        let host = self.host.read(cx).value().trim().to_owned();
         let port = self.port.read(cx).value().parse::<u16>();
-        let username = self.username.read(cx).value().to_string();
+        let username = self.username.read(cx).value().trim().to_owned();
+        let requested_title = self.profile_name.read(cx).value().trim().to_owned();
         let password = Zeroizing::new(self.password.read(cx).text().to_string());
-        self.mouse_position = None;
         self.password
             .update(cx, |state, cx| state.set_value("", window, cx));
 
         let port = match port {
             Ok(port) if port > 0 => port,
             _ => {
-                self.status = "Port must be between 1 and 65535.".to_owned();
+                self.profile_message = "Port must be between 1 and 65535.".to_owned();
                 cx.notify();
                 return;
             }
         };
         if host.trim().is_empty() || username.trim().is_empty() || password.is_empty() {
-            self.status = "Host, user, and password are required.".to_owned();
+            self.profile_message = "Host, user, and password are required.".to_owned();
             cx.notify();
             return;
         }
 
-        self.status = format!("Checking host key and connecting to {host}:{port}...");
-        self.frame = None;
-        self.terminal_message.clear();
+        let id = self.next_session_id;
+        self.next_session_id = self.next_session_id.saturating_add(1);
+        let title = if requested_title.is_empty() {
+            format!("{username}@{host}")
+        } else {
+            requested_title
+        };
+        let status = format!("Checking host key and connecting to {host}:{port}...");
         let spec = ConnectionSpec {
             host,
             port,
-            username,
+            username: username.clone(),
             password,
             terminal_size: self.terminal_size,
         };
         let (event_tx, mut event_rx) = mpsc::channel(16);
         match ssh::spawn_connection(spec, event_tx) {
             Ok((command_tx, cancel_tx)) => {
-                self.command_tx = Some(command_tx);
-                self.cancel_tx = Some(cancel_tx);
-                self.session_state = SessionState::Connecting;
+                self.sessions.push(SshSession {
+                    id,
+                    title,
+                    host: self.host.read(cx).value().trim().to_owned(),
+                    port,
+                    username,
+                    status,
+                    frame: None,
+                    terminal_message: "Connecting...".to_owned(),
+                    terminal_size: self.terminal_size,
+                    scroll_remainder: 0.0,
+                    mouse_position: None,
+                    command_tx: Some(command_tx),
+                    cancel_tx: Some(cancel_tx),
+                    state: SessionState::Connecting,
+                });
+                self.active_session_id = Some(id);
             }
             Err(error) => {
-                self.status = format!("Could not start SSH runtime: {error}");
+                self.profile_message = format!("Could not start SSH runtime: {error}");
                 cx.notify();
                 return;
             }
         }
 
-        self.session_generation = self.session_generation.wrapping_add(1);
-        let session_generation = self.session_generation;
         cx.spawn(async move |this, cx| {
             while let Some(event) = event_rx.recv().await {
                 let result = this.update(cx, |view, cx| {
-                    if view.session_generation != session_generation {
+                    let Some(session) = view.session_mut(id) else {
                         return;
-                    }
-                    if view.session_state == SessionState::Disconnecting
+                    };
+                    if session.state == SessionState::Disconnecting
                         && matches!(&event, UiEvent::Status(_) | UiEvent::Screen(_))
                     {
                         return;
                     }
                     match event {
                         UiEvent::Status(status) => {
-                            view.status = status;
-                            view.session_state = SessionState::Connected;
+                            session.status = status;
+                            session.state = SessionState::Connected;
                         }
                         UiEvent::Screen(frame) => {
-                            view.frame = Some(frame);
-                            view.terminal_message.clear();
-                            view.session_state = SessionState::Connected;
+                            session.frame = Some(frame);
+                            session.terminal_message.clear();
+                            session.state = SessionState::Connected;
                         }
                         UiEvent::Failed(error) => {
-                            view.clear_terminal_session(
+                            session.clear_terminal(
                                 error,
                                 "The SSH session ended. Verify the status and connect again.",
                             );
-                            view.command_tx = None;
-                            view.cancel_tx = None;
-                            view.session_state = SessionState::Disconnected;
+                            session.command_tx = None;
+                            session.cancel_tx = None;
+                            session.state = SessionState::Disconnected;
                         }
                         UiEvent::Disconnected => {
-                            view.clear_terminal_session(
+                            session.clear_terminal(
                                 "Disconnected",
                                 "Disconnected. Verify the host details and connect again.",
                             );
-                            view.command_tx = None;
-                            view.cancel_tx = None;
-                            view.session_state = SessionState::Disconnected;
+                            session.command_tx = None;
+                            session.cancel_tx = None;
+                            session.state = SessionState::Disconnected;
                         }
                     }
                     cx.notify();
@@ -401,57 +418,100 @@ impl AppView {
                 }
             }
             let _ = this.update(cx, |view, cx| {
-                if view.session_generation == session_generation
-                    && view.session_state != SessionState::Disconnected
+                if let Some(session) = view.session_mut(id)
+                    && session.state != SessionState::Disconnected
                 {
-                    view.clear_terminal_session(
+                    session.clear_terminal(
                         "Session event stream closed",
                         "The SSH session ended unexpectedly. Connect again.",
                     );
-                    view.command_tx = None;
-                    view.cancel_tx = None;
-                    view.session_state = SessionState::Disconnected;
+                    session.command_tx = None;
+                    session.cancel_tx = None;
+                    session.state = SessionState::Disconnected;
                     cx.notify();
                 }
             });
         })
         .detach();
+        self.profile_message.clear();
+        window.focus(&self.terminal_focus);
         cx.notify();
     }
 
-    fn disconnect(&mut self, cx: &mut Context<Self>) {
-        if self.session_state == SessionState::Disconnected
-            || self.session_state == SessionState::Disconnecting
+    fn select_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session(id).is_none() {
+            return;
+        }
+        self.active_session_id = Some(id);
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn disconnect_session(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session_mut(id) else {
+            return;
+        };
+        if session.state == SessionState::Disconnected
+            || session.state == SessionState::Disconnecting
         {
             return;
         }
 
-        if let Some(cancel_tx) = &self.cancel_tx {
+        if let Some(cancel_tx) = &session.cancel_tx {
             cancel_tx.send_replace(true);
         }
-        self.session_state = SessionState::Disconnecting;
-        self.frame = None;
-        self.terminal_message = "Disconnecting from the SSH session...".to_owned();
-        self.mouse_position = None;
-        self.scroll_remainder = 0.0;
-        self.status = "Disconnecting...".to_owned();
+        session.state = SessionState::Disconnecting;
+        session.frame = None;
+        session.terminal_message = "Disconnecting from the SSH session...".to_owned();
+        session.mouse_position = None;
+        session.scroll_remainder = 0.0;
+        session.status = "Disconnecting...".to_owned();
+        cx.notify();
+    }
+
+    fn close_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.sessions.iter().position(|session| session.id == id) else {
+            return;
+        };
+        if let Some(session) = self.sessions.get(index)
+            && let Some(cancel_tx) = &session.cancel_tx
+        {
+            cancel_tx.send_replace(true);
+        }
+        self.sessions.remove(index);
+        if self.active_session_id == Some(id) {
+            self.active_session_id = self
+                .sessions
+                .get(index)
+                .or_else(|| self.sessions.last())
+                .map(|session| session.id);
+        }
+        if self.active_session_id.is_none() {
+            self.status = "Ready".to_owned();
+        }
+        window.focus(&self.terminal_focus);
         cx.notify();
     }
 
     fn send_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        if self.session_state != SessionState::Connected {
+        let Some(session_id) = self.active_session_id else {
+            return;
+        };
+        if self
+            .session(session_id)
+            .is_none_or(|session| session.state != SessionState::Connected)
+        {
             return;
         }
         let modifiers = event.keystroke.modifiers;
         let key_name = event.keystroke.key.to_ascii_lowercase();
-        if self.command_tx.is_some() && modifiers.shift && (modifiers.control || modifiers.platform)
-        {
+        if modifiers.shift && (modifiers.control || modifiers.platform) {
             match key_name.as_str() {
                 "c" => {
                     cx.stop_propagation();
                     if let Some(text) = self
-                        .frame
-                        .as_ref()
+                        .session(session_id)
+                        .and_then(|session| session.frame.as_ref())
                         .and_then(|frame| frame.selection_text.clone())
                         .filter(|text| !text.is_empty())
                     {
@@ -474,7 +534,7 @@ impl AppView {
             }
         }
 
-        let Some(command_tx) = &self.command_tx else {
+        let Some(session) = self.session_mut(session_id) else {
             return;
         };
         let key = TerminalKeyInput {
@@ -490,10 +550,13 @@ impl AppView {
             return;
         }
 
+        let Some(command_tx) = &session.command_tx else {
+            return;
+        };
         match command_tx.try_send(TerminalRequest::Key(key)) {
             Ok(()) => cx.stop_propagation(),
             Err(error) => {
-                self.status = format!("Terminal input queue is unavailable: {error}");
+                session.status = format!("Terminal input queue is unavailable: {error}");
                 cx.notify();
             }
         }
@@ -501,20 +564,23 @@ impl AppView {
 
     fn terminal_position(&self, position: Point<Pixels>) -> Option<TerminalPosition> {
         let bounds = self.terminal_bounds.borrow().clone()?;
+        let size = self
+            .active_session()
+            .map_or(self.terminal_size, |session| session.terminal_size);
         let column = (((position.x - bounds.origin.x) / px(1.0)) / CELL_WIDTH_PX)
             .floor()
-            .clamp(0.0, f32::from(self.terminal_size.columns.saturating_sub(1)))
-            as u16;
+            .clamp(0.0, f32::from(size.columns.saturating_sub(1))) as u16;
         let row = (((position.y - bounds.origin.y) / px(1.0)) / CELL_HEIGHT_PX)
             .floor()
-            .clamp(0.0, f32::from(self.terminal_size.rows.saturating_sub(1)))
-            as u16;
+            .clamp(0.0, f32::from(size.rows.saturating_sub(1))) as u16;
         Some(TerminalPosition { row, column })
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.terminal_focus);
-        if self.session_state != SessionState::Connected || self.frame.is_none() {
+        if self.active_session().is_none_or(|session| {
+            session.state != SessionState::Connected || session.frame.is_none()
+        }) {
             return;
         }
         let Some(button) = terminal_mouse_button(event.button) else {
@@ -523,7 +589,9 @@ impl AppView {
         let Some(position) = self.terminal_position(event.position) else {
             return;
         };
-        self.mouse_position = Some(position);
+        if let Some(session) = self.active_session_mut() {
+            session.mouse_position = Some(position);
+        }
         self.send_terminal_request(
             TerminalRequest::Mouse(TerminalMouseEvent::Press {
                 button,
@@ -540,19 +608,24 @@ impl AppView {
     }
 
     fn mouse_up(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
-        if self.session_state != SessionState::Connected {
+        if self
+            .active_session()
+            .is_none_or(|session| session.state != SessionState::Connected)
+        {
             return;
         }
         let Some(button) = terminal_mouse_button(event.button) else {
             return;
         };
-        let Some(position) = self
-            .terminal_position(event.position)
-            .or(self.mouse_position)
-        else {
+        let previous_position = self
+            .active_session()
+            .and_then(|session| session.mouse_position);
+        let Some(position) = self.terminal_position(event.position).or(previous_position) else {
             return;
         };
-        self.mouse_position = Some(position);
+        if let Some(session) = self.active_session_mut() {
+            session.mouse_position = Some(position);
+        }
         self.send_terminal_request(
             TerminalRequest::Mouse(TerminalMouseEvent::Release {
                 button,
@@ -569,10 +642,13 @@ impl AppView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if self.session_state != SessionState::Connected {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        if session.state != SessionState::Connected {
             return;
         }
-        let tracking_mode = self
+        let tracking_mode = session
             .frame
             .as_ref()
             .map_or(MouseTrackingMode::Disabled, |frame| {
@@ -590,10 +666,15 @@ impl AppView {
         let Some(position) = self.terminal_position(event.position) else {
             return;
         };
-        if self.mouse_position == Some(position) {
+        if self
+            .active_session()
+            .is_some_and(|session| session.mouse_position == Some(position))
+        {
             return;
         }
-        self.mouse_position = Some(position);
+        if let Some(session) = self.active_session_mut() {
+            session.mouse_position = Some(position);
+        }
         self.send_terminal_request(
             TerminalRequest::Mouse(TerminalMouseEvent::Move {
                 button,
@@ -615,28 +696,32 @@ impl AppView {
         action: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(command_tx) = &self.command_tx
+        if let Some(session) = self.active_session_mut()
+            && let Some(command_tx) = &session.command_tx
             && let Err(error) = command_tx.try_send(request)
         {
-            self.status = format!("{action} queue is unavailable: {error}");
+            session.status = format!("{action} queue is unavailable: {error}");
             cx.notify();
         }
     }
 
     fn scroll_terminal(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        if self.session_state != SessionState::Connected {
-            return;
-        }
-        let Some(command_tx) = &self.command_tx else {
+        let Some(session_id) = self.active_session_id else {
             return;
         };
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected || session.command_tx.is_none() {
+            return;
+        }
         let delta_y = match event.delta {
             ScrollDelta::Lines(delta) => delta.y,
             ScrollDelta::Pixels(delta) => delta.y / px(CELL_HEIGHT_PX),
         };
-        let accumulated = self.scroll_remainder - delta_y;
+        let accumulated = session.scroll_remainder - delta_y;
         let rows = accumulated.trunc() as i32;
-        self.scroll_remainder = accumulated - rows as f32;
+        session.scroll_remainder = accumulated - rows as f32;
         cx.stop_propagation();
         if rows == 0 {
             return;
@@ -654,10 +739,7 @@ impl AppView {
                 event.modifiers.control,
             ),
         });
-        if let Err(error) = command_tx.try_send(request) {
-            self.status = format!("Terminal scroll queue is unavailable: {error}");
-            cx.notify();
-        }
+        self.send_terminal_request(request, "Terminal scroll", cx);
     }
 }
 
@@ -725,7 +807,7 @@ fn labeled_input(
         .child(
             div()
                 .text_size(px(11.))
-                .text_color(rgb(0xaeb7c0))
+                .text_color(rgb(0x5b646b))
                 .child(label),
         )
         .child(input)
@@ -740,7 +822,7 @@ impl Render for AppView {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .gap(px(6.))
+            .gap(px(4.))
             .overflow_y_scroll();
         let mut matching_profiles = 0;
         for (index, profile) in self.profiles.iter().enumerate() {
@@ -765,15 +847,15 @@ impl Render for AppView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
+                    .gap(px(1.))
                     .child(button.on_click(cx.listener(move |this, _, window, cx| {
                         this.load_profile(&selected_profile, window, cx);
                     })))
                     .child(
                         div()
-                            .px(px(8.))
+                            .px(px(10.))
                             .text_size(px(11.))
-                            .text_color(rgb(0x9ba6b0))
+                            .text_color(rgb(0x667078))
                             .child(format!(
                                 "{}@{}:{}",
                                 profile.username, profile.host, profile.port
@@ -791,8 +873,48 @@ impl Render for AppView {
                 div()
                     .p(px(8.))
                     .text_size(px(12.))
-                    .text_color(rgb(0x9ba6b0))
+                    .text_color(rgb(0x667078))
                     .child(empty_message),
+            );
+        }
+
+        let mut session_tabs = div()
+            .id("session-tabs")
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(px(4.))
+            .overflow_x_scroll();
+        for session in &self.sessions {
+            let id = session.id;
+            let title = session.title.clone();
+            let selected = self.active_session_id == Some(id);
+            let tab = Button::new(("session-tab", id)).label(title);
+            let tab = if selected { tab.primary() } else { tab };
+            session_tabs =
+                session_tabs.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .child(tab.on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_session(id, window, cx);
+                        })))
+                        .child(Button::new(("close-session", id)).label("x").on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.close_session(id, window, cx);
+                            }),
+                        )),
+                );
+        }
+        if self.sessions.is_empty() {
+            session_tabs = session_tabs.child(
+                div()
+                    .px(px(8.))
+                    .text_size(px(12.))
+                    .text_color(rgb(0x667078))
+                    .child("No active sessions"),
             );
         }
 
@@ -804,6 +926,7 @@ impl Render for AppView {
             .min_h_0()
             .font_family("monospace")
             .text_size(px(13.))
+            .text_color(rgb(0xe1e5e8))
             .on_children_prepainted(move |children, _, _| {
                 *terminal_bounds.borrow_mut() = children.first().cloned();
             })
@@ -838,7 +961,10 @@ impl Render for AppView {
             )
             .on_mouse_move(cx.listener(|this, event, _, cx| this.mouse_move(event, cx)));
 
-        if let Some(frame) = &self.frame {
+        let active_frame = self
+            .active_session()
+            .and_then(|session| session.frame.as_ref());
+        if let Some(frame) = active_frame {
             let mut grid = div().flex().flex_col().flex_1().min_h_0();
             for row in &frame.rows {
                 let mut rendered_row = div().flex().h(px(CELL_HEIGHT_PX)).flex_shrink_0();
@@ -849,18 +975,47 @@ impl Render for AppView {
             }
             terminal_view = terminal_view.child(grid);
         } else {
-            terminal_view = terminal_view.child(self.terminal_message.clone());
+            let message = self
+                .active_session()
+                .map(|session| session.terminal_message.clone())
+                .unwrap_or_default();
+            terminal_view = terminal_view.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(14.))
+                    .text_color(rgb(0x859099))
+                    .child(message),
+            );
         }
 
-        let status_color = match self.session_state {
-            SessionState::Disconnected => rgb(0xaeb7c0),
-            SessionState::Connecting => rgb(0xe6c36a),
-            SessionState::Connected => rgb(0x77c89a),
-            SessionState::Disconnecting => rgb(0xe6a76a),
+        let active_session = self.active_session();
+        let status_color = match active_session.map(|session| session.state) {
+            Some(SessionState::Disconnected) | None => rgb(0x5b646b),
+            Some(SessionState::Connecting) => rgb(0x986c12),
+            Some(SessionState::Connected) => rgb(0x28744d),
+            Some(SessionState::Disconnecting) => rgb(0x9a5a24),
         };
-        let mut actions = div().flex().items_center().gap(px(8.)).child(
+        let status_text = active_session
+            .map(|session| session.status.clone())
+            .unwrap_or_else(|| self.status.clone());
+        let identity = active_session
+            .map(|session| format!("{}@{}:{}", session.username, session.host, session.port))
+            .unwrap_or_default();
+        let terminal_dimensions = active_session
+            .map(|session| {
+                format!(
+                    "{} x {}",
+                    session.terminal_size.columns, session.terminal_size.rows
+                )
+            })
+            .unwrap_or_default();
+
+        let mut actions = div().flex().items_center().gap(px(6.)).child(
             Button::new("save-profile")
-                .label("Save Host")
+                .label("Save")
                 .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
         );
         if self.selected_profile.is_some() {
@@ -868,67 +1023,83 @@ impl Render for AppView {
                 actions = actions
                     .child(
                         Button::new("confirm-delete-profile")
-                            .label("Confirm Delete")
+                            .label("Confirm")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.delete_profile(window, cx)),
                             ),
                     )
-                    .child(Button::new("cancel-delete-profile").label("Keep").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.confirm_delete = false;
-                            cx.notify();
-                        }),
-                    ));
+                    .child(
+                        Button::new("cancel-delete-profile")
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_delete = false;
+                                cx.notify();
+                            })),
+                    );
             } else {
                 actions = actions.child(
                     Button::new("delete-profile")
-                        .label("Delete Host")
+                        .label("Delete")
                         .on_click(cx.listener(|this, _, _, cx| this.request_profile_delete(cx))),
                 );
             }
         }
-        actions = actions.child(match self.session_state {
-            SessionState::Disconnected => Button::new("connect")
-                .primary()
-                .label("Connect")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.connect(window, cx);
-                })),
-            SessionState::Connecting => Button::new("cancel-connection")
-                .label("Cancel")
-                .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
-            SessionState::Connected => Button::new("disconnect")
-                .label("Disconnect")
-                .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
-            SessionState::Disconnecting => Button::new("disconnecting").label("Disconnecting..."),
-        });
+        if let Some(session) = active_session
+            && matches!(
+                session.state,
+                SessionState::Connecting | SessionState::Connected
+            )
+        {
+            let active_id = session.id;
+            let label = if session.state == SessionState::Connecting {
+                "Cancel"
+            } else {
+                "Disconnect"
+            };
+            actions = actions.child(Button::new("disconnect-active").label(label).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.disconnect_session(active_id, cx);
+                }),
+            ));
+        }
+        actions = actions.child(Button::new("connect").primary().label("Connect").on_click(
+            cx.listener(|this, _, window, cx| {
+                this.connect(window, cx);
+            }),
+        ));
 
         div()
             .flex()
             .size_full()
-            .bg(rgb(0x151a20))
-            .text_color(rgb(0xe1e5e9))
+            .bg(rgb(0xf3f5f6))
+            .text_color(rgb(0x20262b))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .w(px(HOSTS_SIDEBAR_WIDTH_PX))
                     .h_full()
-                    .gap(px(10.))
-                    .p(px(12.))
-                    .bg(rgb(0x20262d))
-                    .child(div().text_size(px(18.)).child("dshell"))
+                    .gap(px(8.))
+                    .p(px(10.))
+                    .bg(rgb(0xe8ebed))
                     .child(
-                        Button::new("new-host-profile")
-                            .label("New Host")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_profile(window, cx);
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(32.))
+                            .child(div().text_size(px(16.)).child("dshell"))
+                            .child(Button::new("new-host-profile").label("New").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.new_profile(window, cx);
+                                }),
+                            )),
                     )
                     .child(
                         div()
+                            .pt(px(4.))
                             .text_size(px(11.))
-                            .text_color(rgb(0xaeb7c0))
+                            .text_color(rgb(0x59636a))
                             .child("SAVED HOSTS"),
                     )
                     .child(TextInput::new(&self.profile_search))
@@ -941,46 +1112,34 @@ impl Render for AppView {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .gap(px(8.))
-                    .p(px(12.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(24.))
-                            .child(div().text_size(px(15.)).child("Connection"))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(status_color)
-                                    .child(self.status.clone()),
-                            ),
-                    )
+                    .gap(px(0.))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(8.))
+                            .gap(px(6.))
+                            .px(px(10.))
+                            .py(px(8.))
+                            .bg(rgb(0xf3f5f6))
                             .child(
                                 div()
                                     .flex()
                                     .items_end()
-                                    .gap(px(8.))
-                                    .child(div().flex_1().min_w(px(110.)).child(labeled_input(
-                                        "Profile",
+                                    .gap(px(6.))
+                                    .child(div().w(px(150.)).child(labeled_input(
+                                        "Name",
                                         &self.profile_name,
                                         false,
                                     )))
                                     .child(
                                         div()
                                             .flex_1()
-                                            .min_w(px(170.))
+                                            .min_w(px(140.))
                                             .child(labeled_input("Host", &self.host, false)),
                                     )
                                     .child(
                                         div()
-                                            .w(px(78.))
+                                            .w(px(76.))
                                             .child(labeled_input("Port", &self.port, false)),
                                     ),
                             )
@@ -988,30 +1147,23 @@ impl Render for AppView {
                                 div()
                                     .flex()
                                     .items_end()
-                                    .gap(px(8.))
-                                    .child(div().flex_1().min_w(px(120.)).child(labeled_input(
+                                    .gap(px(6.))
+                                    .child(div().w(px(150.)).child(labeled_input(
                                         "Username",
                                         &self.username,
                                         false,
                                     )))
-                                    .child(div().flex_1().min_w(px(160.)).child(labeled_input(
+                                    .child(div().flex_1().min_w(px(130.)).child(labeled_input(
                                         "Password",
                                         &self.password,
                                         true,
-                                    ))),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap(px(8.))
+                                    )))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
                                             .text_size(px(11.))
-                                            .text_color(rgb(0xaeb7c0))
+                                            .text_color(rgb(0x59636a))
                                             .child(self.profile_message.clone()),
                                     )
                                     .child(actions),
@@ -1020,12 +1172,42 @@ impl Render for AppView {
                     .child(
                         div()
                             .flex()
+                            .items_center()
+                            .h(px(38.))
+                            .gap(px(4.))
+                            .px(px(8.))
+                            .bg(rgb(0xe4e7e9))
+                            .child(session_tabs),
+                    )
+                    .child(
+                        div()
+                            .flex()
                             .flex_col()
                             .flex_1()
                             .min_h_0()
                             .bg(rgb(0x0b0f13))
-                            .p(px(12.))
+                            .p(px(8.))
                             .child(terminal_view.track_focus(&self.terminal_focus).size_full()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(26.))
+                            .px(px(10.))
+                            .bg(rgb(0xdfe3e5))
+                            .text_size(px(11.))
+                            .child(div().text_color(status_color).child(status_text))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .text_color(rgb(0x59636a))
+                                    .child(identity)
+                                    .child(terminal_dimensions),
+                            ),
                     ),
             )
     }
