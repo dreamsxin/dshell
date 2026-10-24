@@ -84,16 +84,22 @@ The session properties also accept a keep-alive interval in seconds (`0`
 disables it). A positive value makes the client send keepalive messages when
 the connection is idle.
 
-Use the `Log` button to record raw terminal output to a file. Logging is off by
+Use the `Log` button to record terminal output to a file. Logging is off by
 default and starts only after you choose a destination in the native save
-dialog. The file contains the remote byte stream, including ANSI escape
+dialog. New log files use a timestamped record format: each 16 ms output batch is
+written with its Unix timestamp, and the replay view builds a timeline from
+those records. Appending to an existing legacy raw log keeps the raw format and
+has no timeline. The file contains the remote byte stream, including ANSI escape
 sequences and anything printed in the terminal, so it may contain sensitive
 data. Stop logging with the same button or by disconnecting.
 
-Use the `Replay log` button to open a previously recorded raw log in a read-only
+Use the `Replay log` button to open a previously recorded log in a read-only
 terminal overlay. The log is parsed by the same terminal emulator, so colors and
-cursor addressing are reproduced. Files larger than 16 MiB replay their tail;
-use Top, Bottom or the wheel to browse the available scrollback.
+cursor addressing are reproduced. Timestamped logs show `Prev event`,
+`Next event` and the relative time of the selected record; each jump rebuilds the
+view from the beginning through that record. Files larger than 16 MiB replay
+their tail, starting at a complete record boundary for timestamped logs; use
+Top, Bottom or the wheel to browse the available scrollback.
 
 Use the `Snippets` button to manage reusable commands. Snippets are stored in
 `%APPDATA%\dshell\snippets.json` on Windows and can be sent to the active
@@ -160,13 +166,15 @@ starts from the first match.
 Each terminal card has a floating toolbar in its top-right corner with Find,
 Copy, Paste, Replay log, Send file and the inspector toggle. The toolbar is
 dimmed until the pointer enters the card. The find bar spans the card width minus
-32 px. The inspector on the right (default 380 px) has three independently
+32 px. The inspector on the right (default 380 px) has four independently
 collapsible groups: Transfers shows the active transfer's name, direction,
 progress and live rate with a cancel action; Forwards lists active rules with
 their listen address, target, bound port and active connection count, and keeps
 stopped rules so they can be restarted; Connection shows the host, session state,
 terminal size, authentication method, verified host-key algorithm and SHA256
-fingerprint, profile, jump host, keep-alive and logging state. Opening or closing the
+fingerprint, profile, jump host, keep-alive and logging state; Log shows whether
+the session is recording, the current file, and actions to start/stop logging or
+open a replay. Opening or closing the
 inspector recalculates the terminal columns and resizes every active PTY;
 collapsing a group does not change the terminal size.
 
