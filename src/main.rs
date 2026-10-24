@@ -1293,6 +1293,7 @@ struct AppView {
     key_comment: Entity<InputState>,
     key_message: String,
     key_public: Option<String>,
+    key_algorithm: keygen::KeyAlgorithm,
     auth_prompt: Option<AuthPromptState>,
     auth_prompt_inputs: Vec<Entity<InputState>>,
     auth_prompt_plain_inputs: Vec<Entity<InputState>>,
@@ -1498,6 +1499,7 @@ impl AppView {
             key_comment,
             key_message: String::new(),
             key_public: None,
+            key_algorithm: keygen::KeyAlgorithm::default(),
             auth_prompt: None,
             auth_prompt_inputs,
             auth_prompt_plain_inputs,
@@ -6161,15 +6163,16 @@ impl AppView {
         let path = expand_local_path(&path);
         let passphrase = Zeroizing::new(self.new_key_passphrase.read(cx).value().to_string());
         let comment = self.key_comment.read(cx).value().trim().to_owned();
+        let algorithm = self.key_algorithm;
         Self::set_input_value(&self.new_key_passphrase, "", window, cx);
-        self.key_message = "Generating Ed25519 key...".to_owned();
+        self.key_message = format!("Generating {} key...", algorithm.label());
         self.key_public = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let read_path = path.clone();
             let result = cx
                 .background_spawn(async move {
-                    keygen::generate_ed25519(&read_path, passphrase.as_str(), &comment)
+                    keygen::generate(&read_path, passphrase.as_str(), &comment, algorithm)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
@@ -6181,7 +6184,11 @@ impl AppView {
                             generated.public_path.display()
                         );
                         view.key_public = Some(generated.public_key);
-                        view.show_toast("Ed25519 key pair generated.", Tone::Success, cx);
+                        view.show_toast(
+                            format!("{} key pair generated.", algorithm.label()),
+                            Tone::Success,
+                            cx,
+                        );
                     }
                     Err(error) => {
                         view.key_message = format!("{error:#}");
@@ -6199,6 +6206,29 @@ impl AppView {
         let tokens = self.tokens();
         let message = self.key_message.clone();
         let public_key = self.key_public.clone();
+        let selected_algorithm = self.key_algorithm;
+        let mut algorithm_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
+        for (index, algorithm) in keygen::KeyAlgorithm::ALL.into_iter().enumerate() {
+            let kind = if selected_algorithm == algorithm {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Secondary
+            };
+            algorithm_selector = algorithm_selector.child(
+                components::button(
+                    &tokens,
+                    ("key-algorithm", index),
+                    algorithm.label(),
+                    kind,
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.key_algorithm = algorithm;
+                    this.key_public = None;
+                    cx.notify();
+                })),
+            );
+        }
         let mut body = div()
             .id("keys-body")
             .flex()
@@ -6208,6 +6238,25 @@ impl AppView {
             .overflow_y_scroll()
             .gap(px(ui_tokens::SPACE_3))
             .p(px(ui_tokens::SPACE_4))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui_tokens::SPACE_2))
+                    .child(components::section_label(&tokens, "Algorithm"))
+                    .child(algorithm_selector)
+                    .child(components::help_text(
+                        &tokens,
+                        selected_algorithm.description(),
+                    ))
+                    .child(components::help_text(
+                        &tokens,
+                        format!(
+                            "Suggested private key path: {}",
+                            selected_algorithm.path_hint()
+                        ),
+                    )),
+            )
             .child(components::field(
                 &tokens,
                 "Private key path",
@@ -6225,7 +6274,7 @@ impl AppView {
                 components::button(
                     &tokens,
                     "generate-key",
-                    "Generate Ed25519 key",
+                    format!("Generate {} key", selected_algorithm.label()),
                     ButtonKind::Primary,
                     ButtonSize::Regular,
                 )
@@ -6235,8 +6284,7 @@ impl AppView {
             )
             .child(components::help_text(
                 &tokens,
-                "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600.",
-            ));
+                "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600.",            ));
         if !message.is_empty() {
             body = body.child(components::help_text(&tokens, message));
         }
