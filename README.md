@@ -160,13 +160,22 @@ starts from the first match.
 Each terminal card has a floating toolbar in its top-right corner with Find,
 Copy, Paste, Replay log, Send file and the inspector toggle. The toolbar is
 dimmed until the pointer enters the card. The find bar spans the card width minus
-32 px. The 380 px inspector on the right has three independently collapsible
-groups: Transfers shows the active transfer's name, direction and progress;
-Forwards lists forwarding rules with their listen address, target and active
-connection count; Connection shows the host, session state, terminal size,
-authentication method, profile, jump host, keep-alive and logging state. Opening
-or closing the inspector recalculates the terminal columns and resizes every
-active PTY; collapsing a group does not change the terminal size.
+32 px. The inspector on the right (default 380 px) has three independently
+collapsible groups: Transfers shows the active transfer's name, direction,
+progress and live rate with a cancel action; Forwards lists active rules with
+their listen address, target, bound port and active connection count, and keeps
+stopped rules so they can be restarted; Connection shows the host, session state,
+terminal size, authentication method, verified host-key algorithm and SHA256
+fingerprint, profile, jump host, keep-alive and logging state. Opening or closing the
+inspector recalculates the terminal columns and resizes every active PTY;
+collapsing a group does not change the terminal size.
+
+Drag the divider between the sidebar and the workspace, or between the
+workspace and the inspector, to resize them. The sidebar accepts 200-360 px and
+the inspector 300-520 px; both widths are stored in `settings.json`, and the PTY
+is resized once when the drag ends. Dragging a session tab onto another tab
+reorders the tabs; `Alt+1` through `Alt+9` follow the visual order without
+reconnecting the sessions.
 
 ## Test and Verify
 
