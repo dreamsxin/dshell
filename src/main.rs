@@ -58,14 +58,15 @@ use zeroize::Zeroizing;
 
 const TERMINAL_PANEL_HEADER_PX: f32 = ui_tokens::PANEL_HEADER_HEIGHT;
 const TERMINAL_CARD_BORDER_PX: f32 = 2.0;
+const LAYOUT_DIVIDER_PX: f32 = 4.0;
 const MAX_AUTH_PROMPTS: usize = 8;
 const MAX_LOG_REPLAY_BYTES: u64 = 16 * 1024 * 1024;
 
-fn sidebar_width(collapsed: bool) -> f32 {
+fn sidebar_width(settings: &AppSettings, collapsed: bool) -> f32 {
     if collapsed {
         ui_tokens::SIDEBAR_COLLAPSED_WIDTH
     } else {
-        ui_tokens::SIDEBAR_WIDTH
+        settings.sidebar_width
     }
 }
 
@@ -77,12 +78,18 @@ fn terminal_size_for_viewport(
     inspector_visible: bool,
 ) -> TerminalSize {
     let inspector = if inspector_visible {
-        ui_tokens::INSPECTOR_WIDTH + ui_tokens::SPACE_2
+        settings.inspector_width + ui_tokens::SPACE_2 + LAYOUT_DIVIDER_PX
     } else {
         0.0
     };
+    let sidebar_divider = if sidebar_collapsed {
+        0.0
+    } else {
+        LAYOUT_DIVIDER_PX
+    };
     let width = width
-        - sidebar_width(sidebar_collapsed)
+        - sidebar_width(settings, sidebar_collapsed)
+        - sidebar_divider
         - ui_tokens::SPACE_4
         - TERMINAL_CARD_BORDER_PX
         - inspector;
@@ -100,6 +107,31 @@ fn terminal_size_for_viewport(
 struct ToastState {
     message: String,
     tone: Tone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutDragTarget {
+    Sidebar,
+    Inspector,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LayoutDrag {
+    target: LayoutDragTarget,
+    start_x: f32,
+    start_width: f32,
+}
+
+fn dragged_panel_width(target: LayoutDragTarget, start_width: f32, delta: f32) -> f32 {
+    match target {
+        LayoutDragTarget::Sidebar => {
+            (start_width + delta).clamp(ui_tokens::SIDEBAR_MIN_WIDTH, ui_tokens::SIDEBAR_MAX_WIDTH)
+        }
+        LayoutDragTarget::Inspector => (start_width - delta).clamp(
+            ui_tokens::INSPECTOR_MIN_WIDTH,
+            ui_tokens::INSPECTOR_MAX_WIDTH,
+        ),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -527,17 +559,19 @@ fn remove_session(
 #[cfg(test)]
 mod session_tests {
     use super::{
-        AppShortcut, ForwardViewState, MouseTrackingMode, SessionEditorEscape, SessionEditorKey,
-        SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession, TerminalFrame,
-        TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
-        enqueue_session_request, mpsc, read_log_for_replay, remove_session, search_result_message,
-        session_editor_escape, session_editor_key, session_terminal_size_for_split,
-        split_panel_terminal_size, terminal_size_for_viewport, watch,
+        AppShortcut, ForwardViewState, LayoutDragTarget, MouseTrackingMode, SessionEditorEscape,
+        SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
+        TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
+        dragged_panel_width, enqueue_session_request, mpsc, read_log_for_replay, remove_session,
+        search_result_message, session_editor_escape, session_editor_key,
+        session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
+        watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::settings::AppSettings;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
+    use crate::ui::tokens as ui_tokens;
 
     fn test_session(
         id: u64,
@@ -850,6 +884,37 @@ mod session_tests {
     }
 
     #[test]
+    fn panel_drag_clamps_to_the_configured_range() {
+        assert_eq!(
+            dragged_panel_width(LayoutDragTarget::Sidebar, 248.0, 1000.0),
+            ui_tokens::SIDEBAR_MAX_WIDTH
+        );
+        assert_eq!(
+            dragged_panel_width(LayoutDragTarget::Sidebar, 248.0, -1000.0),
+            ui_tokens::SIDEBAR_MIN_WIDTH
+        );
+        assert_eq!(
+            dragged_panel_width(LayoutDragTarget::Inspector, 380.0, 1000.0),
+            ui_tokens::INSPECTOR_MIN_WIDTH
+        );
+        assert_eq!(
+            dragged_panel_width(LayoutDragTarget::Inspector, 380.0, -1000.0),
+            ui_tokens::INSPECTOR_MAX_WIDTH
+        );
+    }
+
+    #[test]
+    fn custom_panel_widths_reduce_terminal_columns_without_changing_rows() {
+        let mut settings = AppSettings::default();
+        let default_size = terminal_size_for_viewport(1280.0, 800.0, &settings, false, true);
+        settings.sidebar_width = ui_tokens::SIDEBAR_MAX_WIDTH;
+        settings.inspector_width = ui_tokens::INSPECTOR_MAX_WIDTH;
+        let narrow = terminal_size_for_viewport(1280.0, 800.0, &settings, false, true);
+        assert!(narrow.columns < default_size.columns);
+        assert_eq!(narrow.rows, default_size.rows);
+    }
+
+    #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
         let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
@@ -1042,6 +1107,7 @@ struct AppView {
     overlay_focus_pending: bool,
     toast: Option<ToastState>,
     toast_generation: u64,
+    layout_drag: Option<LayoutDrag>,
     side_by_side_state: Entity<ResizableState>,
     stacked_state: Entity<ResizableState>,
     profiles: Vec<HostProfile>,
@@ -1245,6 +1311,7 @@ impl AppView {
             overlay_focus_pending: false,
             toast: None,
             toast_generation: 0,
+            layout_drag: None,
             side_by_side_state,
             stacked_state,
             profiles: data.profiles,
@@ -1301,6 +1368,74 @@ impl AppView {
 
     fn request_overlay_focus(&mut self) {
         self.overlay_focus_pending = true;
+    }
+
+    fn begin_layout_drag(
+        &mut self,
+        target: LayoutDragTarget,
+        position_x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let start_width = match target {
+            LayoutDragTarget::Sidebar => self.settings.sidebar_width,
+            LayoutDragTarget::Inspector => self.settings.inspector_width,
+        };
+        self.layout_drag = Some(LayoutDrag {
+            target,
+            start_x: position_x,
+            start_width,
+        });
+        cx.notify();
+    }
+
+    fn update_layout_drag(&mut self, position_x: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.layout_drag else {
+            return;
+        };
+        let delta = position_x - drag.start_x;
+        match drag.target {
+            LayoutDragTarget::Sidebar => {
+                self.settings.sidebar_width =
+                    dragged_panel_width(drag.target, drag.start_width, delta);
+            }
+            LayoutDragTarget::Inspector => {
+                self.settings.inspector_width =
+                    dragged_panel_width(drag.target, drag.start_width, delta);
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_layout_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout_drag.take().is_some() {
+            self.persist_ui_preferences(cx);
+            self.resize_terminal(window, cx);
+        }
+    }
+
+    fn layout_divider(
+        &mut self,
+        id: &'static str,
+        target: LayoutDragTarget,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .occlude()
+            .flex_shrink_0()
+            .w(px(LAYOUT_DIVIDER_PX))
+            .h_full()
+            .cursor_col_resize()
+            .bg(tokens.border_subtle.opacity(0.45))
+            .hover(|style| style.bg(tokens.accent.opacity(0.6)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.begin_layout_drag(target, event.position.x.as_f32(), cx);
+                }),
+            )
+            .into_any_element()
     }
 
     fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
@@ -5662,6 +5797,14 @@ impl AppView {
     fn persist_ui_preferences(&mut self, cx: &mut Context<Self>) {
         self.settings.ui_theme = self.ui_theme;
         self.settings.sidebar_collapsed = self.sidebar_collapsed;
+        self.settings.sidebar_width = self
+            .settings
+            .sidebar_width
+            .clamp(ui_tokens::SIDEBAR_MIN_WIDTH, ui_tokens::SIDEBAR_MAX_WIDTH);
+        self.settings.inspector_width = self.settings.inspector_width.clamp(
+            ui_tokens::INSPECTOR_MIN_WIDTH,
+            ui_tokens::INSPECTOR_MAX_WIDTH,
+        );
         if let Some(store) = self.settings_store.as_ref()
             && let Err(error) = store.save(&self.settings)
         {
@@ -5896,6 +6039,8 @@ impl AppView {
             shortcuts,
             ui_theme: self.ui_theme,
             sidebar_collapsed: self.sidebar_collapsed,
+            sidebar_width: self.settings.sidebar_width,
+            inspector_width: self.settings.inspector_width,
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -6578,7 +6723,7 @@ impl AppView {
         }
 
         div()
-            .w(px(ui_tokens::SIDEBAR_WIDTH))
+            .w(px(self.settings.sidebar_width))
             .h_full()
             .flex()
             .flex_col()
@@ -7482,7 +7627,7 @@ impl AppView {
 
         components::panel(tokens)
             .id("inspector")
-            .w(px(ui_tokens::INSPECTOR_WIDTH))
+            .w(px(self.settings.inspector_width))
             .ml(px(ui_tokens::SPACE_2))
             .border_1()
             .border_color(tokens.border_subtle)
@@ -7815,7 +7960,14 @@ impl Render for AppView {
         if self.inspector_visible
             && let Some(session_id) = self.active_session_id
         {
-            terminal_workspace = terminal_workspace.child(self.inspector(session_id, &tokens, cx));
+            terminal_workspace = terminal_workspace
+                .child(self.layout_divider(
+                    "inspector-resize",
+                    LayoutDragTarget::Inspector,
+                    &tokens,
+                    cx,
+                ))
+                .child(self.inspector(session_id, &tokens, cx));
         }
         if let Some(session_id) = self.active_session_id
             && self
@@ -7835,6 +7987,26 @@ impl Render for AppView {
             terminal_workspace = terminal_workspace.child(self.snippets_panel(cx));
         }
 
+        let mut content_row = div().flex().flex_1().min_h_0().min_w_0().child(sidebar);
+        if !self.sidebar_collapsed {
+            content_row = content_row.child(self.layout_divider(
+                "sidebar-resize",
+                LayoutDragTarget::Sidebar,
+                &tokens,
+                cx,
+            ));
+        }
+        content_row = content_row.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .child(tab_bar)
+                .child(terminal_workspace),
+        );
+
         let mut root = div()
             .relative()
             .flex()
@@ -7843,25 +8015,29 @@ impl Render for AppView {
             .bg(tokens.bg_canvas)
             .text_color(tokens.text_primary)
             .child(command_bar)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .child(sidebar)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(tab_bar)
-                            .child(terminal_workspace),
-                    ),
-            )
+            .child(content_row)
             .child(status_bar);
+        if self.layout_drag.is_some() {
+            root = root.child(
+                div()
+                    .id("layout-drag-overlay")
+                    .absolute()
+                    .size_full()
+                    .occlude()
+                    .cursor_col_resize()
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        this.update_layout_drag(event.position.x.as_f32(), cx);
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.finish_layout_drag(window, cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.finish_layout_drag(window, cx)),
+                    ),
+            );
+        }
         if self.keys_visible {
             root = root.child(self.keys_panel(cx));
         }

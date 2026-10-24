@@ -5,7 +5,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     shortcuts::ShortcutSettings,
     terminal::{CursorStyle, TerminalTheme},
-    ui::theme::UiTheme,
+    ui::{
+        theme::UiTheme,
+        tokens::{
+            INSPECTOR_MAX_WIDTH, INSPECTOR_MIN_WIDTH, INSPECTOR_WIDTH, SIDEBAR_MAX_WIDTH,
+            SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH,
+        },
+    },
 };
 
 const DOCUMENT_VERSION: u8 = 1;
@@ -31,6 +37,10 @@ pub struct AppSettings {
     pub ui_theme: UiTheme,
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    #[serde(default = "default_inspector_width")]
+    pub inspector_width: f32,
 }
 
 impl Default for AppSettings {
@@ -43,6 +53,8 @@ impl Default for AppSettings {
             shortcuts: ShortcutSettings::default(),
             ui_theme: UiTheme::DEFAULT,
             sidebar_collapsed: false,
+            sidebar_width: SIDEBAR_WIDTH,
+            inspector_width: INSPECTOR_WIDTH,
         }
     }
 }
@@ -62,6 +74,18 @@ impl AppSettings {
             shortcuts: self.shortcuts.normalized(),
             ui_theme: self.ui_theme,
             sidebar_collapsed: self.sidebar_collapsed,
+            sidebar_width: normalize_width(
+                self.sidebar_width,
+                SIDEBAR_WIDTH,
+                SIDEBAR_MIN_WIDTH,
+                SIDEBAR_MAX_WIDTH,
+            ),
+            inspector_width: normalize_width(
+                self.inspector_width,
+                INSPECTOR_WIDTH,
+                INSPECTOR_MIN_WIDTH,
+                INSPECTOR_MAX_WIDTH,
+            ),
         }
     }
 
@@ -92,6 +116,10 @@ struct SettingsDocument {
     ui_theme: UiTheme,
     #[serde(default)]
     sidebar_collapsed: bool,
+    #[serde(default = "default_sidebar_width")]
+    sidebar_width: f32,
+    #[serde(default = "default_inspector_width")]
+    inspector_width: f32,
 }
 
 pub struct SettingsStore {
@@ -161,6 +189,8 @@ impl SettingsStore {
             shortcuts: document.shortcuts,
             ui_theme: document.ui_theme,
             sidebar_collapsed: document.sidebar_collapsed,
+            sidebar_width: document.sidebar_width,
+            inspector_width: document.inspector_width,
         }
         .normalized())
     }
@@ -186,6 +216,8 @@ impl SettingsStore {
             shortcuts: settings.shortcuts.clone(),
             ui_theme: settings.ui_theme,
             sidebar_collapsed: settings.sidebar_collapsed,
+            sidebar_width: settings.sidebar_width,
+            inspector_width: settings.inspector_width,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -203,6 +235,22 @@ fn default_font_size() -> f32 {
 
 fn default_font_family() -> String {
     DEFAULT_FONT_FAMILY.to_owned()
+}
+
+fn default_sidebar_width() -> f32 {
+    SIDEBAR_WIDTH
+}
+
+fn default_inspector_width() -> f32 {
+    INSPECTOR_WIDTH
+}
+
+fn normalize_width(value: f32, default: f32, minimum: f32, maximum: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(minimum, maximum)
+    } else {
+        default
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +279,8 @@ mod tests {
             shortcuts,
             ui_theme: UiTheme::Light,
             sidebar_collapsed: true,
+            sidebar_width: 312.0,
+            inspector_width: 460.0,
         };
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), settings);
@@ -244,11 +294,15 @@ mod tests {
                 shortcuts: ShortcutSettings::default(),
                 ui_theme: UiTheme::Dark,
                 sidebar_collapsed: false,
+                sidebar_width: 10.0,
+                inspector_width: 10_000.0,
             })
             .unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.font_size, MAX_FONT_SIZE);
         assert_eq!(loaded.font_family, DEFAULT_FONT_FAMILY);
+        assert_eq!(loaded.sidebar_width, SIDEBAR_MIN_WIDTH);
+        assert_eq!(loaded.inspector_width, INSPECTOR_MAX_WIDTH);
     }
 
     #[test]
@@ -264,6 +318,8 @@ mod tests {
         assert_eq!(loaded.font_size, 14.0);
         assert_eq!(loaded.ui_theme, UiTheme::Dark);
         assert!(!loaded.sidebar_collapsed);
+        assert_eq!(loaded.sidebar_width, SIDEBAR_WIDTH);
+        assert_eq!(loaded.inspector_width, INSPECTOR_WIDTH);
         assert_eq!(loaded.shortcuts, ShortcutSettings::default());
     }
 
@@ -277,6 +333,8 @@ mod tests {
             shortcuts: ShortcutSettings::default(),
             ui_theme: UiTheme::Dark,
             sidebar_collapsed: false,
+            sidebar_width: SIDEBAR_WIDTH,
+            inspector_width: INSPECTOR_WIDTH,
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);
