@@ -17,7 +17,7 @@ use russh::{
     },
 };
 use tokio::{
-    io::AsyncWriteExt as _,
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
     sync::{mpsc, watch},
     task::JoinHandle,
     time::{MissedTickBehavior, interval},
@@ -28,6 +28,7 @@ use crate::forward::{
     self, AcceptedConnection, ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec,
     RemoteTarget, RemoteTargetMap,
 };
+use crate::log;
 use crate::sftp::{self, SftpCommand, SftpEvent};
 use crate::terminal::{
     CursorStyle, MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton,
@@ -470,6 +471,7 @@ async fn run_connection_with_known_hosts(
     let mut screen_dirty = false;
     let mut log_file: Option<tokio::fs::File> = None;
     let mut log_buffer: Vec<u8> = Vec::new();
+    let mut log_framed = true;
     let mut render_tick = interval(Duration::from_millis(16));
     render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -532,8 +534,9 @@ async fn run_connection_with_known_hosts(
                     }
                     Some(TerminalRequest::StartLog(path)) => {
                         match open_log_file(&path).await {
-                            Ok(file) => {
+                            Ok((file, framed)) => {
                                 log_file = Some(file);
+                                log_framed = framed;
                                 log_buffer.clear();
                                 events
                                     .send(UiEvent::LogState(Some(path)))
@@ -551,7 +554,9 @@ async fn run_connection_with_known_hosts(
                         }
                     }
                     Some(TerminalRequest::StopLog) => {
-                        if let Err(error) = flush_log(&mut log_file, &mut log_buffer).await {
+                        if let Err(error) =
+                            flush_log(&mut log_file, &mut log_buffer, log_framed).await
+                        {
                             let _ = events
                                 .send(UiEvent::Status(format!(
                                     "Could not finish the terminal log: {error:#}"
@@ -765,7 +770,7 @@ async fn run_connection_with_known_hosts(
                 }
             }
             _ = render_tick.tick(), if screen_dirty => {
-                if let Err(error) = flush_log(&mut log_file, &mut log_buffer).await {
+                if let Err(error) = flush_log(&mut log_file, &mut log_buffer, log_framed).await {
                     log_file = None;
                     log_buffer.clear();
                     let _ = events.send(UiEvent::LogState(None)).await;
@@ -802,7 +807,7 @@ async fn run_connection_with_known_hosts(
         }
     }
 
-    let _ = flush_log(&mut log_file, &mut log_buffer).await;
+    let _ = flush_log(&mut log_file, &mut log_buffer, log_framed).await;
     for (_, runtime) in local_forwards.drain() {
         let _ = runtime.stop.send(true);
         runtime.task.abort();
@@ -1042,7 +1047,7 @@ async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
     let _ = cancellation.changed().await;
 }
 
-async fn open_log_file(path: &Path) -> Result<tokio::fs::File> {
+async fn open_log_file(path: &Path) -> Result<(tokio::fs::File, bool)> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -1050,15 +1055,41 @@ async fn open_log_file(path: &Path) -> Result<tokio::fs::File> {
             .await
             .with_context(|| format!("Could not create {}", parent.display()))?;
     }
-    tokio::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .await
-        .with_context(|| format!("Could not open {}", path.display()))
+        .with_context(|| format!("Could not open {}", path.display()))?;
+    let length = file
+        .metadata()
+        .await
+        .with_context(|| format!("Could not inspect {}", path.display()))?
+        .len();
+    let timestamped = if length == 0 {
+        file.write_all(log::HEADER)
+            .await
+            .with_context(|| format!("Could not write {}", path.display()))?;
+        file.flush()
+            .await
+            .with_context(|| format!("Could not flush {}", path.display()))?;
+        true
+    } else {
+        let mut header = [0u8; log::HEADER.len()];
+        match file.read_exact(&mut header).await {
+            Ok(_) => log::is_timestamped_header(&header),
+            Err(_) => false,
+        }
+    };
+    Ok((file, timestamped))
 }
 
-async fn flush_log(file: &mut Option<tokio::fs::File>, buffer: &mut Vec<u8>) -> Result<()> {
+async fn flush_log(
+    file: &mut Option<tokio::fs::File>,
+    buffer: &mut Vec<u8>,
+    timestamped: bool,
+) -> Result<()> {
     let Some(file) = file.as_mut() else {
         buffer.clear();
         return Ok(());
@@ -1066,7 +1097,12 @@ async fn flush_log(file: &mut Option<tokio::fs::File>, buffer: &mut Vec<u8>) -> 
     if buffer.is_empty() {
         return Ok(());
     }
-    file.write_all(buffer).await?;
+    if timestamped {
+        let record = log::frame(log::now_ms(), buffer);
+        file.write_all(&record).await?;
+    } else {
+        file.write_all(buffer).await?;
+    }
     file.flush().await?;
     buffer.clear();
     Ok(())
@@ -1916,10 +1952,23 @@ mod tests {
                             | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
-                    let logged = std::fs::read_to_string(&log_path)
+                    let replay = crate::log::read_replay(&log_path, 16 * 1024 * 1024)
+                        .map_err(anyhow::Error::msg)
                         .context("the terminal log file is unreadable")?;
+                    assert!(replay.timestamped);
                     assert!(
-                        logged.contains("DSHELL_LOG_MARKER"),
+                        !replay.timeline.is_empty(),
+                        "the timestamped log did not contain a timeline"
+                    );
+                    assert!(
+                        replay
+                            .timeline
+                            .windows(2)
+                            .all(|pair| pair[0].timestamp_ms <= pair[1].timestamp_ms),
+                        "log timestamps must not decrease"
+                    );
+                    assert!(
+                        String::from_utf8_lossy(&replay.bytes).contains("DSHELL_LOG_MARKER"),
                         "the terminal log did not contain the remote output"
                     );
 

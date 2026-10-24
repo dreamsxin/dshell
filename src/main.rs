@@ -1,5 +1,6 @@
 mod forward;
 mod keygen;
+mod log;
 mod openssh_config;
 mod profiles;
 mod settings;
@@ -13,8 +14,6 @@ mod ui;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
-    fs::File,
-    io::{Read as _, Seek as _, SeekFrom},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -220,6 +219,11 @@ struct LogReplayState {
     frame: TerminalFrame,
     message: String,
     scroll_remainder: f32,
+    replay_size: TerminalSize,
+    bytes: Vec<u8>,
+    timeline: Vec<log::LogEntry>,
+    timeline_index: Option<usize>,
+    timestamped: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -433,6 +437,18 @@ fn format_rate(bytes_per_second: f64) -> String {
     }
 }
 
+fn format_log_time(milliseconds: u64) -> String {
+    let hours = milliseconds / 3_600_000;
+    let minutes = (milliseconds / 60_000) % 60;
+    let seconds = (milliseconds / 1_000) % 60;
+    let millis = milliseconds % 1_000;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}.{millis:03}")
+    } else {
+        format!("{minutes:02}:{seconds:02}.{millis:03}")
+    }
+}
+
 struct SshSession {
     id: u64,
     title: String,
@@ -639,13 +655,14 @@ mod session_tests {
         AppShortcut, ForwardViewState, LayoutDragTarget, MouseTrackingMode, SessionEditorEscape,
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
-        dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_rate, mpsc,
-        read_log_for_replay, remember_stopped_forward, remove_session, reorder_session_ids,
+        dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_log_time,
+        format_rate, mpsc, remember_stopped_forward, remove_session, reorder_session_ids,
         search_result_message, session_editor_escape, session_editor_key,
         session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
         watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
+    use crate::log;
     use crate::settings::AppSettings;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
@@ -753,12 +770,22 @@ mod session_tests {
         std::fs::write(&path, b"0123456789").unwrap();
 
         assert_eq!(
-            read_log_for_replay(&path, 4).unwrap(),
-            (b"6789".to_vec(), true)
+            log::read_replay(&path, 4).unwrap(),
+            log::ReplayLog {
+                bytes: b"6789".to_vec(),
+                timeline: Vec::new(),
+                truncated: true,
+                timestamped: false,
+            }
         );
         assert_eq!(
-            read_log_for_replay(&path, 100).unwrap(),
-            (b"0123456789".to_vec(), false)
+            log::read_replay(&path, 100).unwrap(),
+            log::ReplayLog {
+                bytes: b"0123456789".to_vec(),
+                timeline: Vec::new(),
+                truncated: false,
+                timestamped: false,
+            }
         );
     }
 
@@ -1030,6 +1057,13 @@ mod session_tests {
     }
 
     #[test]
+    fn log_timeline_times_are_formatted() {
+        assert_eq!(format_log_time(0), "00:00.000");
+        assert_eq!(format_log_time(61_234), "01:01.234");
+        assert_eq!(format_log_time(3_661_005), "1:01:01.005");
+    }
+
+    #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
         let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
@@ -1189,6 +1223,7 @@ struct AppView {
     inspector_transfers_open: bool,
     inspector_forwards_open: bool,
     inspector_info_open: bool,
+    inspector_log_open: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
     profile_group: Entity<InputState>,
@@ -1393,6 +1428,7 @@ impl AppView {
             inspector_transfers_open: true,
             inspector_forwards_open: true,
             inspector_info_open: true,
+            inspector_log_open: true,
             profile_name,
             profile_search,
             profile_group,
@@ -1906,9 +1942,9 @@ impl AppView {
             {
                 let read_path = path.clone();
                 let read = cx
-                    .background_spawn(async move {
-                        read_log_for_replay(&read_path, MAX_LOG_REPLAY_BYTES)
-                    })
+                    .background_spawn(
+                        async move { log::read_replay(&read_path, MAX_LOG_REPLAY_BYTES) },
+                    )
                     .await;
                 let _ = this.update(cx, |view, cx| view.apply_log_replay(path, read, cx));
             }
@@ -1919,7 +1955,7 @@ impl AppView {
     fn apply_log_replay(
         &mut self,
         path: PathBuf,
-        read: Result<(Vec<u8>, bool), String>,
+        read: Result<log::ReplayLog, String>,
         cx: &mut Context<Self>,
     ) {
         let replay_size = TerminalSize {
@@ -1932,31 +1968,97 @@ impl AppView {
         };
         let mut terminal = TerminalEmulator::new_with_theme(replay_size, self.settings.theme);
         terminal.set_cursor_style(self.settings.cursor_style);
+        let mut bytes = Vec::new();
+        let mut timeline = Vec::new();
+        let mut timestamped = false;
         let message = match read {
-            Ok((bytes, truncated)) => {
-                terminal.feed(&bytes);
-                if truncated {
+            Ok(replay) => {
+                timestamped = replay.timestamped;
+                terminal.feed(&replay.bytes);
+                let size = if replay.truncated {
                     format!(
-                        "{} bytes replayed from the end of the file (limit {} MiB).",
-                        bytes.len(),
+                        "{} bytes replayed from the end of the file (limit {} MiB)",
+                        replay.bytes.len(),
                         MAX_LOG_REPLAY_BYTES / (1024 * 1024)
                     )
                 } else {
-                    format!("{} bytes replayed.", bytes.len())
-                }
+                    format!("{} bytes replayed", replay.bytes.len())
+                };
+                let detail = if replay.timestamped {
+                    format!("{} timestamped record(s)", replay.timeline.len())
+                } else {
+                    "legacy raw log without a timeline".to_owned()
+                };
+                bytes = replay.bytes;
+                timeline = replay.timeline;
+                format!("{size}; {detail}.")
             }
             Err(error) => format!("Could not read the log: {error}"),
         };
         let frame = terminal.frame();
+        let timeline_index = timeline.len().checked_sub(1);
         self.log_replay = Some(LogReplayState {
             path,
             terminal,
             frame,
             message,
             scroll_remainder: 0.0,
+            replay_size,
+            bytes,
+            timeline,
+            timeline_index,
+            timestamped,
         });
         self.request_overlay_focus();
         cx.notify();
+    }
+
+    fn jump_log_replay_timeline(&mut self, index: usize, cx: &mut Context<Self>) {
+        let theme = self.settings.theme;
+        let cursor_style = self.settings.cursor_style;
+        let Some(replay) = self.log_replay.as_mut() else {
+            return;
+        };
+        let Some(entry) = replay.timeline.get(index) else {
+            return;
+        };
+        let (offset, length, timestamp) = (entry.offset, entry.length, entry.timestamp_ms);
+        let end = offset.saturating_add(length).min(replay.bytes.len());
+        let first_timestamp = replay
+            .timeline
+            .first()
+            .map_or(timestamp, |entry| entry.timestamp_ms);
+        let mut terminal = TerminalEmulator::new_with_theme(replay.replay_size, theme);
+        terminal.set_cursor_style(cursor_style);
+        terminal.feed(&replay.bytes[..end]);
+        replay.frame = terminal.frame();
+        replay.terminal = terminal;
+        replay.timeline_index = Some(index);
+        replay.message = format!(
+            "Timeline {}/{} · {} · {} bytes replayed.",
+            index + 1,
+            replay.timeline.len(),
+            format_log_time(timestamp.saturating_sub(first_timestamp)),
+            end
+        );
+        cx.notify();
+    }
+
+    fn step_log_replay_timeline(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(replay) = self.log_replay.as_ref() else {
+            return;
+        };
+        if replay.timeline.is_empty() {
+            return;
+        }
+        let last = replay.timeline.len() - 1;
+        let current = replay.timeline_index.unwrap_or(last);
+        let next = if forward {
+            (current + 1).min(last)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.jump_log_replay_timeline(next, cx);
     }
 
     fn scroll_log_replay(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -2005,7 +2107,12 @@ impl AppView {
             return div().into_any_element();
         };
         let title = format!(
-            "Log replay: {}",
+            "Log replay{}: {}",
+            if replay.timestamped {
+                " (timeline)"
+            } else {
+                ""
+            },
             replay.path.file_name().map_or_else(
                 || replay.path.display().to_string(),
                 |name| name.to_string_lossy().into_owned()
@@ -2014,6 +2121,21 @@ impl AppView {
         let message = replay.message.clone();
         let frame = replay.frame.clone();
         let palette = self.settings.theme.palette();
+        let has_timeline = !replay.timeline.is_empty();
+        let timeline_label = replay.timeline_index.and_then(|index| {
+            replay.timeline.get(index).map(|entry| {
+                let first = replay
+                    .timeline
+                    .first()
+                    .map_or(entry.timestamp_ms, |entry| entry.timestamp_ms);
+                format!(
+                    "{} · {}/{}",
+                    format_log_time(entry.timestamp_ms.saturating_sub(first)),
+                    index + 1,
+                    replay.timeline.len()
+                )
+            })
+        });
         let search_overlay =
             if self.search_visible && self.search_target == Some(SearchTarget::LogReplay) {
                 Some(
@@ -2053,6 +2175,40 @@ impl AppView {
                                 .flex()
                                 .items_center()
                                 .gap(px(ui_tokens::SPACE_1))
+                                .when(has_timeline, |actions| {
+                                    actions
+                                        .child(
+                                            components::button(
+                                                &tokens,
+                                                "log-replay-timeline-prev",
+                                                "Prev event",
+                                                ButtonKind::Ghost,
+                                                ButtonSize::Small,
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.step_log_replay_timeline(false, cx);
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            components::button(
+                                                &tokens,
+                                                "log-replay-timeline-next",
+                                                "Next event",
+                                                ButtonKind::Ghost,
+                                                ButtonSize::Small,
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.step_log_replay_timeline(true, cx);
+                                                }),
+                                            ),
+                                        )
+                                        .when_some(timeline_label.clone(), |actions, label| {
+                                            actions.child(components::help_text(&tokens, label))
+                                        })
+                                })
                                 .child(
                                     components::button(
                                         &tokens,
@@ -7528,6 +7684,7 @@ impl AppView {
         let state = session.state;
         let terminal_size = session.terminal_size;
         let log_active = session.log_path.is_some();
+        let log_path = session.log_path.clone();
         let connection_info = session.connection_info.clone();
         let profile = session
             .profile_name
@@ -7905,6 +8062,67 @@ impl AppView {
                 ));
         }
 
+        body = body.child(
+            components::collapsible_header(tokens, "inspector-log", "Log", self.inspector_log_open)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.inspector_log_open = !this.inspector_log_open;
+                    cx.notify();
+                })),
+        );
+        if self.inspector_log_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle)
+                .child(components::info_row(
+                    tokens,
+                    "State",
+                    if log_active { "Recording" } else { "Off" },
+                ));
+            if let Some(path) = &log_path {
+                group = group.child(components::info_row(
+                    tokens,
+                    "File",
+                    path.display().to_string(),
+                ));
+            }
+            group = group
+                .child(components::help_text(
+                    tokens,
+                    "New logs use timestamped records with a replay timeline. Appending to an existing legacy raw log keeps the raw format. Logs may contain sensitive terminal output.",
+                ))
+                .child(
+                    components::button(
+                        tokens,
+                        "inspector-toggle-log",
+                        if log_active {
+                            "Stop logging"
+                        } else {
+                            "Start logging"
+                        },
+                        ButtonKind::Secondary,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_log(session_id, cx);
+                    })),
+                )
+                .child(
+                    components::button(
+                        tokens,
+                        "inspector-open-replay",
+                        "Open replay...",
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.begin_log_replay(cx))),
+                );
+            body = body.child(group);
+        }
+
         components::panel(tokens)
             .id("inspector")
             .w(px(self.settings.inspector_width))
@@ -8077,25 +8295,6 @@ fn search_result_message(result: &TerminalSearchResult) -> String {
     } else {
         "No matches".to_owned()
     }
-}
-
-fn read_log_for_replay(path: &Path, limit: u64) -> Result<(Vec<u8>, bool), String> {
-    let limit = limit.max(1);
-    let mut file =
-        File::open(path).map_err(|error| format!("Could not open {}: {error}", path.display()))?;
-    let length = file
-        .metadata()
-        .map_err(|error| format!("Could not read {} metadata: {error}", path.display()))?
-        .len();
-    let truncated = length > limit;
-    if truncated {
-        file.seek(SeekFrom::Start(length - limit))
-            .map_err(|error| format!("Could not seek {}: {error}", path.display()))?;
-    }
-    let mut bytes = Vec::with_capacity(length.min(limit) as usize);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-    Ok((bytes, truncated))
 }
 
 fn app_shortcut(
