@@ -48,3 +48,11 @@
 - Use conventional commit prefixes (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`) and one commit per milestone.
 - Do not amend or rebase commits that were already pushed and never force push. Do not push unless the user authorized it; pull with rebase first if the remote moved.
 - Update `IMPLEMENTATION_STATUS.md` for every milestone with completed behavior, verification counts, Docker result, remaining limitations and the next handoff. Update `README.md` for user-visible behavior and `ROADMAP.md` for phase status.
+
+## Release baseline
+
+- The first public release is `v0.1.0`, matching the package version in `Cargo.toml`.
+- A release must include `CHANGELOG.md`, updated `README.md`, `ROADMAP.md` and `IMPLEMENTATION_STATUS.md`, plus a clean `cargo fmt --all` and `scripts\verify-hard-constraints.ps1` run.
+- Before publishing, verify `cargo check --locked --all-targets`, `cargo test --locked`, the dependency boundary checks, and the strict `known_hosts` checks. Run `scripts\test-docker-ssh.ps1` when the release includes SSH, authentication, SFTP, forwarding, logging or PTY changes.
+- Publish releases from a conventional commit, create an annotated `vX.Y.Z` tag, and push the branch and tag only after checking that `origin/main` has not moved. Never force-push release history.
+- Release notes must state the verification date, test counts, Docker result, known limitations and any manual Windows desktop checks that remain outstanding. Do not claim GUI, DPI, IME or glyph validation unless it ran in a genuinely isolated interactive environment.

@@ -51,6 +51,13 @@ pub const MODAL_WIDTH_SETTINGS: f32 = 760.0;
 pub const MODAL_HEIGHT_SETTINGS: f32 = 600.0;
 pub const SESSION_NAV_WIDTH: f32 = 176.0;
 pub const PORT_FIELD_WIDTH: f32 = 112.0;
+pub const QUICK_COMMAND_WIDTH: f32 = 152.0;
+pub const QUICK_COMMAND_HEIGHT: f32 = 72.0;
+pub const QUICK_COMMAND_PANEL_WIDTH: f32 = 360.0;
+pub const MENU_WIDTH: f32 = 336.0;
+pub const MENU_MAX_HEIGHT: f32 = 560.0;
+pub const LAYOUT_MENU_WIDTH: f32 = 360.0;
+pub const LAYOUT_PRESET_HEIGHT: f32 = 68.0;
 
 // Radii (§5.4).
 pub const RADIUS_CONTROL: f32 = 6.0;

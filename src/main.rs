@@ -62,6 +62,7 @@ const TERMINAL_CARD_BORDER_PX: f32 = 2.0;
 const LAYOUT_DIVIDER_PX: f32 = 4.0;
 const MAX_AUTH_PROMPTS: usize = 8;
 const MAX_LOG_REPLAY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_KEYWORD_HIGHLIGHTS: usize = 32;
 
 fn sidebar_width(settings: &AppSettings, collapsed: bool) -> f32 {
     if collapsed {
@@ -244,6 +245,14 @@ enum SearchTarget {
 enum SplitOrientation {
     SideBySide,
     Stacked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutPreset {
+    Focus,
+    Standard,
+    Inspector,
+    Split,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,6 +550,72 @@ fn menu_item(
     if active { button } else { button.ghost() }
 }
 
+fn layout_preset_item(
+    tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    icon: IconName,
+    title: &'static str,
+    description: &'static str,
+    selected: bool,
+    enabled: bool,
+) -> Button {
+    Button::new(id)
+        .w_full()
+        .h(px(ui_tokens::LAYOUT_PRESET_HEIGHT))
+        .p(px(ui_tokens::SPACE_2))
+        .rounded(px(ui_tokens::RADIUS_CARD))
+        .border_1()
+        .border_color(if selected {
+            tokens.accent
+        } else {
+            tokens.border_subtle
+        })
+        .bg(if selected {
+            tokens.surface_overlay
+        } else {
+            tokens.surface
+        })
+        .hover(|style| style.bg(tokens.surface_overlay))
+        .disabled(!enabled)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(ui_tokens::SPACE_2))
+                .w_full()
+                .child(
+                    Icon::new(icon)
+                        .with_size(Size::Medium)
+                        .text_color(if selected {
+                            tokens.accent
+                        } else {
+                            tokens.text_secondary
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .min_w_0()
+                        .items_start()
+                        .child(
+                            div()
+                                .text_size(px(ui_tokens::FONT_BODY))
+                                .font_semibold()
+                                .text_color(tokens.text_primary)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
+                                .child(description),
+                        ),
+                ),
+        )
+}
+
 fn format_log_time(milliseconds: u64) -> String {
     let hours = milliseconds / 3_600_000;
     let minutes = (milliseconds / 60_000) % 60;
@@ -732,6 +807,14 @@ fn enqueue_session_request(
     })
 }
 
+fn keyword_matches(text: &str, keywords: &[String]) -> bool {
+    let text = text.to_lowercase();
+    keywords.iter().any(|keyword| {
+        let keyword = keyword.trim();
+        !keyword.is_empty() && text.contains(&keyword.to_lowercase())
+    })
+}
+
 fn remove_session(
     sessions: &mut Vec<SshSession>,
     active_session_id: &mut Option<u64>,
@@ -760,10 +843,11 @@ mod session_tests {
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
         dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_log_time,
-        format_rate, move_profile_to_group, mpsc, recall_compose_history, remember_compose_history,
-        remember_stopped_forward, remove_session, reorder_session_ids, search_result_message,
-        session_editor_escape, session_editor_key, session_terminal_size_for_split,
-        split_panel_terminal_size, synchronized_targets, terminal_size_for_viewport, watch,
+        format_rate, keyword_matches, move_profile_to_group, mpsc, recall_compose_history,
+        remember_compose_history, remember_stopped_forward, remove_session, reorder_session_ids,
+        search_result_message, session_editor_escape, session_editor_key,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
+        terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -992,6 +1076,15 @@ mod session_tests {
             Some(AppShortcut::NewSession)
         );
         assert_eq!(app_shortcut(&custom, "t", true, true, false), None);
+    }
+
+    #[test]
+    fn keyword_matching_is_literal_and_case_insensitive() {
+        let keywords = vec!["error".to_owned(), "timeout".to_owned()];
+        assert!(keyword_matches("Remote ERROR: timeout", &keywords));
+        assert!(keyword_matches("request timed out", &["timed".to_owned()]));
+        assert!(!keyword_matches("connected", &keywords));
+        assert!(!keyword_matches("error", &[String::new()]));
     }
 
     #[test]
@@ -1475,6 +1568,11 @@ struct AppView {
     snippet_message: String,
     snippets_visible: bool,
     snippet_targets: HashSet<u64>,
+    keyword_input: Entity<InputState>,
+    keyword_highlights: Vec<String>,
+    keyword_highlighting_enabled: bool,
+    keyword_message: String,
+    keywords_visible: bool,
     settings: AppSettings,
     settings_store: Option<SettingsStore>,
     settings_font_family: Entity<InputState>,
@@ -1505,6 +1603,8 @@ struct AppView {
     sync_targets: HashSet<u64>,
     sync_visible: bool,
     menu_visible: bool,
+    layout_menu_visible: bool,
+    tab_menu_session: Option<u64>,
     search_visible: bool,
     search_message: String,
     search_target: Option<SearchTarget>,
@@ -1541,6 +1641,8 @@ impl AppView {
         let sftp_name = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
         let snippet_name = cx.new(|cx| InputState::new(window, cx).placeholder("Snippet name"));
         let snippet_command = cx.new(|cx| InputState::new(window, cx).placeholder("uptime"));
+        let keyword_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("ERROR or timeout"));
         let (settings_store, settings, settings_message) = match SettingsStore::discover() {
             Ok(store) => match store.load() {
                 Ok(settings) => (Some(store), settings, String::new()),
@@ -1710,6 +1812,11 @@ impl AppView {
             snippet_message,
             snippets_visible: false,
             snippet_targets: HashSet::new(),
+            keyword_input,
+            keyword_highlights: Vec::new(),
+            keyword_highlighting_enabled: false,
+            keyword_message: String::new(),
+            keywords_visible: false,
             settings_theme: settings.theme,
             settings_cursor: settings.cursor_style,
             shortcut_inputs,
@@ -1740,6 +1847,8 @@ impl AppView {
             sync_targets: HashSet::new(),
             sync_visible: false,
             menu_visible: false,
+            layout_menu_visible: false,
+            tab_menu_session: None,
             search_visible: false,
             search_message: String::new(),
             search_target: None,
@@ -2357,6 +2466,11 @@ impl AppView {
         let message = replay.message.clone();
         let frame = replay.frame.clone();
         let palette = self.settings.theme.palette();
+        let keyword_highlights = if self.keyword_highlighting_enabled {
+            self.keyword_highlights.clone()
+        } else {
+            Vec::new()
+        };
         let has_timeline = !replay.timeline.is_empty();
         let timeline_label = replay.timeline_index.and_then(|index| {
             replay.timeline.get(index).map(|entry| {
@@ -2519,7 +2633,12 @@ impl AppView {
                             .on_scroll_wheel(cx.listener(|this, event, _, cx| {
                                 this.scroll_log_replay(event, cx);
                             }))
-                            .child(render_terminal_grid(&frame, &self.settings, palette)),
+                            .child(render_terminal_grid(
+                                &frame,
+                                &self.settings,
+                                palette,
+                                &keyword_highlights,
+                            )),
                     )
                     .child(
                         div()
@@ -3554,6 +3673,9 @@ impl AppView {
         if !remove_session(&mut self.sessions, &mut self.active_session_id, id) {
             return;
         }
+        if self.tab_menu_session == Some(id) {
+            self.tab_menu_session = None;
+        }
         self.terminal_bounds.borrow_mut().remove(&id);
         self.snippet_targets.remove(&id);
         if self.sync_targets.remove(&id) && self.sync_targets.is_empty() {
@@ -3951,6 +4073,8 @@ impl AppView {
     fn toggle_main_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_visible = !self.menu_visible;
         if self.menu_visible {
+            self.layout_menu_visible = false;
+            self.tab_menu_session = None;
             self.request_overlay_focus();
         } else {
             self.overlay_focus_pending = false;
@@ -3966,6 +4090,170 @@ impl AppView {
             window.focus(&self.terminal_focus);
             cx.notify();
         }
+    }
+
+    fn toggle_layout_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout_menu_visible = !self.layout_menu_visible;
+        if self.layout_menu_visible {
+            self.menu_visible = false;
+            self.tab_menu_session = None;
+            self.request_overlay_focus();
+        } else {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn close_layout_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout_menu_visible {
+            self.layout_menu_visible = false;
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
+    fn open_tab_menu(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if self.session(session_id).is_none() {
+            return;
+        }
+        self.tab_menu_session = Some(session_id);
+        self.menu_visible = false;
+        self.layout_menu_visible = false;
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn close_tab_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_menu_session.take().is_some() {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
+    fn close_other_sessions(
+        &mut self,
+        keep_session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self
+            .sessions
+            .iter()
+            .map(|session| session.id)
+            .filter(|id| *id != keep_session_id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.close_session(id, window, cx);
+        }
+        self.tab_menu_session = None;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn close_sessions_to_right(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return;
+        };
+        let ids = self
+            .sessions
+            .iter()
+            .skip(index + 1)
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.close_session(id, window, cx);
+        }
+        self.tab_menu_session = None;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn apply_layout_preset(
+        &mut self,
+        preset: LayoutPreset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if preset == LayoutPreset::Split {
+            let active = self.active_session_id;
+            let other = active.and_then(|active| {
+                self.sessions
+                    .iter()
+                    .map(|session| session.id)
+                    .find(|id| *id != active)
+            });
+            if let Some(other) = other {
+                self.sidebar_collapsed = false;
+                self.inspector_visible = false;
+                self.compose_visible = false;
+                self.set_split(other, SplitOrientation::SideBySide, window, cx);
+            } else {
+                self.show_toast("Open two sessions to use split layout.", Tone::Warning, cx);
+            }
+        } else {
+            self.compose_visible = false;
+            self.inspector_visible = matches!(preset, LayoutPreset::Inspector);
+            self.sidebar_collapsed = matches!(preset, LayoutPreset::Focus);
+            self.split = None;
+            self.terminal_bounds.borrow_mut().clear();
+            self.persist_ui_preferences(cx);
+            self.resize_terminal(window, cx);
+        }
+        self.layout_menu_visible = false;
+        self.tab_menu_session = None;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn apply_split_orientation(
+        &mut self,
+        orientation: SplitOrientation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active_session_id else {
+            self.show_toast("Open two sessions to use split layout.", Tone::Warning, cx);
+            return;
+        };
+        let Some(other) = self
+            .sessions
+            .iter()
+            .map(|session| session.id)
+            .find(|id| *id != active)
+        else {
+            self.show_toast("Open two sessions to use split layout.", Tone::Warning, cx);
+            return;
+        };
+        self.sidebar_collapsed = false;
+        self.inspector_visible = false;
+        self.compose_visible = false;
+        let active_is_split = self.split.is_some_and(|split| split.contains(active));
+        if active_is_split {
+            self.set_split_orientation(orientation, window, cx);
+        } else {
+            if self.split.take().is_some() {
+                self.terminal_bounds.borrow_mut().clear();
+            }
+            self.set_split(other, orientation, window, cx);
+        }
+        self.layout_menu_visible = false;
+        self.tab_menu_session = None;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
     }
 
     fn copy_terminal_selection(&mut self, session_id: u64, cx: &mut Context<Self>) {
@@ -4000,6 +4288,11 @@ impl AppView {
     fn terminal_surface(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
         let terminal_bounds = Rc::clone(&self.terminal_bounds);
         let palette = self.settings.theme.palette();
+        let keyword_highlights = if self.keyword_highlighting_enabled {
+            self.keyword_highlights.clone()
+        } else {
+            Vec::new()
+        };
         let mut terminal_view = div()
             .flex()
             .flex_col()
@@ -4059,8 +4352,12 @@ impl AppView {
             .session(session_id)
             .and_then(|session| session.frame.as_ref())
         {
-            terminal_view =
-                terminal_view.child(render_terminal_grid(frame, &self.settings, palette));
+            terminal_view = terminal_view.child(render_terminal_grid(
+                frame,
+                &self.settings,
+                palette,
+                &keyword_highlights,
+            ));
         } else {
             let message = self
                 .session(session_id)
@@ -6328,6 +6625,74 @@ impl AppView {
         cx.notify();
     }
 
+    fn toggle_keywords(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.keywords_visible = !self.keywords_visible;
+        if self.keywords_visible {
+            self.snippets_visible = false;
+            self.settings_visible = false;
+            self.keys_visible = false;
+            if let Some(session_id) = self.active_session_id
+                && let Some(session) = self.session_mut(session_id)
+            {
+                session.sftp.visible = false;
+                session.forwards.visible = false;
+            }
+            let focus = self.keyword_input.read(cx).focus_handle(cx);
+            window.focus(&focus);
+        } else {
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn toggle_keyword_highlighting(&mut self, cx: &mut Context<Self>) {
+        self.keyword_highlighting_enabled = !self.keyword_highlighting_enabled;
+        self.keyword_message = if self.keyword_highlighting_enabled {
+            "Keyword highlighting enabled.".to_owned()
+        } else {
+            "Keyword highlighting disabled.".to_owned()
+        };
+        cx.notify();
+    }
+
+    fn add_keyword(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keyword = self.keyword_input.read(cx).value().trim().to_owned();
+        if keyword.is_empty() {
+            self.keyword_message = "Enter a keyword to highlight.".to_owned();
+            cx.notify();
+            return;
+        }
+        if self.keyword_highlights.len() >= MAX_KEYWORD_HIGHLIGHTS {
+            self.keyword_message =
+                format!("Keyword highlights are limited to {MAX_KEYWORD_HIGHLIGHTS} entries.");
+            cx.notify();
+            return;
+        }
+        if self
+            .keyword_highlights
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(&keyword))
+        {
+            self.keyword_message = format!("Keyword {keyword} is already listed.");
+            cx.notify();
+            return;
+        }
+        self.keyword_highlights.push(keyword.clone());
+        self.keyword_message = format!("Added {keyword}.");
+        Self::set_input_value(&self.keyword_input, "", window, cx);
+        cx.notify();
+    }
+
+    fn remove_keyword(&mut self, keyword: &str, cx: &mut Context<Self>) {
+        self.keyword_highlights
+            .retain(|item| !item.eq_ignore_ascii_case(keyword));
+        if self.keyword_highlights.is_empty() {
+            self.keyword_highlighting_enabled = false;
+        }
+        self.keyword_message = format!("Removed {keyword}.");
+        cx.notify();
+    }
+
     fn toggle_snippet_target(&mut self, session_id: u64, cx: &mut Context<Self>) {
         if !self.snippet_targets.remove(&session_id) {
             self.snippet_targets.insert(session_id);
@@ -6431,68 +6796,318 @@ impl AppView {
         true
     }
 
+    fn keywords_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let keywords = self.keyword_highlights.clone();
+        let message = self.keyword_message.clone();
+        let mut list = div()
+            .id("keyword-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .gap(px(ui_tokens::SPACE_1))
+            .overflow_y_scroll();
+        if keywords.is_empty() {
+            list = list.child(components::empty_state(
+                &tokens,
+                "No highlighted keywords",
+                "Add literal words such as error, warning or timeout.",
+            ));
+        } else {
+            for (index, keyword) in keywords.into_iter().enumerate() {
+                let delete_keyword = keyword.clone();
+                list = list.child(
+                    div()
+                        .id(("keyword-row", index))
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_2))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(tokens.border_subtle)
+                        .bg(tokens.surface)
+                        .child(
+                            Icon::new(IconName::CaseSensitive)
+                                .with_size(Size::Small)
+                                .text_color(tokens.accent),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_size(px(ui_tokens::FONT_BODY))
+                                .text_color(tokens.text_primary)
+                                .child(keyword),
+                        )
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                ("keyword-delete", index),
+                                IconName::Delete,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                "Remove keyword",
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.remove_keyword(&delete_keyword, cx);
+                                },
+                            )),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .id("keywords-panel")
+            .flex()
+            .flex_col()
+            .w(px(ui_tokens::QUICK_COMMAND_PANEL_WIDTH))
+            .flex_shrink_0()
+            .min_h_0()
+            .ml(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .bg(tokens.surface_raised)
+            .text_color(tokens.text_primary)
+            .child(
+                components::panel_header(&tokens, "Keyword highlights").child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "keyword-toggle",
+                                if self.keyword_highlighting_enabled {
+                                    IconName::Eye
+                                } else {
+                                    IconName::EyeOff
+                                },
+                                if self.keyword_highlighting_enabled {
+                                    ButtonKind::Secondary
+                                } else {
+                                    ButtonKind::Ghost
+                                },
+                                ButtonSize::Small,
+                                if self.keyword_highlighting_enabled {
+                                    "Disable keyword highlighting"
+                                } else {
+                                    "Enable keyword highlighting"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_keyword_highlighting(cx);
+                            })),
+                        )
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "keyword-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                "Close keyword highlights",
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.toggle_keywords(window, cx);
+                                },
+                            )),
+                        ),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .p(px(ui_tokens::SPACE_2))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key.eq_ignore_ascii_case("enter") {
+                            cx.stop_propagation();
+                            this.add_keyword(window, cx);
+                        }
+                    }))
+                    .child(div().flex_1().min_w_0().child(
+                        TextInput::new(&self.keyword_input).h(px(ui_tokens::CONTROL_HEIGHT_SM)),
+                    ))
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            "keyword-add",
+                            IconName::Plus,
+                            ButtonKind::Primary,
+                            ButtonSize::Small,
+                            "Add keyword",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_keyword(window, cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(ui_tokens::SPACE_2))
+                    .pb(px(ui_tokens::SPACE_2))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_secondary)
+                    .child(if self.keyword_highlighting_enabled {
+                        "Literal matches are highlighted in the terminal."
+                    } else {
+                        "Highlighting is off until you enable it."
+                    })
+                    .when(!message.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .pt(px(ui_tokens::SPACE_1))
+                                .text_color(tokens.accent_text)
+                                .child(message),
+                        )
+                    }),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
     fn snippets_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = self.tokens();
         let snippets = self.snippets.clone();
         let message = self.snippet_message.clone();
         let targets = self.snippet_targets.clone();
-        let mut list = div()
-            .id("snippet-list")
+        let active_session = self.active_session().map(|session| session.title.clone());
+        let mut quick_grid = div()
+            .id("quick-command-grid")
             .flex()
-            .flex_col()
+            .flex_wrap()
             .flex_1()
             .min_h_0()
-            .gap(px(4.))
+            .content_start()
+            .gap(px(ui_tokens::SPACE_2))
             .overflow_y_scroll();
         if snippets.is_empty() {
-            list = list.child(
-                div()
-                    .p(px(8.))
-                    .text_size(px(11.))
-                    .text_color(tokens.text_disabled)
-                    .child("No command snippets"),
+            quick_grid = quick_grid.child(
+                components::empty_state(
+                    &tokens,
+                    "No quick commands",
+                    "Create a command tile for the active SSH session.",
+                )
+                .w_full(),
             );
         }
         for (index, snippet) in snippets.into_iter().enumerate() {
             let load = snippet.clone();
             let send = snippet.clone();
             let delete_name = snippet.name.clone();
-            list =
-                list.child(
+            let editing = self
+                .editing_snippet
+                .as_ref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&snippet.name));
+            let run_button = Button::new(("quick-command-run", index))
+                .w(px(ui_tokens::QUICK_COMMAND_WIDTH))
+                .h(px(ui_tokens::QUICK_COMMAND_HEIGHT))
+                .p(px(ui_tokens::SPACE_2))
+                .rounded(px(ui_tokens::RADIUS_CARD))
+                .border_1()
+                .border_color(if editing {
+                    tokens.accent
+                } else {
+                    tokens.border_subtle
+                })
+                .bg(tokens.surface)
+                .hover(|style| style.bg(tokens.surface_overlay))
+                .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .child(
-                            Button::new(("snippet-load", index))
-                                .label(snippet.name.clone())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.load_snippet(&load, window, cx);
-                                })),
-                        )
-                        .child(Button::new(("snippet-send", index)).label("Send").on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.send_snippet_to_active(&send, cx);
-                            }),
-                        ))
-                        .child(Button::new(("snippet-delete", index)).label("x").on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.delete_snippet(&delete_name, window, cx);
-                            }),
-                        ))
+                        .flex_col()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .w_full()
                         .child(
                             div()
-                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .gap(px(ui_tokens::SPACE_1))
+                                .child(
+                                    Icon::new(IconName::SquareTerminal)
+                                        .with_size(Size::Small)
+                                        .text_color(tokens.accent),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_size(px(ui_tokens::FONT_BODY))
+                                        .font_semibold()
+                                        .text_color(tokens.text_primary)
+                                        .child(snippet.name.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .text_size(px(10.))
-                                .text_color(tokens.text_disabled)
-                                .child(snippet.command),
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
+                                .child(snippet.command.clone()),
                         ),
-                );
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.send_snippet_to_active(&send, cx);
+                }));
+            quick_grid = quick_grid.child(
+                div()
+                    .w(px(ui_tokens::QUICK_COMMAND_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .child(run_button)
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .child(
+                                components::icon_button(
+                                    &tokens,
+                                    ("quick-command-edit", index),
+                                    IconName::Settings2,
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                    "Edit quick command",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.load_snippet(&load, window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::icon_button(
+                                    &tokens,
+                                    ("quick-command-delete", index),
+                                    IconName::Delete,
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                    "Delete quick command",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.delete_snippet(&delete_name, window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            );
         }
 
-        let mut target_list = div().flex().flex_col().gap(px(3.));
+        let mut target_list = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_1));
         let connected_sessions = self
             .sessions
             .iter()
@@ -6502,7 +7117,7 @@ impl AppView {
         if connected_sessions.is_empty() {
             target_list = target_list.child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
                     .text_color(tokens.text_disabled)
                     .child("No connected sessions"),
             );
@@ -6520,45 +7135,54 @@ impl AppView {
             .id("snippets-panel")
             .flex()
             .flex_col()
-            .w(px(360.))
+            .w(px(ui_tokens::QUICK_COMMAND_PANEL_WIDTH))
             .flex_shrink_0()
             .min_h_0()
-            .ml(px(6.))
+            .ml(px(ui_tokens::SPACE_2))
             .border_1()
             .border_color(tokens.border_strong)
             .bg(tokens.surface_raised)
             .text_color(tokens.text_primary)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(TERMINAL_PANEL_HEADER_PX))
-                    .flex_shrink_0()
-                    .px(px(8.))
-                    .bg(tokens.surface)
-                    .child(div().text_size(px(11.)).child("Snippets"))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .child(Button::new("snippet-new").label("New").on_click(
-                                cx.listener(|this, _, window, cx| this.new_snippet(window, cx)),
-                            ))
-                            .child(
-                                Button::new("snippet-close").label("Close").on_click(
-                                    cx.listener(|this, _, _, cx| this.toggle_snippets(cx)),
-                                ),
-                            ),
-                    ),
+                components::panel_header(&tokens, "Quick commands").child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "quick-command-new",
+                                IconName::Plus,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                "New quick command",
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.new_snippet(window, cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "quick-command-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                "Close quick commands",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_snippets(cx))),
+                        ),
+                ),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
-                    .p(px(8.))
+                    .gap(px(ui_tokens::SPACE_2))
+                    .p(px(ui_tokens::SPACE_2))
                     .child(components::field(
                         &tokens,
                         "Name",
@@ -6575,48 +7199,84 @@ impl AppView {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(4.))
+                            .gap(px(ui_tokens::SPACE_1))
                             .child(
-                                Button::new("snippet-enter")
-                                    .label(if self.snippet_send_enter {
-                                        "Press Enter"
+                                components::button(
+                                    &tokens,
+                                    "quick-command-enter",
+                                    if self.snippet_send_enter {
+                                        "Send + Enter"
                                     } else {
-                                        "No Enter"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        "Paste only"
+                                    },
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.snippet_send_enter = !this.snippet_send_enter;
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("snippet-save")
-                                    .label("Save")
-                                    .on_click(cx.listener(|this, _, _, cx| this.save_snippet(cx))),
+                                components::button(
+                                    &tokens,
+                                    "quick-command-save",
+                                    "Save command",
+                                    ButtonKind::Primary,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.save_snippet(cx))),
                             ),
                     ),
             )
             .child(
                 div()
-                    .px(px(8.))
-                    .text_size(px(11.))
+                    .px(px(ui_tokens::SPACE_2))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
                     .text_color(tokens.text_secondary)
-                    .child(message),
+                    .child(if let Some(title) = active_session {
+                        format!("Send to {title}")
+                    } else {
+                        "Open a connected session to run a command.".to_owned()
+                    })
+                    .when(!message.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .pt(px(ui_tokens::SPACE_1))
+                                .text_color(tokens.accent_text)
+                                .child(message),
+                        )
+                    }),
             )
-            .child(list)
+            .child(quick_grid)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
-                    .p(px(8.))
+                    .gap(px(ui_tokens::SPACE_2))
+                    .p(px(ui_tokens::SPACE_2))
                     .border_t_1()
                     .border_color(tokens.border_subtle)
-                    .child(div().text_size(px(10.)).child("Send to selected sessions"))
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .font_semibold()
+                            .text_color(tokens.text_secondary)
+                            .child("Broadcast targets"),
+                    )
                     .child(target_list)
                     .child(
-                        Button::new("snippet-broadcast")
-                            .label(format!("Send to {} selected", self.snippet_targets.len()))
-                            .on_click(cx.listener(|this, _, _, cx| this.broadcast_snippet(cx))),
+                        components::button(
+                            &tokens,
+                            "quick-command-broadcast",
+                            format!("Send to {} selected", self.snippet_targets.len()),
+                            ButtonKind::Secondary,
+                            ButtonSize::Small,
+                        )
+                        .w_full()
+                        .on_click(cx.listener(|this, _, _, cx| this.broadcast_snippet(cx))),
                     ),
             )
             .into_any_element()
@@ -8066,6 +8726,13 @@ impl AppView {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.select_session(id, window, cx);
                 }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_tab_menu(id, cx);
+                    }),
+                )
                 .on_drag(
                     TabDragData {
                         session_id: id,
@@ -8130,6 +8797,26 @@ impl AppView {
             .gap(px(ui_tokens::SPACE_1))
             .px(px(ui_tokens::SPACE_2))
             .flex_shrink_0()
+            .child(
+                components::icon_button(
+                    tokens,
+                    "session-tab-menu",
+                    IconName::Ellipsis,
+                    if self.tab_menu_session.is_some() {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    "Session tab actions",
+                )
+                .disabled(self.active_session_id.is_none())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(id) = this.active_session_id {
+                        this.open_tab_menu(id, cx);
+                    }
+                })),
+            )
             .child(
                 components::icon_button(
                     tokens,
@@ -8313,6 +9000,45 @@ impl AppView {
             .items_center()
             .gap(px(ui_tokens::SPACE_1))
             .flex_shrink_0();
+        right = right
+            .child(
+                components::icon_button(
+                    tokens,
+                    "toggle-layout-menu",
+                    IconName::LayoutDashboard,
+                    if self.layout_menu_visible || self.inspector_visible {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    "Workspace layout",
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_layout_menu(window, cx);
+                })),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
+                    "toggle-layout-sidebar",
+                    if self.sidebar_collapsed {
+                        IconName::PanelLeftOpen
+                    } else {
+                        IconName::PanelLeftClose
+                    },
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    if self.sidebar_collapsed {
+                        "Show sidebar"
+                    } else {
+                        "Hide sidebar"
+                    },
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_sidebar(window, cx);
+                })),
+            );
         if let Some(session) = active {
             let active_id = session.id;
             right = right
@@ -8423,6 +9149,23 @@ impl AppView {
             .child(
                 components::icon_button(
                     tokens,
+                    "toggle-keywords",
+                    IconName::CaseSensitive,
+                    if self.keywords_visible || self.keyword_highlighting_enabled {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    "Keyword highlights",
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_keywords(window, cx);
+                })),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
                     "toggle-snippets",
                     IconName::Asterisk,
                     if self.snippets_visible {
@@ -8431,7 +9174,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Snippets (Ctrl+Shift+S)",
+                    "Quick commands (Ctrl+Shift+S)",
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_snippets(cx))),
             )
@@ -8742,6 +9485,412 @@ impl AppView {
             .into_any_element()
     }
 
+    fn tab_menu_overlay(&mut self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let Some(session_id) = self.tab_menu_session else {
+            return div().into_any_element();
+        };
+        let Some(session) = self.session(session_id) else {
+            return div().into_any_element();
+        };
+        let title = session.title.clone();
+        let active = self.active_session_id == Some(session_id);
+        let connected = matches!(
+            session.state,
+            SessionState::Connecting | SessionState::Connected
+        );
+        let session_index = self
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .unwrap_or_default();
+        let has_other = self.sessions.iter().any(|session| session.id != session_id);
+        let has_right = session_index + 1 < self.sessions.len();
+        let menu = div()
+            .id("session-tab-menu")
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .w(px(ui_tokens::MENU_WIDTH))
+            .p(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .rounded(px(ui_tokens::RADIUS_PANEL))
+            .shadow_lg()
+            .bg(tokens.surface_overlay)
+            .text_color(tokens.text_primary)
+            .child(
+                components::panel_header(tokens, title).child(
+                    components::icon_button(
+                        tokens,
+                        "session-tab-menu-close",
+                        IconName::Close,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        "Close tab actions",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_tab_menu(window, cx);
+                    })),
+                ),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-properties",
+                    IconName::Settings2,
+                    "Session properties",
+                    "",
+                    active,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.tab_menu_session = None;
+                    this.select_session(session_id, window, cx);
+                    this.session_editor_section = SessionEditorSection::Connection;
+                    this.session_editor_open = true;
+                    this.request_overlay_focus();
+                    cx.notify();
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-split-side",
+                    IconName::PanelRight,
+                    "Split side by side",
+                    "",
+                    self.split.is_some_and(|split| {
+                        split.orientation == SplitOrientation::SideBySide
+                            && split.contains(session_id)
+                    }),
+                    has_other,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.active_session_id = Some(session_id);
+                    this.apply_split_orientation(SplitOrientation::SideBySide, window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-split-stack",
+                    IconName::PanelBottom,
+                    "Split stacked",
+                    "",
+                    self.split.is_some_and(|split| {
+                        split.orientation == SplitOrientation::Stacked && split.contains(session_id)
+                    }),
+                    has_other,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.active_session_id = Some(session_id);
+                    this.apply_split_orientation(SplitOrientation::Stacked, window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-disconnect",
+                    IconName::CircleX,
+                    if session.state == SessionState::Connecting {
+                        "Cancel connection"
+                    } else {
+                        "Disconnect"
+                    },
+                    "",
+                    false,
+                    connected,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.tab_menu_session = None;
+                    this.disconnect_session(session_id, cx);
+                    window.focus(&this.terminal_focus);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-close",
+                    IconName::Close,
+                    "Close tab",
+                    "Ctrl+Shift+W",
+                    active,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.tab_menu_session = None;
+                    this.close_session(session_id, window, cx);
+                })),
+            )
+            .child(components::section_label(tokens, "TABS"))
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-close-others",
+                    IconName::PanelLeft,
+                    "Close other tabs",
+                    "",
+                    false,
+                    has_other,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.close_other_sessions(session_id, window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-close-right",
+                    IconName::ArrowRight,
+                    "Close tabs to the right",
+                    "",
+                    false,
+                    has_right,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.close_sessions_to_right(session_id, window, cx);
+                })),
+            );
+
+        div()
+            .id("session-tab-menu-overlay")
+            .absolute()
+            .size_full()
+            .occlude()
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_tab_menu(window, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_tab_menu(window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(ui_tokens::COMMAND_BAR_HEIGHT + ui_tokens::TAB_BAR_HEIGHT))
+                    .right(px(ui_tokens::SPACE_2))
+                    .child(menu),
+            )
+            .into_any_element()
+    }
+
+    fn layout_menu_overlay(&mut self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let focus_selected =
+            self.split.is_none() && self.sidebar_collapsed && !self.inspector_visible;
+        let standard_selected =
+            self.split.is_none() && !self.sidebar_collapsed && !self.inspector_visible;
+        let inspector_selected =
+            self.split.is_none() && !self.sidebar_collapsed && self.inspector_visible;
+        let split_selected = self.split.is_some();
+        let has_other_session = self
+            .active_session_id
+            .is_some_and(|active| self.sessions.iter().any(|session| session.id != active));
+        let mut menu = div()
+            .id("layout-menu")
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_2))
+            .w(px(ui_tokens::LAYOUT_MENU_WIDTH))
+            .p(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .rounded(px(ui_tokens::RADIUS_PANEL))
+            .shadow_lg()
+            .bg(tokens.surface_overlay)
+            .text_color(tokens.text_primary);
+        menu = menu
+            .child(
+                components::panel_header(tokens, "Workspace layout").child(
+                    components::icon_button(
+                        tokens,
+                        "layout-menu-close",
+                        IconName::Close,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        "Close layout menu",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_layout_menu(window, cx);
+                    })),
+                ),
+            )
+            .child(components::help_text(
+                tokens,
+                "Choose a workspace preset. Divider sizes remain adjustable.",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .child(
+                        layout_preset_item(
+                            tokens,
+                            "layout-preset-focus",
+                            IconName::PanelLeftClose,
+                            "Focus",
+                            "Hide the sidebar and inspector",
+                            focus_selected,
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_layout_preset(LayoutPreset::Focus, window, cx);
+                        })),
+                    )
+                    .child(
+                        layout_preset_item(
+                            tokens,
+                            "layout-preset-standard",
+                            IconName::LayoutDashboard,
+                            "Standard",
+                            "Sidebar with a full-width terminal",
+                            standard_selected,
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_layout_preset(LayoutPreset::Standard, window, cx);
+                        })),
+                    )
+                    .child(
+                        layout_preset_item(
+                            tokens,
+                            "layout-preset-inspector",
+                            IconName::Inspector,
+                            "Inspector",
+                            "Keep connection details visible",
+                            inspector_selected,
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_layout_preset(LayoutPreset::Inspector, window, cx);
+                        })),
+                    )
+                    .child(
+                        layout_preset_item(
+                            tokens,
+                            "layout-preset-split",
+                            IconName::PanelRight,
+                            "Split",
+                            "Show two sessions side by side",
+                            split_selected,
+                            has_other_session,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_layout_preset(LayoutPreset::Split, window, cx);
+                        })),
+                    ),
+            )
+            .child(components::section_label(tokens, "SPLIT ORIENTATION"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "layout-split-side",
+                            IconName::PanelRight,
+                            if self.split.is_some_and(|split| {
+                                split.orientation == SplitOrientation::SideBySide
+                            }) {
+                                ButtonKind::Primary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            ButtonSize::Small,
+                            "Split side by side",
+                        )
+                        .disabled(!has_other_session)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_split_orientation(SplitOrientation::SideBySide, window, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "layout-split-stack",
+                            IconName::PanelBottom,
+                            if self
+                                .split
+                                .is_some_and(|split| split.orientation == SplitOrientation::Stacked)
+                            {
+                                ButtonKind::Primary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            ButtonSize::Small,
+                            "Split stacked",
+                        )
+                        .disabled(!has_other_session)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_split_orientation(SplitOrientation::Stacked, window, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "layout-close-split",
+                            IconName::Close,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Close split",
+                        )
+                        .disabled(self.split.is_none())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_split(window, cx);
+                            this.close_layout_menu(window, cx);
+                        })),
+                    ),
+            )
+            .child(components::help_text(
+                tokens,
+                "Use the divider handles to fine-tune widths after choosing a preset.",
+            ));
+
+        div()
+            .id("layout-menu-overlay")
+            .absolute()
+            .size_full()
+            .occlude()
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_layout_menu(window, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_layout_menu(window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(ui_tokens::COMMAND_BAR_HEIGHT + ui_tokens::SPACE_1))
+                    .right(px(ui_tokens::SPACE_2))
+                    .child(menu),
+            )
+            .into_any_element()
+    }
+
     fn main_menu_overlay(&mut self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
         let active_id = self.active_session_id;
         let active_connected = active_id.is_some_and(|id| {
@@ -8770,9 +9919,9 @@ impl AppView {
             )
             .flex()
             .flex_col()
-            .gap(px(2.0))
-            .w(px(320.0))
-            .max_h(px(560.0))
+            .gap(px(ui_tokens::SPACE_1))
+            .w(px(ui_tokens::MENU_WIDTH))
+            .max_h(px(ui_tokens::MENU_MAX_HEIGHT))
             .overflow_y_scroll()
             .p(px(ui_tokens::SPACE_2))
             .border_1()
@@ -8782,6 +9931,83 @@ impl AppView {
             .bg(tokens.surface_overlay)
             .text_color(tokens.text_primary);
         menu = menu
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .pb(px(ui_tokens::SPACE_2))
+                    .border_b_1()
+                    .border_color(tokens.border_subtle)
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "menu-quick-new-session",
+                            IconName::Plus,
+                            ButtonKind::Primary,
+                            ButtonSize::Small,
+                            "New session",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.menu_visible = false;
+                            window.focus(&this.terminal_focus);
+                            this.new_profile(window, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "menu-quick-search",
+                            IconName::Search,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Search saved hosts",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.menu_visible = false;
+                            this.focus_profile_search(window, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "menu-quick-layout",
+                            IconName::LayoutDashboard,
+                            if self.inspector_visible {
+                                ButtonKind::Secondary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            ButtonSize::Small,
+                            "Workspace layout",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.menu_visible = false;
+                            this.toggle_layout_menu(window, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "menu-quick-settings",
+                            IconName::Settings,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Settings",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.menu_visible = false;
+                            this.toggle_settings(window, cx);
+                        })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .text_color(tokens.text_secondary)
+                            .child("Quick actions"),
+                    ),
+            )
             .child(components::section_label(tokens, "SESSION"))
             .child(
                 menu_item(
@@ -8915,6 +10141,21 @@ impl AppView {
                 })),
             )
             .child(components::section_label(tokens, "VIEW"))
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-layout",
+                    IconName::LayoutDashboard,
+                    "Workspace layout",
+                    "",
+                    self.layout_menu_visible,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_layout_menu(window, cx);
+                })),
+            )
             .child(
                 menu_item(
                     tokens,
@@ -9093,9 +10334,24 @@ impl AppView {
             .child(
                 menu_item(
                     tokens,
+                    "menu-keywords",
+                    IconName::CaseSensitive,
+                    "Keyword highlights",
+                    "",
+                    self.keywords_visible || self.keyword_highlighting_enabled,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_keywords(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
                     "menu-snippets",
                     IconName::Asterisk,
-                    "Snippets",
+                    "Quick commands",
                     "Ctrl+Shift+S",
                     self.snippets_visible,
                     true,
@@ -9687,6 +10943,7 @@ fn render_terminal_grid(
     frame: &TerminalFrame,
     settings: &AppSettings,
     palette: TerminalPalette,
+    keyword_highlights: &[String],
 ) -> AnyElement {
     let mut grid = div().flex().flex_col().flex_1().min_h_0();
     for (row_index, row) in frame.rows.iter().enumerate() {
@@ -9696,7 +10953,12 @@ fn render_terminal_grid(
             .h(px(settings.cell_height()))
             .flex_shrink_0();
         for run in row {
-            rendered_row = rendered_row.child(render_terminal_run(run, settings, palette));
+            rendered_row = rendered_row.child(render_terminal_run(
+                run,
+                settings,
+                palette,
+                keyword_matches(&run.text, keyword_highlights),
+            ));
         }
         if let Some(cursor) = frame.cursor
             && cursor.row as usize == row_index
@@ -9731,6 +10993,7 @@ fn render_terminal_run(
     run: &TerminalRun,
     settings: &AppSettings,
     palette: TerminalPalette,
+    keyword_highlighted: bool,
 ) -> impl IntoElement {
     let mut cell_run = div()
         .flex_shrink_0()
@@ -9740,6 +11003,9 @@ fn render_terminal_run(
         .text_size(px(settings.font_size))
         .text_color(rgb(run.foreground))
         .bg(rgb(run.background));
+    if keyword_highlighted && !run.selected {
+        cell_run = cell_run.bg(rgb(palette.selection_background));
+    }
     if run.selected {
         cell_run = cell_run
             .text_color(rgb(palette.selection_foreground))
@@ -9978,6 +11244,9 @@ impl Render for AppView {
         if self.snippets_visible {
             terminal_workspace = terminal_workspace.child(self.snippets_panel(cx));
         }
+        if self.keywords_visible {
+            terminal_workspace = terminal_workspace.child(self.keywords_panel(cx));
+        }
 
         let mut content_row = div().flex().flex_1().min_h_0().min_w_0().child(sidebar);
         if !self.sidebar_collapsed {
@@ -10036,6 +11305,12 @@ impl Render for AppView {
         }
         if self.menu_visible {
             root = root.child(self.main_menu_overlay(&tokens, cx));
+        }
+        if self.layout_menu_visible {
+            root = root.child(self.layout_menu_overlay(&tokens, cx));
+        }
+        if self.tab_menu_session.is_some() {
+            root = root.child(self.tab_menu_overlay(&tokens, cx));
         }
         if self.sync_visible {
             root = root.child(self.sync_overlay(&tokens, cx));

@@ -2,7 +2,8 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime.
+runtime. The first public release is `v0.1.0`; see [CHANGELOG.md](CHANGELOG.md)
+for the release scope and verification record.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;
@@ -110,10 +111,12 @@ view from the beginning through that record. Files larger than 16 MiB replay
 their tail, starting at a complete record boundary for timestamped logs; use
 Top, Bottom or the wheel to browse the available scrollback.
 
-Use the `Snippets` button to manage reusable commands. Snippets are stored in
-`%APPDATA%\dshell\snippets.json` on Windows and can be sent to the active
-session or broadcast to explicitly selected connected sessions. The `Press
-Enter` toggle controls whether the command is submitted immediately.
+Use the `Quick commands` button to manage reusable commands. Commands are
+stored in `%APPDATA%\dshell\snippets.json` on Windows and shown as a flat
+button grid with icon actions for run, edit and delete. A command can be sent
+to the active session or broadcast to explicitly selected connected sessions.
+The `Send + Enter` / `Paste only` toggle controls whether the command is
+submitted immediately.
 
 Use the `Keys` button to generate an OpenSSH key pair. The generator opens in a
 560 px modal and supports Ed25519, RSA 3072/4096 and ECDSA P-256/P-384. Choose
@@ -145,7 +148,7 @@ manually.
 
 While a terminal has focus, the default workspace shortcuts are `Ctrl+Shift+T`
 for a new session, `Ctrl+Shift+W` close tab, `Ctrl+Shift+F` files,
-`Ctrl+Shift+S` snippets, `Ctrl+Shift+O` settings, `Ctrl+Shift+B` toggle the
+`Ctrl+Shift+S` quick commands, `Ctrl+Shift+O` settings, `Ctrl+Shift+B` toggle the
 saved-host sidebar, `Ctrl+Shift+M` toggle the compose pane, `Ctrl+Shift+D`
 disconnect, `Ctrl+Shift+R` replay log and `Ctrl+F` find. `Alt+1` through `Alt+9`
 always select a session tab. `Ctrl+Shift+C` and `Ctrl+Shift+V` remain copy and
@@ -209,11 +212,26 @@ removes it from the target set. Snippet broadcast remains a separate, explicit
 action.
 
 The command bar uses flat icon actions with tooltips instead of text buttons.
-The ellipsis opens a grouped menu with icon, label and shortcut hints:
+The ellipsis opens a grouped menu with icon, label and shortcut hints, plus a
+compact row of new-session, host-search, layout and settings actions:
 `Session` (new session, properties, import config, close tab, disconnect,
 splits), `View` (sidebar, inspector, compose, synchronized input, theme) and
-`Tools` (files, tunnels, logging, replay, find, snippets, keys, settings). The
+`Tools` (files, tunnels, logging, replay, find, quick commands, keys, settings). The
 menu closes with `Escape` or a click outside it.
+
+The layout icon opens a flat workspace preset menu with `Focus` (terminal only),
+`Standard` (sidebar plus terminal), `Inspector` (connection details beside the
+terminal) and `Split` (two sessions side by side). The split preset is disabled
+until two sessions are open; the same menu also offers side-by-side or stacked
+orientation and a close-split action. Divider handles remain available for fine
+tuning. The session-tab ellipsis button or a tab right-click opens icon actions
+for properties, split, disconnect, close, close other tabs and close tabs to the
+right.
+
+Use the `Keyword highlights` button to keep up to 32 literal keywords in memory.
+Highlighting is disabled by default, case-insensitive, applies to live terminals
+and log replay, and can be enabled or disabled with the eye icon. Rules never
+execute commands; trigger automation remains outside the current scope.
 
 dshell targets the daily Xshell-style workflow as an open-source, native
 application: session management with groups and recents, tabbed and split
@@ -221,7 +239,7 @@ terminals, an inspector for transfers/tunnels/connection/logging, SFTP with
 resume, local/remote/SOCKS5 forwarding, timestamped logs with a replay timeline,
 and Ed25519/RSA/ECDSA key generation. Telnet, Rlogin, Serial and RDP are outside
 the current scope. See [ROADMAP.md](ROADMAP.md) for the capability matrix and
-the planned compose/synchronized-input/trigger work.
+the remaining trigger evaluation.
 
 ## Test and Verify
 
