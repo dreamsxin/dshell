@@ -1,3 +1,4 @@
+mod auth_profiles;
 mod forward;
 mod keygen;
 mod log;
@@ -23,6 +24,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use auth_profiles::{AuthProfile, AuthProfileStore};
 use forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec, ForwardRuleUiState};
 use gpui::{AnyElement, StatefulInteractiveElement as _, prelude::*, *};
 use gpui_component::{
@@ -1371,6 +1373,11 @@ struct AppView {
     profile_group: Entity<InputState>,
     profile_favorite: bool,
     auth_method: AuthMethod,
+    auth_profiles: Vec<AuthProfile>,
+    auth_profile_store: Option<AuthProfileStore>,
+    auth_profile_name: Entity<InputState>,
+    auth_profile_message: String,
+    applied_auth_profile: Option<String>,
     identity_file: Entity<InputState>,
     key_passphrase: Entity<InputState>,
     jump_profile: Entity<InputState>,
@@ -1576,6 +1583,16 @@ impl AppView {
         let stacked_subscription = cx.observe(&stacked_state, |this, _, cx| {
             this.resize_sessions(cx);
         });
+        let auth_profile_name =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Template name"));
+        let (auth_profile_store, auth_profiles, auth_profile_message) =
+            match AuthProfileStore::discover() {
+                Ok(store) => match store.load() {
+                    Ok(profiles) => (Some(store), profiles, String::new()),
+                    Err(error) => (Some(store), Vec::new(), error),
+                },
+                Err(error) => (None, Vec::new(), error),
+            };
 
         Self {
             ui_theme: settings.ui_theme,
@@ -1590,6 +1607,11 @@ impl AppView {
             profile_group,
             profile_favorite: false,
             auth_method: AuthMethod::Password,
+            auth_profiles,
+            auth_profile_store,
+            auth_profile_name,
+            auth_profile_message,
+            applied_auth_profile: None,
             identity_file,
             key_passphrase,
             jump_profile,
@@ -2565,6 +2587,7 @@ impl AppView {
         Self::set_input_value(&self.keepalive_seconds, "0", window, cx);
         self.profile_favorite = false;
         self.auth_method = AuthMethod::Password;
+        self.applied_auth_profile = None;
         self.selected_profile = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
@@ -2594,6 +2617,7 @@ impl AppView {
         );
         self.profile_favorite = profile.favorite;
         self.auth_method = profile.auth_method;
+        self.applied_auth_profile = None;
         self.selected_profile = Some(profile.name.clone());
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
@@ -2636,6 +2660,7 @@ impl AppView {
         Self::set_input_value(&self.keepalive_seconds, "0", window, cx);
         self.profile_favorite = false;
         self.auth_method = AuthMethod::Password;
+        self.applied_auth_profile = None;
         self.selected_profile = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
@@ -2712,6 +2737,156 @@ impl AppView {
             .hover(|style| style.bg(tokens.surface_overlay))
             .child(components::section_header(tokens, label))
             .into_any_element()
+    }
+
+    fn apply_auth_profile(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self
+            .auth_profiles
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case(name))
+            .cloned()
+        else {
+            self.auth_profile_message = format!("Authentication template {name} was not found.");
+            cx.notify();
+            return;
+        };
+        self.auth_method = profile.auth_method;
+        self.applied_auth_profile = None;
+        Self::set_input_value(&self.identity_file, &profile.identity_file, window, cx);
+        Self::set_input_value(&self.jump_profile, &profile.proxy_jump, window, cx);
+        Self::set_input_value(
+            &self.keepalive_seconds,
+            &profile.keepalive_seconds.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(&self.password, "", window, cx);
+        Self::set_input_value(&self.key_passphrase, "", window, cx);
+        Self::set_input_value(&self.jump_password, "", window, cx);
+        Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        Self::set_input_value(&self.auth_profile_name, &profile.name, window, cx);
+        self.applied_auth_profile = Some(profile.name.clone());
+        self.auth_profile_message = format!(
+            "Applied authentication template {}. Re-enter any password or passphrase.",
+            profile.name
+        );
+        self.show_toast(
+            format!("Applied authentication template {}.", profile.name),
+            Tone::Success,
+            cx,
+        );
+    }
+
+    fn save_auth_profile(&mut self, cx: &mut Context<Self>) {
+        let name = self.auth_profile_name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.auth_profile_message = "Enter a template name.".to_owned();
+            cx.notify();
+            return;
+        }
+        let keepalive = self.keepalive_seconds.read(cx).value().trim().to_owned();
+        let keepalive_seconds = if keepalive.is_empty() {
+            0
+        } else {
+            match keepalive.parse::<u16>() {
+                Ok(value) => value,
+                Err(_) => {
+                    self.auth_profile_message =
+                        "Keep-alive must be a whole number of seconds.".to_owned();
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        let profile = AuthProfile {
+            name: name.clone(),
+            auth_method: self.auth_method,
+            identity_file: self.identity_file.read(cx).value().trim().to_owned(),
+            proxy_jump: self.jump_profile.read(cx).value().trim().to_owned(),
+            keepalive_seconds,
+        };
+        let profile = match profile.normalized() {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.auth_profile_message = error;
+                cx.notify();
+                return;
+            }
+        };
+        let mut profiles = self.auth_profiles.clone();
+        if let Some(existing) = profiles
+            .iter_mut()
+            .find(|existing| existing.name.eq_ignore_ascii_case(&profile.name))
+        {
+            *existing = profile.clone();
+        } else {
+            profiles.push(profile.clone());
+        }
+        profiles.sort_by_key(|profile| profile.name.to_lowercase());
+        let Some(store) = self.auth_profile_store.as_ref() else {
+            self.auth_profile_message = "Authentication profile storage is unavailable.".to_owned();
+            cx.notify();
+            return;
+        };
+        if let Err(error) = store.save(&profiles) {
+            self.auth_profile_message = error;
+            self.show_toast(
+                "Could not save the authentication template.",
+                Tone::Danger,
+                cx,
+            );
+            return;
+        }
+        self.auth_profiles = profiles;
+        self.applied_auth_profile = Some(profile.name.clone());
+        self.auth_profile_message = format!("Saved authentication template {}.", profile.name);
+        self.show_toast(
+            format!("Saved authentication template {}.", profile.name),
+            Tone::Success,
+            cx,
+        );
+    }
+
+    fn delete_auth_profile(&mut self, cx: &mut Context<Self>) {
+        let mut name = self.auth_profile_name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            name = self.applied_auth_profile.clone().unwrap_or_default();
+        }
+        if name.is_empty() {
+            self.auth_profile_message = "Select or name a template to delete.".to_owned();
+            cx.notify();
+            return;
+        }
+        let mut profiles = self.auth_profiles.clone();
+        let before = profiles.len();
+        profiles.retain(|profile| !profile.name.eq_ignore_ascii_case(&name));
+        if profiles.len() == before {
+            self.auth_profile_message = format!("Authentication template {name} was not found.");
+            cx.notify();
+            return;
+        }
+        let Some(store) = self.auth_profile_store.as_ref() else {
+            self.auth_profile_message = "Authentication profile storage is unavailable.".to_owned();
+            cx.notify();
+            return;
+        };
+        if let Err(error) = store.save(&profiles) {
+            self.auth_profile_message = error;
+            self.show_toast(
+                "Could not delete the authentication template.",
+                Tone::Danger,
+                cx,
+            );
+            return;
+        }
+        self.auth_profiles = profiles;
+        self.applied_auth_profile = None;
+        self.auth_profile_message = format!("Deleted authentication template {name}.");
+        self.show_toast(
+            format!("Deleted authentication template {name}."),
+            Tone::Success,
+            cx,
+        );
     }
 
     fn save_workspace(
@@ -4203,14 +4378,103 @@ impl AppView {
                     methods = methods.child(button.on_click(cx.listener(
                         move |this, _, _, cx| {
                             this.auth_method = method;
+                            this.applied_auth_profile = None;
                             cx.notify();
                         },
                     )));
                 }
+                let mut template_buttons =
+                    div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
+                for (index, profile) in self.auth_profiles.iter().enumerate() {
+                    let name = profile.name.clone();
+                    let apply_name = name.clone();
+                    let selected =
+                        self.applied_auth_profile.as_deref() == Some(profile.name.as_str());
+                    template_buttons = template_buttons.child(
+                        components::button(
+                            &tokens,
+                            ("auth-template", index),
+                            name,
+                            if selected {
+                                ButtonKind::Primary
+                            } else {
+                                ButtonKind::Secondary
+                            },
+                            ButtonSize::Small,
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.apply_auth_profile(&apply_name, window, cx);
+                        })),
+                    );
+                }
+                let templates = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui_tokens::SPACE_2))
+                    .child(components::section_label(
+                        &tokens,
+                        "Authentication templates",
+                    ))
+                    .when(self.auth_profiles.is_empty(), |panel| {
+                        panel.child(components::help_text(
+                            &tokens,
+                            "No saved templates. Save the current method as a reusable template.",
+                        ))
+                    })
+                    .when(!self.auth_profiles.is_empty(), |panel| {
+                        panel.child(template_buttons)
+                    })
+                    .child(components::field(
+                        &tokens,
+                        "Template name",
+                        &self.auth_profile_name,
+                        false,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "save-auth-template",
+                                    "Save template",
+                                    ButtonKind::Secondary,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.save_auth_profile(cx);
+                                })),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "delete-auth-template",
+                                    "Delete",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.delete_auth_profile(cx);
+                                })),
+                            ),
+                    )
+                    .child(components::help_text(
+                        &tokens,
+                        "Templates store the method, identity file path, jump-host reference and keep-alive only. Passwords, passphrases and key material are never saved; applying a template clears secret inputs.",
+                    ))
+                    .when(!self.auth_profile_message.is_empty(), |panel| {
+                        panel.child(components::help_text(
+                            &tokens,
+                            self.auth_profile_message.clone(),
+                        ))
+                    });
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(ui_tokens::SPACE_3))
+                    .child(templates)
                     .child(components::field(
                         &tokens,
                         "Username",
