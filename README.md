@@ -194,6 +194,13 @@ the whole draft to the active session with `Ctrl+Enter`; `Escape` closes it. The
 last 20 drafts are kept for the History button, and opening the pane does not
 clear the terminal selection.
 
+Use the `Sync` button in the command bar to choose connected sessions for
+synchronized input. While enabled, keyboard input, terminal paste and compose
+sends are mirrored to every selected session; mouse input, scrolling and PTY
+resize stay per-session. The status bar shows `Sync N`, and closing a session
+removes it from the target set. Snippet broadcast remains a separate, explicit
+action.
+
 dshell targets the daily Xshell-style workflow as an open-source, native
 application: session management with groups and recents, tabbed and split
 terminals, an inspector for transfers/tunnels/connection/logging, SFTP with
