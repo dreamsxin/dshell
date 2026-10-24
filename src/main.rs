@@ -8,6 +8,7 @@ mod shortcuts;
 mod snippets;
 mod ssh;
 mod terminal;
+mod ui;
 
 use std::{
     cell::RefCell,
@@ -48,6 +49,11 @@ use terminal::{
     TerminalTheme,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+use ui::{
+    components::{self, ButtonKind, ButtonSize},
+    theme::{ThemeTokens, UiTheme},
+    tokens as ui_tokens,
+};
 use zeroize::Zeroizing;
 
 const HOSTS_SIDEBAR_WIDTH_PX: f32 = 228.0;
@@ -839,6 +845,7 @@ mod session_tests {
 }
 
 struct AppView {
+    ui_theme: UiTheme,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
     profile_group: Entity<InputState>,
@@ -1030,6 +1037,7 @@ impl AppView {
         });
 
         Self {
+            ui_theme: UiTheme::DEFAULT,
             profile_name,
             profile_search,
             profile_group,
@@ -1107,6 +1115,10 @@ impl AppView {
             _side_by_side_subscription: side_by_side_subscription,
             _stacked_subscription: stacked_subscription,
         }
+    }
+
+    fn tokens(&self) -> ThemeTokens {
+        self.ui_theme.tokens()
     }
 
     fn session(&self, id: u64) -> Option<&SshSession> {
@@ -2858,21 +2870,30 @@ impl AppView {
     }
 
     fn session_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let mut navigation = div()
             .flex()
             .flex_col()
-            .w(px(176.))
+            .w(px(ui_tokens::SESSION_NAV_WIDTH))
             .flex_shrink_0()
-            .gap(px(2.))
-            .p(px(8.))
-            .bg(rgb(0xe9edef));
+            .gap(px(ui_tokens::SPACE_1))
+            .p(px(ui_tokens::SPACE_2))
+            .border_r_1()
+            .border_color(tokens.border_subtle)
+            .bg(tokens.surface);
         for (index, section) in SessionEditorSection::ALL.into_iter().enumerate() {
-            let button = Button::new(("session-editor-section", index)).label(section.label());
-            let button = if self.session_editor_section == section {
-                button.primary()
+            let kind = if self.session_editor_section == section {
+                ButtonKind::Primary
             } else {
-                button
+                ButtonKind::Ghost
             };
+            let button = components::button(
+                &tokens,
+                ("session-editor-section", index),
+                section.label(),
+                kind,
+                ButtonSize::Regular,
+            );
             navigation =
                 navigation.child(button.w_full().on_click(cx.listener(move |this, _, _, cx| {
                     this.session_editor_section = section;
@@ -2910,56 +2931,82 @@ impl AppView {
             SessionEditorSection::Connection => div()
                 .flex()
                 .flex_col()
-                .gap(px(12.))
-                .child(labeled_input("Session name", &self.profile_name, false))
+                .gap(px(ui_tokens::SPACE_3))
+                .child(components::field(
+                    &tokens,
+                    "Session name",
+                    &self.profile_name,
+                    false,
+                ))
                 .child(
                     div()
                         .flex()
-                        .gap(px(10.))
-                        .child(div().flex_1().child(labeled_input("Host", &self.host, false)))
-                        .child(div().w(px(112.)).child(labeled_input("Port", &self.port, false))),
+                        .gap(px(ui_tokens::SPACE_3))
+                        .child(
+                            div().flex_1().child(components::field(
+                                &tokens,
+                                "Host",
+                                &self.host,
+                                false,
+                            )),
+                        )
+                        .child(
+                            div()
+                                .w(px(ui_tokens::PORT_FIELD_WIDTH))
+                                .child(components::field(
+                                    &tokens,
+                                    "Port",
+                                    &self.port,
+                                    false,
+                                )),
+                        ),
                 )
                 .child(
                     div()
                         .flex()
                         .items_end()
-                        .gap(px(10.))
+                        .gap(px(ui_tokens::SPACE_3))
                         .child(
-                            div()
-                                .flex_1()
-                                .child(labeled_input("Group", &self.profile_group, false)),
+                            div().flex_1().child(components::field(
+                                &tokens,
+                                "Group",
+                                &self.profile_group,
+                                false,
+                            )),
                         )
-                        .child(
-                            Button::new("toggle-profile-favorite")
-                                .label(if self.profile_favorite {
-                                    "Favorite"
-                                } else {
-                                    "Not favorite"
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.profile_favorite = !this.profile_favorite;
-                                    cx.notify();
-                                })),
-                        ),
+                        .child(components::button(
+                            &tokens,
+                            "toggle-profile-favorite",
+                            if self.profile_favorite {
+                                "Favorite"
+                            } else {
+                                "Not favorite"
+                            },
+                            ButtonKind::Secondary,
+                            ButtonSize::Regular,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.profile_favorite = !this.profile_favorite;
+                            cx.notify();
+                        }))),
                 )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(0x657078))
-                        .child("Hosts with the same group are listed under one folder in the sidebar."),
-                )
-                .child(labeled_input("Jump host", &self.jump_profile, false))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(if jump_profile.is_some() {
-                            rgb(0x59636a)
-                        } else {
-                            rgb(0x986c12)
-                        })
-                        .child(jump_summary),
-                )
-                .child(labeled_input(
+                .child(components::help_text(
+                    &tokens,
+                    "Hosts with the same group are listed under one folder in the sidebar.",
+                ))
+                .child(components::field(
+                    &tokens,
+                    "Jump host",
+                    &self.jump_profile,
+                    false,
+                ))
+                .child(if jump_profile.is_some() {
+                    components::help_text(&tokens, jump_summary)
+                } else {
+                    components::warning_text(&tokens, jump_summary)
+                })
+                .child(components::field(
+                    &tokens,
                     "Keep-alive (seconds, 0 = off)",
                     &self.keepalive_seconds,
                     false,
@@ -2968,30 +3015,38 @@ impl AppView {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(4.))
-                        .child(div().text_size(px(11.)).text_color(rgb(0x5b646b)).child("Protocol"))
+                        .gap(px(ui_tokens::SPACE_1))
+                        .child(components::label_text(&tokens, "Protocol"))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
-                                .h(px(32.))
-                                .px(px(10.))
+                                .h(px(ui_tokens::CONTROL_HEIGHT))
+                                .px(px(ui_tokens::SPACE_3))
                                 .border_1()
-                                .border_color(rgb(0xc8ced2))
-                                .bg(rgb(0xe9edef))
-                                .text_size(px(12.))
+                                .border_color(tokens.border_strong)
+                                .rounded(px(ui_tokens::RADIUS_CONTROL))
+                                .bg(tokens.surface)
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
                                 .child("SSH"),
                         ),
                 ),
             SessionEditorSection::Authentication => {
-                let mut methods = div().flex().items_center().gap(px(6.));
+                let mut methods = div().flex().items_center().gap(px(ui_tokens::SPACE_2));
                 for (index, method) in AuthMethod::ALL.into_iter().enumerate() {
-                    let button = Button::new(("auth-method", index)).label(method.label());
-                    let button = if self.auth_method == method {
-                        button.primary()
+                    let kind = if self.auth_method == method {
+                        ButtonKind::Primary
                     } else {
-                        button
+                        ButtonKind::Ghost
                     };
+                    let button = components::button(
+                        &tokens,
+                        ("auth-method", index),
+                        method.label(),
+                        kind,
+                        ButtonSize::Regular,
+                    );
                     methods = methods.child(button.on_click(cx.listener(
                         move |this, _, _, cx| {
                             this.auth_method = method;
@@ -3002,132 +3057,147 @@ impl AppView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(12.))
-                    .child(labeled_input("Username", &self.username, false))
+                    .gap(px(ui_tokens::SPACE_3))
+                    .child(components::field(
+                        &tokens,
+                        "Username",
+                        &self.username,
+                        false,
+                    ))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x5b646b))
-                                    .child("Authentication method"),
-                            )
+                            .gap(px(ui_tokens::SPACE_1))
+                            .child(components::label_text(
+                                &tokens,
+                                "Authentication method",
+                            ))
                             .child(methods),
                     )
                     .when(self.auth_method.uses_password_input(), |panel| {
                         panel
-                            .child(labeled_input("Password", &self.password, true))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x657078))
-                                    .child(if self.auth_method == AuthMethod::KeyboardInteractive {
-                                        "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet."
-                                    } else {
-                                        "Passwords are used for a connection and are never saved with host profiles."
-                                    }),
-                            )
+                            .child(components::field(
+                                &tokens,
+                                "Password",
+                                &self.password,
+                                true,
+                            ))
+                            .child(components::help_text(
+                                &tokens,
+                                if self.auth_method == AuthMethod::KeyboardInteractive {
+                                    "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet."
+                                } else {
+                                    "Passwords are used for a connection and are never saved with host profiles."
+                                },
+                            ))
                     })
                     .when(self.auth_method == AuthMethod::PublicKey, |panel| {
                         panel
-                            .child(labeled_input("Identity file", &self.identity_file, false))
-                            .child(labeled_input("Key passphrase", &self.key_passphrase, true))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x657078))
-                                    .child("The identity file path is saved with the host. Passphrases and key material are never saved."),
-                            )
+                            .child(components::field(
+                                &tokens,
+                                "Identity file",
+                                &self.identity_file,
+                                false,
+                            ))
+                            .child(components::field(
+                                &tokens,
+                                "Key passphrase",
+                                &self.key_passphrase,
+                                true,
+                            ))
+                            .child(components::help_text(
+                                &tokens,
+                                "The identity file path is saved with the host. Passphrases and key material are never saved.",
+                            ))
                     })
                     .when(self.auth_method == AuthMethod::Agent, |panel| {
-                        panel.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(0x657078))
-                                .child("Uses the Windows OpenSSH agent named pipe or Pageant. Load the key into the agent before connecting."),
-                        )
+                        panel.child(components::help_text(
+                            &tokens,
+                            "Uses the Windows OpenSSH agent named pipe or Pageant. Load the key into the agent before connecting.",
+                        ))
                     })
                     .when(!jump_name.is_empty(), |panel| {
                         panel
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_semibold()
-                                    .child("Jump host"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x657078))
-                                    .child(jump_summary),
-                            )
+                            .child(components::subheading(&tokens, "Jump host"))
+                            .child(components::help_text(&tokens, jump_summary))
                             .when(jump_method == Some(AuthMethod::Password), |panel| {
-                                panel.child(labeled_input(
+                                panel.child(components::field(
+                                    &tokens,
                                     "Jump password",
                                     &self.jump_password,
                                     true,
                                 ))
                             })
                             .when(jump_method == Some(AuthMethod::PublicKey), |panel| {
-                                panel.child(labeled_input(
+                                panel.child(components::field(
+                                    &tokens,
                                     "Jump key passphrase",
                                     &self.jump_passphrase,
                                     true,
                                 ))
                             })
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x657078))
-                                    .child("Jump credentials are used only for the jump host and are never saved."),
-                            )
+                            .child(components::help_text(
+                                &tokens,
+                                "Jump credentials are used only for the jump host and are never saved.",
+                            ))
                     })
             }
             SessionEditorSection::Security => div()
                 .flex()
                 .flex_col()
-                .gap(px(12.))
-                .child(div().text_size(px(13.)).font_semibold().child("Server identity"))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(0x566168))
-                        .child("Host keys must already match an entry in the user's OpenSSH known_hosts file. Unknown and changed keys are rejected. When a jump host is used, both the jump host and the target are verified independently."),
-                )
-                .child(div().text_size(px(13.)).font_semibold().child("Credential handling"))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(0x566168))
-                        .child("Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles contain connection details, an optional identity file path, and a jump host reference, never passwords, passphrases, or key material."),
-                ),
+                .gap(px(ui_tokens::SPACE_3))
+                .child(components::subheading(&tokens, "Server identity"))
+                .child(components::help_text(
+                    &tokens,
+                    "Host keys must already match an entry in the user's OpenSSH known_hosts file. Unknown and changed keys are rejected. When a jump host is used, both the jump host and the target are verified independently.",
+                ))
+                .child(components::subheading(&tokens, "Credential handling"))
+                .child(components::help_text(
+                    &tokens,
+                    "Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles contain connection details, an optional identity file path, and a jump host reference, never passwords, passphrases, or key material.",
+                )),
         };
 
-        let mut profile_actions = div().flex().items_center().gap(px(6.));
+        let mut profile_actions = div().flex().items_center().gap(px(ui_tokens::SPACE_2));
         if self.selected_profile.is_some() {
             if self.confirm_delete {
                 profile_actions = profile_actions
                     .child(
-                        Button::new("confirm-delete-profile")
-                            .label("Delete")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.delete_profile(window, cx)),
-                            ),
+                        components::button(
+                            &tokens,
+                            "confirm-delete-profile",
+                            "Delete",
+                            ButtonKind::Danger,
+                            ButtonSize::Regular,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.delete_profile(window, cx)),
+                        ),
                     )
-                    .child(Button::new("cancel-delete-profile").label("Keep").on_click(
-                        cx.listener(|this, _, _, cx| {
+                    .child(
+                        components::button(
+                            &tokens,
+                            "cancel-delete-profile",
+                            "Keep",
+                            ButtonKind::Ghost,
+                            ButtonSize::Regular,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
                             this.confirm_delete = false;
                             cx.notify();
-                        }),
-                    ));
+                        })),
+                    );
             } else {
                 profile_actions = profile_actions.child(
-                    Button::new("delete-profile")
-                        .label("Delete")
-                        .on_click(cx.listener(|this, _, _, cx| this.request_profile_delete(cx))),
+                    components::button(
+                        &tokens,
+                        "delete-profile",
+                        "Delete",
+                        ButtonKind::Danger,
+                        ButtonSize::Regular,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.request_profile_delete(cx))),
                 );
             }
         }
@@ -3145,38 +3215,54 @@ impl AppView {
             .flex()
             .items_center()
             .justify_center()
-            .p(px(16.))
-            .bg(hsla(0., 0., 0., 0.42))
+            .p(px(ui_tokens::SPACE_4))
+            .bg(tokens.scrim)
             .child(
                 div()
                     .id("session-editor")
                     .flex()
                     .flex_col()
                     .w_full()
-                    .max_w(px(760.))
+                    .max_w(px(ui_tokens::MODAL_WIDTH_SESSION))
                     .h_full()
-                    .max_h(px(560.))
+                    .max_h(px(ui_tokens::MODAL_HEIGHT_SESSION))
                     .min_h_0()
                     .border_1()
-                    .border_color(rgb(0xbfc7cc))
-                    .rounded(px(4.))
-                    .bg(rgb(0xf7f8f9))
+                    .border_color(tokens.border_strong)
+                    .rounded(px(ui_tokens::RADIUS_PANEL))
+                    .shadow_lg()
+                    .bg(tokens.surface_raised)
+                    .text_color(tokens.text_primary)
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
-                            .h(px(48.))
+                            .h(px(ui_tokens::MODAL_HEADER_HEIGHT))
                             .flex_shrink_0()
-                            .px(px(16.))
+                            .px(px(ui_tokens::SPACE_4))
                             .border_b_1()
-                            .border_color(rgb(0xd8dde0))
-                            .child(div().text_size(px(15.)).font_semibold().child(title))
-                            .child(Button::new("close-session-editor").label("Close").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.cancel_session_editor(window, cx);
-                                }),
-                            )),
+                            .border_color(tokens.border_subtle)
+                            .child(
+                                div()
+                                    .text_size(px(ui_tokens::FONT_TITLE))
+                                    .font_semibold()
+                                    .child(title),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "close-session-editor",
+                                    "Close",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.cancel_session_editor(window, cx);
+                                    },
+                                )),
+                            ),
                     )
                     .child(
                         div().flex().flex_1().min_h_0().child(navigation).child(
@@ -3186,11 +3272,11 @@ impl AppView {
                                 .flex_1()
                                 .min_w_0()
                                 .min_h_0()
-                                .gap(px(16.))
-                                .p(px(20.))
+                                .gap(px(ui_tokens::SPACE_4))
+                                .p(px(ui_tokens::SPACE_4))
                                 .child(
                                     div()
-                                        .text_size(px(16.))
+                                        .text_size(px(ui_tokens::FONT_TITLE))
                                         .font_semibold()
                                         .child(self.session_editor_section.label()),
                                 )
@@ -3201,37 +3287,53 @@ impl AppView {
                         div()
                             .flex()
                             .items_center()
-                            .h(px(60.))
+                            .h(px(ui_tokens::MODAL_FOOTER_HEIGHT))
                             .flex_shrink_0()
-                            .gap(px(10.))
-                            .px(px(12.))
+                            .gap(px(ui_tokens::SPACE_3))
+                            .px(px(ui_tokens::SPACE_4))
                             .border_t_1()
-                            .border_color(rgb(0xd8dde0))
+                            .border_color(tokens.border_subtle)
+                            .bg(tokens.surface)
                             .child(profile_actions)
+                            .child(div().flex_1().min_w_0().overflow_hidden().child(
+                                components::help_text(&tokens, self.profile_message.clone()),
+                            ))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x59636a))
-                                    .overflow_hidden()
-                                    .child(self.profile_message.clone()),
-                            )
-                            .child(
-                                Button::new("cancel-session-editor")
-                                    .label("Cancel")
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                components::button(
+                                    &tokens,
+                                    "cancel-session-editor",
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         this.cancel_session_editor(window, cx);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("save-profile")
-                                    .label("Save")
-                                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
+                                components::button(
+                                    &tokens,
+                                    "save-profile",
+                                    "Save",
+                                    ButtonKind::Secondary,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
                             )
-                            .child(Button::new("connect").primary().label("Connect").on_click(
-                                cx.listener(|this, _, window, cx| this.connect(window, cx)),
-                            )),
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "connect",
+                                    "Connect",
+                                    ButtonKind::Primary,
+                                    ButtonSize::Large,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.connect(window, cx)),
+                                ),
+                            ),
                     ),
             )
             .into_any_element()
@@ -3748,6 +3850,7 @@ impl AppView {
     }
 
     fn sftp_panel(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let Some(session) = self.session(session_id) else {
             return div().into_any_element();
         };
@@ -3939,11 +4042,12 @@ impl AppView {
             .gap(px(4.))
             .px(px(8.))
             .py(px(4.))
-            .child(
-                div()
-                    .flex_1()
-                    .child(labeled_input("Remote name", &self.sftp_name, false)),
-            );
+            .child(div().flex_1().child(components::field(
+                &tokens,
+                "Remote name",
+                &self.sftp_name,
+                false,
+            )));
         if rename_from.is_some() {
             operations =
                 operations
@@ -4292,6 +4396,7 @@ impl AppView {
     }
 
     fn forward_panel(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let Some(session) = self.session(session_id) else {
             return div().into_any_element();
         };
@@ -4320,24 +4425,28 @@ impl AppView {
             .gap(px(6.))
             .p(px(8.))
             .child(kind_buttons)
-            .child(labeled_input(
+            .child(components::field(
+                &tokens,
                 "Listen host",
                 &self.forward_listen_host,
                 false,
             ))
-            .child(labeled_input(
+            .child(components::field(
+                &tokens,
                 "Listen port (0 = auto)",
                 &self.forward_listen_port,
                 false,
             ));
         if kind.needs_target() {
             form = form
-                .child(labeled_input(
+                .child(components::field(
+                    &tokens,
                     "Target host",
                     &self.forward_target_host,
                     false,
                 ))
-                .child(labeled_input(
+                .child(components::field(
+                    &tokens,
                     "Target port",
                     &self.forward_target_port,
                     false,
@@ -4718,6 +4827,7 @@ impl AppView {
     }
 
     fn snippets_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let snippets = self.snippets.clone();
         let message = self.snippet_message.clone();
         let targets = self.snippet_targets.clone();
@@ -4844,8 +4954,18 @@ impl AppView {
                     .flex_col()
                     .gap(px(6.))
                     .p(px(8.))
-                    .child(labeled_input("Name", &self.snippet_name, false))
-                    .child(labeled_input("Command", &self.snippet_command, false))
+                    .child(components::field(
+                        &tokens,
+                        "Name",
+                        &self.snippet_name,
+                        false,
+                    ))
+                    .child(components::field(
+                        &tokens,
+                        "Command",
+                        &self.snippet_command,
+                        false,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -5086,6 +5206,7 @@ impl AppView {
     }
 
     fn keys_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let message = self.key_message.clone();
         let public_key = self.key_public.clone();
         div()
@@ -5124,13 +5245,24 @@ impl AppView {
                     .overflow_y_scroll()
                     .gap(px(8.))
                     .p(px(8.))
-                    .child(labeled_input("Private key path", &self.key_path, false))
-                    .child(labeled_input(
+                    .child(components::field(
+                        &tokens,
+                        "Private key path",
+                        &self.key_path,
+                        false,
+                    ))
+                    .child(components::field(
+                        &tokens,
                         "Passphrase (optional)",
                         &self.new_key_passphrase,
                         false,
                     ))
-                    .child(labeled_input("Comment", &self.key_comment, false))
+                    .child(components::field(
+                        &tokens,
+                        "Comment",
+                        &self.key_comment,
+                        false,
+                    ))
                     .child(
                         Button::new("generate-key")
                             .primary()
@@ -5544,32 +5676,76 @@ impl AppView {
     }
 
     fn settings_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let message = self.settings_message.clone();
-        div()
+
+        let mut theme_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
+        for (index, theme) in TerminalTheme::ALL.into_iter().enumerate() {
+            let kind = if self.settings_theme == theme {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Secondary
+            };
+            let button = components::button(
+                &tokens,
+                ("settings-theme", index),
+                theme.label(),
+                kind,
+                ButtonSize::Small,
+            );
+            theme_selector =
+                theme_selector.child(button.on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings_theme = theme;
+                    cx.notify();
+                })));
+        }
+
+        let mut cursor_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
+        for (index, style) in CursorStyle::ALL.into_iter().enumerate() {
+            let kind = if self.settings_cursor == style {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Secondary
+            };
+            let button = components::button(
+                &tokens,
+                ("settings-cursor", index),
+                style.label(),
+                kind,
+                ButtonSize::Small,
+            );
+            cursor_selector =
+                cursor_selector.child(button.on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings_cursor = style;
+                    cx.notify();
+                })));
+        }
+
+        let mut shortcut_fields = div().flex().flex_col().gap(px(ui_tokens::SPACE_3));
+        for (index, action) in ShortcutAction::ALL.iter().enumerate() {
+            shortcut_fields = shortcut_fields.child(components::field(
+                &tokens,
+                action.label(),
+                &self.shortcut_inputs[index],
+                false,
+            ));
+        }
+
+        components::panel(&tokens)
             .id("settings-panel")
-            .flex()
-            .flex_col()
-            .w(px(340.))
-            .flex_shrink_0()
-            .min_h_0()
-            .ml(px(6.))
-            .border_1()
-            .border_color(rgb(0x343c42))
-            .bg(rgb(0x11161b))
-            .text_color(rgb(0xd4dade))
+            .w(px(ui_tokens::INSPECTOR_WIDTH))
+            .ml(px(ui_tokens::SPACE_2))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(TERMINAL_PANEL_HEADER_PX))
-                    .flex_shrink_0()
-                    .px(px(8.))
-                    .bg(rgb(0x171d22))
-                    .child(div().text_size(px(11.)).child("Settings"))
-                    .child(Button::new("settings-close").label("Close").on_click(
-                        cx.listener(|this, _, _, cx| this.toggle_settings(cx)),
-                    )),
+                components::panel_header(&tokens, "Settings").child(
+                    components::button(
+                        &tokens,
+                        "settings-close",
+                        "Close",
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                ),
             )
             .child(
                 div()
@@ -5579,123 +5755,85 @@ impl AppView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap(px(8.))
-                    .p(px(8.))
-                    .child(labeled_input(
+                    .gap(px(ui_tokens::SPACE_4))
+                    .p(px(ui_tokens::SPACE_4))
+                    .child(components::field(
+                        &tokens,
                         "Font family",
                         &self.settings_font_family,
                         false,
                     ))
-                    .child(labeled_input("Font size", &self.settings_font_size, false))
+                    .child(components::field(
+                        &tokens,
+                        "Font size",
+                        &self.settings_font_size,
+                        false,
+                    ))
                     .child(
                         div()
-                            .text_size(px(10.))
-                            .text_color(rgb(0x8a949b))
-                            .child("Terminal theme"),
-                    )
-                    .child({
-                        let mut theme_selector = div().flex().flex_wrap().gap(px(4.));
-                        for (index, theme) in TerminalTheme::ALL.into_iter().enumerate() {
-                            let button = Button::new(("settings-theme", index)).label(theme.label());
-                            let button = if self.settings_theme == theme {
-                                button.primary()
-                            } else {
-                                button
-                            };
-                            theme_selector =
-                                theme_selector.child(button.on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.settings_theme = theme;
-                                        cx.notify();
-                                    },
-                                )));
-                        }
-                        theme_selector
-                    })
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(0x8a949b))
-                            .child("Cursor style"),
-                    )
-                    .child({
-                        let mut cursor_selector = div().flex().flex_wrap().gap(px(4.));
-                        for (index, style) in CursorStyle::ALL.into_iter().enumerate() {
-                            let button = Button::new(("settings-cursor", index)).label(style.label());
-                            let button = if self.settings_cursor == style {
-                                button.primary()
-                            } else {
-                                button
-                            };
-                            cursor_selector =
-                                cursor_selector.child(button.on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.settings_cursor = style;
-                                        cx.notify();
-                                    },
-                                )));
-                        }
-                        cursor_selector
-                    })
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(0x8a949b))
-                            .child("Workspace shortcuts"),
-                    )
-                    .child({
-                        let mut shortcut_fields = div().flex().flex_col().gap(px(6.));
-                        for (index, action) in ShortcutAction::ALL.iter().enumerate() {
-                            shortcut_fields = shortcut_fields.child(labeled_input(
-                                action.label(),
-                                &self.shortcut_inputs[index],
-                                false,
-                            ));
-                        }
-                        shortcut_fields
-                    })
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(0x8a949b))
-                            .child(
-                                "Format: ctrl+shift+t, alt+F12 or cmd+space. Alt+1..9 always switches tabs.",
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(0x8a949b))
-                            .child(format!(
-                                "Allowed range: {MIN_FONT_SIZE:.0}-{MAX_FONT_SIZE:.0} px. Cell size and PTY dimensions follow the font size."
-                            )),
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(components::section_label(&tokens, "Terminal theme"))
+                            .child(theme_selector),
                     )
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .child(
-                                Button::new("settings-apply")
-                                    .label("Apply")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.apply_settings(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("settings-reset")
-                                    .label("Reset")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.reset_settings(window, cx);
-                                    })),
-                            ),
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(components::section_label(&tokens, "Cursor style"))
+                            .child(cursor_selector),
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x9aa4ab))
-                            .child(message),
-                    ),
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(components::section_label(&tokens, "Workspace shortcuts"))
+                            .child(shortcut_fields),
+                    )
+                    .child(components::help_text(
+                        &tokens,
+                        "Format: ctrl+shift+t, alt+F12 or cmd+space. Alt+1..9 always switches tabs.",
+                    ))
+                    .child(components::help_text(
+                        &tokens,
+                        format!(
+                            "Allowed range: {MIN_FONT_SIZE:.0}-{MAX_FONT_SIZE:.0} px. Cell size and PTY dimensions follow the font size."
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "settings-apply",
+                                    "Apply",
+                                    ButtonKind::Primary,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.apply_settings(window, cx);
+                                })),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "settings-reset",
+                                    "Reset",
+                                    ButtonKind::Secondary,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.reset_settings(window, cx);
+                                })),
+                            ),
+                    )
+                    .child(components::help_text(&tokens, message)),
             )
             .into_any_element()
     }
@@ -5941,29 +6079,6 @@ fn sftp_transfer_command(prompt: OverwritePrompt, overwrite: bool, resume: bool)
             resume,
         },
     }
-}
-
-fn labeled_input(
-    label: &'static str,
-    input: &Entity<InputState>,
-    masked: bool,
-) -> impl IntoElement {
-    let input = if masked {
-        TextInput::new(input).mask_toggle()
-    } else {
-        TextInput::new(input)
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(rgb(0x5b646b))
-                .child(label),
-        )
-        .child(input)
 }
 
 impl Render for AppView {
@@ -6491,6 +6606,7 @@ impl Render for AppView {
 fn main() {
     Application::new().run(|cx| {
         gpui_component::init(cx);
+        ui::theme::install(cx, UiTheme::DEFAULT);
         cx.open_window(WindowOptions::default(), |window, cx| {
             let view = cx.new(|cx| AppView::new(window, cx));
             cx.new(|cx| Root::new(view.into(), window, cx))
