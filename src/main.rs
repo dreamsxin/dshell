@@ -472,6 +472,25 @@ fn recall_compose_history(history: &[String], recall: usize) -> Option<(String, 
     Some((history[index].clone(), (index + 1) % history.len()))
 }
 
+fn synchronized_targets(
+    active_session_id: u64,
+    enabled: bool,
+    selected: &HashSet<u64>,
+    connected: impl Fn(u64) -> bool,
+) -> Vec<u64> {
+    let mut targets = vec![active_session_id];
+    if enabled {
+        let mut mirrored = selected
+            .iter()
+            .copied()
+            .filter(|id| *id != active_session_id && connected(*id))
+            .collect::<Vec<_>>();
+        mirrored.sort_unstable();
+        targets.extend(mirrored);
+    }
+    targets
+}
+
 fn format_log_time(milliseconds: u64) -> String {
     let hours = milliseconds / 3_600_000;
     let minutes = (milliseconds / 60_000) % 60;
@@ -694,7 +713,7 @@ mod session_tests {
         format_rate, move_profile_to_group, mpsc, recall_compose_history, remember_compose_history,
         remember_stopped_forward, remove_session, reorder_session_ids, search_result_message,
         session_editor_escape, session_editor_key, session_terminal_size_for_split,
-        split_panel_terminal_size, terminal_size_for_viewport, watch,
+        split_panel_terminal_size, synchronized_targets, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -703,6 +722,7 @@ mod session_tests {
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
     use crate::ui::tokens as ui_tokens;
+    use std::collections::HashSet;
 
     fn test_session(
         id: u64,
@@ -1168,6 +1188,24 @@ mod session_tests {
     }
 
     #[test]
+    fn synchronized_input_targets_only_selected_connected_sessions() {
+        let selected: HashSet<u64> = [1, 2, 3, 9].into_iter().collect();
+        assert_eq!(synchronized_targets(1, false, &selected, |_| true), vec![1]);
+        assert_eq!(
+            synchronized_targets(1, true, &selected, |id| matches!(id, 2 | 3)),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            synchronized_targets(2, true, &selected, |id| matches!(id, 1 | 2)),
+            vec![2, 1]
+        );
+        assert_eq!(
+            synchronized_targets(1, true, &HashSet::new(), |_| true),
+            vec![1]
+        );
+    }
+
+    #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
         let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
@@ -1408,6 +1446,9 @@ struct AppView {
     compose_visible: bool,
     compose_history: Vec<String>,
     compose_recall: usize,
+    sync_input_enabled: bool,
+    sync_targets: HashSet<u64>,
+    sync_visible: bool,
     search_visible: bool,
     search_message: String,
     search_target: Option<SearchTarget>,
@@ -1624,6 +1665,9 @@ impl AppView {
             compose_visible: false,
             compose_history: Vec::new(),
             compose_recall: 0,
+            sync_input_enabled: false,
+            sync_targets: HashSet::new(),
+            sync_visible: false,
             search_visible: false,
             search_message: String::new(),
             search_target: None,
@@ -3287,6 +3331,9 @@ impl AppView {
         }
         self.terminal_bounds.borrow_mut().remove(&id);
         self.snippet_targets.remove(&id);
+        if self.sync_targets.remove(&id) && self.sync_targets.is_empty() {
+            self.sync_input_enabled = false;
+        }
         if self.search_target == Some(SearchTarget::Session(id)) {
             self.search_visible = false;
             self.search_target = None;
@@ -3376,12 +3423,19 @@ impl AppView {
                 "v" => {
                     cx.stop_propagation();
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.send_terminal_request(
+                        let delivered = self.send_input_to_targets(
                             session_id,
-                            TerminalRequest::Paste(text),
+                            || TerminalRequest::Paste(text.clone()),
                             "Terminal paste",
                             cx,
                         );
+                        if delivered > 1 {
+                            self.show_toast(
+                                format!("Pasted into {delivered} sessions."),
+                                Tone::Success,
+                                cx,
+                            );
+                        }
                     }
                     return;
                 }
@@ -3402,14 +3456,14 @@ impl AppView {
             return;
         }
 
-        match enqueue_session_request(&self.sessions, session_id, TerminalRequest::Key(key)) {
-            Ok(()) => cx.stop_propagation(),
-            Err(error) => {
-                if let Some(session) = self.session_mut(session_id) {
-                    session.status = format!("Terminal input queue is unavailable: {error}");
-                }
-                cx.notify();
-            }
+        match self.send_input_to_targets(
+            session_id,
+            || TerminalRequest::Key(key.clone()),
+            "Terminal input",
+            cx,
+        ) {
+            0 => {}
+            _ => cx.stop_propagation(),
         }
     }
 
@@ -3584,6 +3638,91 @@ impl AppView {
         }
     }
 
+    fn sync_target_count(&self) -> usize {
+        if !self.sync_input_enabled {
+            return 0;
+        }
+        self.sync_targets
+            .iter()
+            .filter(|id| {
+                self.session(**id)
+                    .is_some_and(|session| session.state == SessionState::Connected)
+            })
+            .count()
+    }
+
+    fn input_targets(&self, active_session_id: u64) -> Vec<u64> {
+        synchronized_targets(
+            active_session_id,
+            self.sync_input_enabled,
+            &self.sync_targets,
+            |id| {
+                self.session(id)
+                    .is_some_and(|session| session.state == SessionState::Connected)
+            },
+        )
+    }
+
+    fn send_input_to_targets(
+        &mut self,
+        active_session_id: u64,
+        request: impl Fn() -> TerminalRequest,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let targets = self.input_targets(active_session_id);
+        let mut delivered = 0;
+        for target in targets {
+            match enqueue_session_request(&self.sessions, target, request()) {
+                Ok(()) => delivered += 1,
+                Err(error) => {
+                    if let Some(session) = self.session_mut(target) {
+                        session.status = format!("{action} queue is unavailable: {error}");
+                    }
+                }
+            }
+        }
+        if delivered == 0 {
+            cx.notify();
+        }
+        delivered
+    }
+
+    fn toggle_sync_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_visible = !self.sync_visible;
+        if self.sync_visible {
+            self.request_overlay_focus();
+        } else {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn toggle_sync_target(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if self
+            .session(session_id)
+            .is_none_or(|session| session.state != SessionState::Connected)
+        {
+            return;
+        }
+        if self.sync_targets.remove(&session_id) {
+            if self.sync_targets.is_empty() {
+                self.sync_input_enabled = false;
+            }
+        } else {
+            self.sync_targets.insert(session_id);
+            self.sync_input_enabled = true;
+        }
+        cx.notify();
+    }
+
+    fn clear_sync_targets(&mut self, cx: &mut Context<Self>) {
+        self.sync_targets.clear();
+        self.sync_input_enabled = false;
+        cx.notify();
+    }
+
     fn copy_terminal_selection(&mut self, session_id: u64, cx: &mut Context<Self>) {
         if let Some(text) = self
             .session(session_id)
@@ -3598,13 +3737,18 @@ impl AppView {
 
     fn paste_into_terminal(&mut self, session_id: u64, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.send_terminal_request(
+            let delivered = self.send_input_to_targets(
                 session_id,
-                TerminalRequest::Paste(text),
+                || TerminalRequest::Paste(text.clone()),
                 "Terminal paste",
                 cx,
             );
-            self.show_toast("Pasted from clipboard.", Tone::Success, cx);
+            let message = if delivered > 1 {
+                format!("Pasted into {delivered} sessions.")
+            } else {
+                "Pasted from clipboard.".to_owned()
+            };
+            self.show_toast(message, Tone::Success, cx);
         }
     }
 
@@ -6330,9 +6474,9 @@ impl AppView {
         if text.trim().is_empty() {
             return;
         }
-        self.send_terminal_request(
+        self.send_input_to_targets(
             session_id,
-            TerminalRequest::Paste(text.clone()),
+            || TerminalRequest::Paste(text.clone()),
             "Compose",
             cx,
         );
@@ -7961,6 +8105,27 @@ impl AppView {
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_keys(window, cx))),
             )
             .child(
+                components::button(
+                    tokens,
+                    "toggle-sync",
+                    {
+                        let count = self.sync_target_count();
+                        if count > 0 {
+                            format!("Sync {count}")
+                        } else {
+                            "Sync".to_owned()
+                        }
+                    },
+                    if self.sync_visible || self.sync_target_count() > 0 {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_sync_modal(window, cx))),
+            )
+            .child(
                 components::icon_button(
                     tokens,
                     "toggle-ui-theme",
@@ -8024,6 +8189,7 @@ impl AppView {
                 )
             })
             .unwrap_or_default();
+        let sync_count = self.sync_target_count();
 
         div()
             .h(px(ui_tokens::STATUS_BAR_HEIGHT))
@@ -8059,8 +8225,164 @@ impl AppView {
                     .items_center()
                     .gap(px(ui_tokens::SPACE_3))
                     .flex_shrink_0()
+                    .when(sync_count > 0, |right| {
+                        right.child(components::pill(
+                            tokens,
+                            format!("Sync {sync_count}"),
+                            Tone::Accent,
+                        ))
+                    })
                     .when(!identity.is_empty(), |right| right.child(identity))
                     .when(!dimensions.is_empty(), |right| right.child(dimensions)),
+            )
+            .into_any_element()
+    }
+
+    fn sync_overlay(&mut self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let connected = self
+            .sessions
+            .iter()
+            .filter(|session| session.state == SessionState::Connected)
+            .map(|session| {
+                (
+                    session.id,
+                    session.title.clone(),
+                    format!("{}@{}:{}", session.username, session.host, session.port),
+                    session.state,
+                )
+            })
+            .collect::<Vec<_>>();
+        let sync_count = self.sync_target_count();
+        let mut list = div()
+            .id("sync-targets")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p(px(ui_tokens::SPACE_4));
+        if connected.is_empty() {
+            list = list.child(components::empty_state(
+                tokens,
+                "No connected sessions",
+                "Connect at least one session before enabling synchronized input.",
+            ));
+        } else {
+            for (id, title, identity, state) in connected {
+                let selected = self.sync_targets.contains(&id);
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_2))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(tokens.border_subtle)
+                        .bg(tokens.surface)
+                        .child(components::status_dot(tokens, session_tone(state)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_size(px(ui_tokens::FONT_BODY))
+                                        .text_color(tokens.text_primary)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_size(px(ui_tokens::FONT_CAPTION))
+                                        .text_color(tokens.text_secondary)
+                                        .child(identity),
+                                ),
+                        )
+                        .child(
+                            components::button(
+                                tokens,
+                                ("sync-target", id),
+                                if selected { "Syncing" } else { "Add" },
+                                if selected {
+                                    ButtonKind::Secondary
+                                } else {
+                                    ButtonKind::Ghost
+                                },
+                                ButtonSize::Small,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.toggle_sync_target(id, cx);
+                                },
+                            )),
+                        ),
+                );
+            }
+        }
+
+        components::modal_overlay(tokens, "sync-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.toggle_sync_modal(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(tokens, "sync-panel")
+                    .w_full()
+                    .max_w(px(480.))
+                    .max_h(px(560.))
+                    .child(
+                        components::modal_header(tokens, "Synchronized input").child(
+                            components::help_text(
+                                tokens,
+                                format!("{sync_count} target(s) selected"),
+                            ),
+                        ),
+                    )
+                    .child(list)
+                    .child(
+                        div()
+                            .px(px(ui_tokens::SPACE_4))
+                            .pb(px(ui_tokens::SPACE_2))
+                            .child(components::help_text(
+                                tokens,
+                                "Keyboard, paste and compose are mirrored; mouse, scrolling and resize stay per-session.",
+                            )),
+                    )
+                    .child(
+                        components::modal_footer(tokens)
+                            .child(
+                                components::button(
+                                    tokens,
+                                    "clear-sync-targets",
+                                    "Clear",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.clear_sync_targets(cx);
+                                })),
+                            )
+                            .child(
+                                components::button(
+                                    tokens,
+                                    "close-sync-panel",
+                                    "Done",
+                                    ButtonKind::Primary,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_sync_modal(window, cx);
+                                })),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -8925,6 +9247,9 @@ impl Render for AppView {
                         cx.listener(|this, _, window, cx| this.finish_layout_drag(window, cx)),
                     ),
             );
+        }
+        if self.sync_visible {
+            root = root.child(self.sync_overlay(&tokens, cx));
         }
         if self.keys_visible {
             root = root.child(self.keys_panel(cx));
