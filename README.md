@@ -139,9 +139,10 @@ manually.
 While a terminal has focus, the default workspace shortcuts are `Ctrl+Shift+T`
 for a new session, `Ctrl+Shift+W` close tab, `Ctrl+Shift+F` files,
 `Ctrl+Shift+S` snippets, `Ctrl+Shift+O` settings, `Ctrl+Shift+B` toggle the
-saved-host sidebar, `Ctrl+Shift+D` disconnect,
-`Ctrl+Shift+R` replay log and `Ctrl+F` find. `Alt+1` through `Alt+9` always
-select a session tab. `Ctrl+Shift+C` and `Ctrl+Shift+V` remain copy and paste.
+saved-host sidebar, `Ctrl+Shift+M` toggle the compose pane, `Ctrl+Shift+D`
+disconnect, `Ctrl+Shift+R` replay log and `Ctrl+F` find. `Alt+1` through `Alt+9`
+always select a session tab. `Ctrl+Shift+C` and `Ctrl+Shift+V` remain copy and
+paste.
 
 The command bar switches between the dark and light UI palettes and remembers
 the choice, together with the collapsed/expanded sidebar state, in
@@ -186,6 +187,20 @@ the inspector 300-520 px; both widths are stored in `settings.json`, and the PTY
 is resized once when the drag ends. Dragging a session tab onto another tab
 reorders the tabs; `Alt+1` through `Alt+9` follow the visual order without
 reconnecting the sessions.
+
+Press `Ctrl+Shift+M` or use the compose button in the terminal toolbar to open
+the 96 px compose pane below the terminal. It accepts multi-line input and sends
+the whole draft to the active session with `Ctrl+Enter`; `Escape` closes it. The
+last 20 drafts are kept for the History button, and opening the pane does not
+clear the terminal selection.
+
+dshell targets the daily Xshell-style workflow as an open-source, native
+application: session management with groups and recents, tabbed and split
+terminals, an inspector for transfers/tunnels/connection/logging, SFTP with
+resume, local/remote/SOCKS5 forwarding, timestamped logs with a replay timeline,
+and Ed25519/RSA/ECDSA key generation. Telnet, Rlogin, Serial and RDP are outside
+the current scope. See [ROADMAP.md](ROADMAP.md) for the capability matrix and
+the planned compose/synchronized-input/trigger work.
 
 ## Test and Verify
 
