@@ -28,7 +28,7 @@ use auth_profiles::{AuthProfile, AuthProfileStore};
 use forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec, ForwardRuleUiState};
 use gpui::{AnyElement, StatefulInteractiveElement as _, prelude::*, *};
 use gpui_component::{
-    IconName, PixelsExt, Root, StyledExt,
+    Disableable as _, Icon, IconName, PixelsExt, Root, Sizable as _, Size, StyledExt,
     button::{Button, ButtonVariants},
     input::{InputState, TextInput},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
@@ -491,6 +491,54 @@ fn synchronized_targets(
         targets.extend(mirrored);
     }
     targets
+}
+
+fn menu_item(
+    tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    icon: IconName,
+    label: impl Into<SharedString>,
+    shortcut: &'static str,
+    active: bool,
+    enabled: bool,
+) -> Button {
+    let button = Button::new(id)
+        .h(px(32.0))
+        .w_full()
+        .px(px(ui_tokens::SPACE_2))
+        .rounded(px(ui_tokens::RADIUS_CONTROL))
+        .disabled(!enabled)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(ui_tokens::SPACE_2))
+                .w_full()
+                .child(
+                    Icon::new(icon)
+                        .with_size(Size::Small)
+                        .text_color(tokens.text_secondary),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_size(px(ui_tokens::FONT_BODY))
+                        .text_color(tokens.text_primary)
+                        .child(label.into()),
+                )
+                .when(!shortcut.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .text_color(tokens.text_disabled)
+                            .child(shortcut),
+                    )
+                }),
+        );
+    if active { button } else { button.ghost() }
 }
 
 fn format_log_time(milliseconds: u64) -> String {
@@ -1456,6 +1504,7 @@ struct AppView {
     sync_input_enabled: bool,
     sync_targets: HashSet<u64>,
     sync_visible: bool,
+    menu_visible: bool,
     search_visible: bool,
     search_message: String,
     search_target: Option<SearchTarget>,
@@ -1690,6 +1739,7 @@ impl AppView {
             sync_input_enabled: false,
             sync_targets: HashSet::new(),
             sync_visible: false,
+            menu_visible: false,
             search_visible: false,
             search_message: String::new(),
             search_target: None,
@@ -3896,6 +3946,26 @@ impl AppView {
         self.sync_targets.clear();
         self.sync_input_enabled = false;
         cx.notify();
+    }
+
+    fn toggle_main_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_visible = !self.menu_visible;
+        if self.menu_visible {
+            self.request_overlay_focus();
+        } else {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn close_main_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu_visible {
+            self.menu_visible = false;
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
     }
 
     fn copy_terminal_selection(&mut self, session_id: u64, cx: &mut Context<Self>) {
@@ -8148,12 +8218,13 @@ impl AppView {
             .gap(px(ui_tokens::SPACE_1))
             .flex_shrink_0()
             .child(
-                components::button(
+                components::icon_button(
                     tokens,
                     "new-session",
-                    "New session",
+                    IconName::Plus,
                     ButtonKind::Primary,
                     ButtonSize::Small,
+                    "New session (Ctrl+Shift+T)",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
             )
@@ -8172,12 +8243,13 @@ impl AppView {
             );
         if self.selected_profile.is_some() {
             left = left.child(
-                components::button(
+                components::icon_button(
                     tokens,
                     "edit-session-profile",
-                    "Properties",
+                    IconName::Settings2,
                     ButtonKind::Secondary,
                     ButtonSize::Small,
+                    "Session properties",
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.session_editor_section = SessionEditorSection::Connection;
@@ -8189,12 +8261,13 @@ impl AppView {
         }
         if self.sessions.len() > 1 && self.active_session_id.is_some() {
             left = left.child(
-                components::button(
+                components::icon_button(
                     tokens,
                     "split-active-session",
-                    "Split",
+                    IconName::PanelRight,
                     ButtonKind::Secondary,
                     ButtonSize::Small,
+                    "Split with another session",
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     let Some(active_id) = this.active_session_id else {
@@ -8242,75 +8315,85 @@ impl AppView {
             .flex_shrink_0();
         if let Some(session) = active {
             let active_id = session.id;
-            let files_label = if session.sftp.visible {
-                "Close files"
-            } else {
-                "Files"
-            };
-            let tunnels_label = if session.forwards.visible {
-                "Close tunnels"
-            } else {
-                "Tunnels"
-            };
-            let log_label = if session.log_path.is_some() {
-                "Stop log"
-            } else {
-                "Log"
-            };
             right = right
                 .child(
-                    components::button(
+                    components::icon_button(
                         tokens,
                         "toggle-sftp",
-                        files_label,
-                        ButtonKind::Ghost,
+                        IconName::Folder,
+                        if session.sftp.visible {
+                            ButtonKind::Secondary
+                        } else {
+                            ButtonKind::Ghost
+                        },
                         ButtonSize::Small,
+                        "Files (Ctrl+Shift+F)",
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_sftp(active_id, cx);
                     })),
                 )
                 .child(
-                    components::button(
+                    components::icon_button(
                         tokens,
                         "toggle-tunnels",
-                        tunnels_label,
-                        ButtonKind::Ghost,
+                        IconName::Globe,
+                        if session.forwards.visible {
+                            ButtonKind::Secondary
+                        } else {
+                            ButtonKind::Ghost
+                        },
                         ButtonSize::Small,
+                        "Tunnels",
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_tunnels(active_id, cx);
                     })),
                 )
                 .child(
-                    components::button(
+                    components::icon_button(
                         tokens,
                         "toggle-log",
-                        log_label,
-                        ButtonKind::Ghost,
+                        if session.log_path.is_some() {
+                            IconName::CircleCheck
+                        } else {
+                            IconName::Dash
+                        },
+                        if session.log_path.is_some() {
+                            ButtonKind::Secondary
+                        } else {
+                            ButtonKind::Ghost
+                        },
                         ButtonSize::Small,
+                        if session.log_path.is_some() {
+                            "Stop logging"
+                        } else {
+                            "Start logging"
+                        },
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_log(active_id, cx);
                     })),
                 )
                 .child(
-                    components::button(
+                    components::icon_button(
                         tokens,
                         "replay-log",
-                        "Replay",
+                        IconName::BookOpen,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
+                        "Replay log (Ctrl+Shift+R)",
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.begin_log_replay(cx))),
                 )
                 .child(
-                    components::button(
+                    components::icon_button(
                         tokens,
                         "find-terminal",
-                        "Find",
+                        IconName::Search,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
+                        "Find (Ctrl+F)",
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_search(active_id, window, cx);
@@ -8320,18 +8403,15 @@ impl AppView {
                 session.state,
                 SessionState::Connecting | SessionState::Connected
             ) {
-                let label = if session.state == SessionState::Connecting {
-                    "Cancel"
-                } else {
-                    "Disconnect"
-                };
+                let connecting = session.state == SessionState::Connecting;
                 right = right.child(
-                    components::button(
+                    components::icon_button(
                         tokens,
                         "disconnect-active",
-                        label,
+                        IconName::CircleX,
                         ButtonKind::Secondary,
                         ButtonSize::Small,
+                        if connecting { "Cancel" } else { "Disconnect" },
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.disconnect_session(active_id, cx);
@@ -8341,51 +8421,47 @@ impl AppView {
         }
         right = right
             .child(
-                components::button(
+                components::icon_button(
                     tokens,
                     "toggle-snippets",
-                    "Snippets",
+                    IconName::Asterisk,
                     if self.snippets_visible {
                         ButtonKind::Secondary
                     } else {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
+                    "Snippets (Ctrl+Shift+S)",
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_snippets(cx))),
             )
             .child(
-                components::button(
+                components::icon_button(
                     tokens,
                     "toggle-keys",
-                    "Keys",
+                    IconName::User,
                     if self.keys_visible {
                         ButtonKind::Secondary
                     } else {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
+                    "Keys",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_keys(window, cx))),
             )
             .child(
-                components::button(
+                components::icon_button(
                     tokens,
                     "toggle-sync",
-                    {
-                        let count = self.sync_target_count();
-                        if count > 0 {
-                            format!("Sync {count}")
-                        } else {
-                            "Sync".to_owned()
-                        }
-                    },
+                    IconName::ChevronsUpDown,
                     if self.sync_visible || self.sync_target_count() > 0 {
                         ButtonKind::Secondary
                     } else {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
+                    format!("Synchronized input ({} target)", self.sync_target_count()),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_sync_modal(window, cx))),
             )
@@ -8411,9 +8487,24 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Settings",
+                    "Settings (Ctrl+Shift+O)",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx))),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
+                    "main-menu",
+                    IconName::Ellipsis,
+                    if self.menu_visible {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    "Menu",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_main_menu(window, cx))),
             );
 
         div()
@@ -8647,6 +8738,437 @@ impl AppView {
                                 })),
                             ),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn main_menu_overlay(&mut self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let active_id = self.active_session_id;
+        let active_connected = active_id.is_some_and(|id| {
+            self.session(id).is_some_and(|session| {
+                matches!(
+                    session.state,
+                    SessionState::Connecting | SessionState::Connected
+                )
+            })
+        });
+        let other_session = active_id.and_then(|active| {
+            self.sessions
+                .iter()
+                .map(|session| session.id)
+                .find(|id| *id != active)
+        });
+        let log_active = active_id
+            .and_then(|id| self.session(id))
+            .is_some_and(|session| session.log_path.is_some());
+        let mut menu = div()
+            .id("main-menu")
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .w(px(320.0))
+            .max_h(px(560.0))
+            .overflow_y_scroll()
+            .p(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .rounded(px(ui_tokens::RADIUS_PANEL))
+            .shadow_lg()
+            .bg(tokens.surface_overlay)
+            .text_color(tokens.text_primary);
+        menu = menu
+            .child(components::section_label(tokens, "SESSION"))
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-new-session",
+                    IconName::Plus,
+                    "New session",
+                    "Ctrl+Shift+T",
+                    false,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    window.focus(&this.terminal_focus);
+                    this.new_profile(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-session-properties",
+                    IconName::Settings2,
+                    "Session properties",
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(|this, _, _window, cx| {
+                    this.menu_visible = false;
+                    this.session_editor_section = SessionEditorSection::Connection;
+                    this.session_editor_open = true;
+                    this.request_overlay_focus();
+                    cx.notify();
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-import-config",
+                    IconName::FolderOpen,
+                    "Import OpenSSH config",
+                    "",
+                    false,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    window.focus(&this.terminal_focus);
+                    this.begin_config_import(cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-close-tab",
+                    IconName::Close,
+                    "Close tab",
+                    "Ctrl+Shift+W",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(id) = this.active_session_id {
+                        this.close_session(id, window, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-disconnect",
+                    IconName::CircleX,
+                    "Disconnect",
+                    "Ctrl+Shift+D",
+                    false,
+                    active_connected,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(id) = this.active_session_id {
+                        this.disconnect_session(id, cx);
+                    }
+                    window.focus(&this.terminal_focus);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-split-side",
+                    IconName::PanelRight,
+                    "Split side by side",
+                    "",
+                    false,
+                    other_session.is_some(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    let active = this.active_session_id;
+                    if let Some(other) = this
+                        .sessions
+                        .iter()
+                        .map(|session| session.id)
+                        .find(|id| Some(*id) != active)
+                    {
+                        this.set_split(other, SplitOrientation::SideBySide, window, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-split-stack",
+                    IconName::PanelBottom,
+                    "Split stacked",
+                    "",
+                    false,
+                    other_session.is_some(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    let active = this.active_session_id;
+                    if let Some(other) = this
+                        .sessions
+                        .iter()
+                        .map(|session| session.id)
+                        .find(|id| Some(*id) != active)
+                    {
+                        this.set_split(other, SplitOrientation::Stacked, window, cx);
+                    }
+                })),
+            )
+            .child(components::section_label(tokens, "VIEW"))
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-sidebar",
+                    IconName::PanelLeft,
+                    if self.sidebar_collapsed {
+                        "Show sidebar"
+                    } else {
+                        "Hide sidebar"
+                    },
+                    "Ctrl+Shift+B",
+                    !self.sidebar_collapsed,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_sidebar(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-inspector",
+                    IconName::Inspector,
+                    "Toggle inspector",
+                    "",
+                    self.inspector_visible,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_inspector(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-compose",
+                    IconName::PanelBottom,
+                    "Toggle compose",
+                    "Ctrl+Shift+M",
+                    self.compose_visible,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_compose(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-sync",
+                    IconName::ChevronsUpDown,
+                    "Synchronized input",
+                    "",
+                    self.sync_visible || self.sync_target_count() > 0,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_sync_modal(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-theme",
+                    IconName::Palette,
+                    format!("Switch to {} theme", self.ui_theme.toggled().label()),
+                    "",
+                    false,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu_visible = false;
+                    this.toggle_ui_theme(cx);
+                })),
+            )
+            .child(components::section_label(tokens, "TOOLS"))
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-files",
+                    IconName::Folder,
+                    "Files",
+                    "Ctrl+Shift+F",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(id) = this.active_session_id {
+                        this.toggle_sftp(id, cx);
+                    }
+                    window.focus(&this.terminal_focus);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-tunnels",
+                    IconName::Globe,
+                    "Tunnels",
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(id) = this.active_session_id {
+                        this.toggle_tunnels(id, cx);
+                    }
+                    window.focus(&this.terminal_focus);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-log",
+                    if log_active {
+                        IconName::CircleCheck
+                    } else {
+                        IconName::Dash
+                    },
+                    if log_active {
+                        "Stop logging"
+                    } else {
+                        "Start logging"
+                    },
+                    "",
+                    log_active,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(id) = this.active_session_id {
+                        this.toggle_log(id, cx);
+                    }
+                    window.focus(&this.terminal_focus);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-replay",
+                    IconName::BookOpen,
+                    "Replay log",
+                    "Ctrl+Shift+R",
+                    false,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.begin_log_replay(cx);
+                    window.focus(&this.terminal_focus);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-find",
+                    IconName::Search,
+                    "Find",
+                    "Ctrl+F",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(id) = this.active_session_id {
+                        this.open_search(id, window, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-snippets",
+                    IconName::Asterisk,
+                    "Snippets",
+                    "Ctrl+Shift+S",
+                    self.snippets_visible,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu_visible = false;
+                    this.toggle_snippets(cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-keys",
+                    IconName::User,
+                    "Keys",
+                    "",
+                    self.keys_visible,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_keys(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-settings",
+                    IconName::Settings,
+                    "Settings",
+                    "Ctrl+Shift+O",
+                    self.settings_visible,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_settings(window, cx);
+                })),
+            )
+            .child(
+                div()
+                    .pt(px(ui_tokens::SPACE_2))
+                    .px(px(ui_tokens::SPACE_2))
+                    .child(components::help_text(
+                        tokens,
+                        "dshell 0.1.0 · native GPUI · Esc closes",
+                    )),
+            );
+
+        div()
+            .id("main-menu-overlay")
+            .absolute()
+            .size_full()
+            .occlude()
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_main_menu(window, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_main_menu(window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(ui_tokens::COMMAND_BAR_HEIGHT + 4.0))
+                    .right(px(ui_tokens::SPACE_2))
+                    .child(menu),
             )
             .into_any_element()
     }
@@ -9511,6 +10033,9 @@ impl Render for AppView {
                         cx.listener(|this, _, window, cx| this.finish_layout_drag(window, cx)),
                     ),
             );
+        }
+        if self.menu_visible {
+            root = root.child(self.main_menu_overlay(&tokens, cx));
         }
         if self.sync_visible {
             root = root.child(self.sync_overlay(&tokens, cx));
