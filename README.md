@@ -106,10 +106,10 @@ Use the `Snippets` button to manage reusable commands. Snippets are stored in
 session or broadcast to explicitly selected connected sessions. The `Press
 Enter` toggle controls whether the command is submitted immediately.
 
-Use the `Keys` button to generate an OpenSSH Ed25519 key pair. The generator
-opens in a 560 px modal. Choose the private key path, an optional passphrase and
-a comment; the private key and a matching `.pub` file are created without
-overwriting existing files. The
+Use the `Keys` button to generate an OpenSSH key pair. The generator opens in a
+560 px modal and supports Ed25519, RSA 3072/4096 and ECDSA P-256/P-384. Choose
+the private key path, an optional passphrase and a comment; the private key and a
+matching `.pub` file are created without overwriting existing files. The
 passphrase is not stored, and Unix key files are created with mode `0600`. The
 generated public key can be copied from the panel for placement in
 `authorized_keys`.

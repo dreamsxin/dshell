@@ -57,7 +57,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 **目标**：覆盖常见无密码 SSH 工作流，同时维持现有主机密钥硬约束。
 
-**实施范围**：已支持 OpenSSH 私钥（含口令）、键盘交互认证与系统 ssh-agent（Windows OpenSSH named pipe、Pageant；Unix `SSH_AUTH_SOCK`）。键盘交互会先用密码自动回答单个 Password/Passphrase 提示；OTP、验证码和其他多提示会打开独立对话框逐项收集响应，响应只进入 SSH runtime 并在提交后清空。Keys 面板可在后台生成 Ed25519 私钥/公钥对，支持可选口令和注释，不覆盖已有文件并将 Unix 私钥设为 0600。需要私钥口令时由用户输入，口令只在连接流程中存在并清零。已支持从 OpenSSH `config` 导入 Host/HostName/User/Port/IdentityFile/LocalForward/RemoteForward/DynamicForward/ServerAliveInterval 和 Include；Match、通配符 Host 及会改变安全/路由语义的不支持选项不会被静默应用。RSA/ECDSA 生成、GSSAPI 和证书文件仍待实现。
+**实施范围**：已支持 OpenSSH 私钥（含口令）、键盘交互认证与系统 ssh-agent（Windows OpenSSH named pipe、Pageant；Unix `SSH_AUTH_SOCK`）。键盘交互会先用密码自动回答单个 Password/Passphrase 提示；OTP、验证码和其他多提示会打开独立对话框逐项收集响应，响应只进入 SSH runtime 并在提交后清空。Keys 面板可在后台生成 Ed25519、RSA 3072/4096 或 ECDSA P-256/P-384 私钥/公钥对，支持可选口令和注释，不覆盖已有文件并将 Unix 私钥设为 0600。需要私钥口令时由用户输入，口令只在连接流程中存在并清零。已支持从 OpenSSH `config` 导入 Host/HostName/User/Port/IdentityFile/LocalForward/RemoteForward/DynamicForward/ServerAliveInterval 和 Include；Match、通配符 Host 及会改变安全/路由语义的不支持选项不会被静默应用。已有密钥列表、改口令、导入导出/删除、GSSAPI 和证书文件仍待实现。
 
 **验收条件**：密码、私钥口令和私钥材料不进入日志或明文持久化；凭据库不可用时不得回退到明文存储；未知或变更的服务器密钥仍失败关闭；导入配置不会静默忽略会改变连接目标或安全性的选项。
 
@@ -131,11 +131,11 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 6. SFTP 已交付：目录浏览、单文件与嵌套目录上传/下载、新建目录、重命名、删除、覆盖确认、进度和取消；Docker 集成测试覆盖上传/下载内容一致、覆盖确认、目录创建、重命名、删除、递归目录往返和失败路径。
 7. 单层跳板机和端口转发已交付：通过 `direct-tcpip` 建立目标连接，两跳分别校验 known_hosts；Tunnels 面板支持本地、远程和动态 SOCKS5，Docker 集成测试覆盖本地转发、SOCKS5、远程回连、停止规则和断开清理。转发规则已持久化到主机资料并在连接后自动启动，keep-alive 已支持。
 8. 会话日志、命令片段和字体外观已交付：显式选择文件后记录原始终端字节流，可停止并在断开时刷新；片段持久化、发送到活动会话，并支持勾选目标后广播；字体家族/字号持久化并驱动单元格、分屏和 PTY 尺寸。Docker 集成测试读回日志中的远端输出。
-9. 终端颜色主题、光标样式、可配置工作区快捷键、日志回放、终端/日志搜索和 Ed25519 密钥生成已交付：Default dark、Solarized dark 和 Solarized light 调色板，Block/Underline/Bar 光标，可在 Settings 中改绑的 Ctrl/Cmd+Shift 新建、关闭、面板切换、断开和日志回放快捷键，Ctrl/Cmd+F 查找，Alt+数字固定切标签，只读日志重放，以及后台生成可加密的 Ed25519 密钥对；Docker 终端往返测试覆盖真实会话搜索、主题和光标运行时切换。键盘交互 OTP/多因素和 SFTP 断点续传也已交付，Docker SFTP 测试覆盖上传/下载续传内容一致性。
+9. 终端颜色主题、光标样式、可配置工作区快捷键、日志回放、终端/日志搜索和 Ed25519 密钥生成已交付：Default dark、Solarized dark 和 Solarized light 调色板，Block/Underline/Bar 光标，可在 Settings 中改绑的 Ctrl/Cmd+Shift 新建、关闭、面板切换、断开和日志回放快捷键，Ctrl/Cmd+F 查找，Alt+数字固定切标签，只读日志重放，以及后台生成可加密的 Ed25519、RSA 3072/4096 和 ECDSA P-256/P-384 密钥对；Docker 终端往返测试覆盖真实会话搜索、主题和光标运行时切换。键盘交互 OTP/多因素和 SFTP 断点续传也已交付，Docker SFTP 测试覆盖上传/下载续传内容一致性。
 10. Windows 桌面烟测仍待真正隔离的交互环境：Windows 虚拟桌面仍共享鼠标/键盘，不应在用户正在使用的桌面上操作。之后检查 vim、tmux、htop、Unicode 字形布局及 IME/焦点交互，并根据结果校准终端渲染。
 11. UI 改版六阶段已全部完成：设计令牌与组件、应用外壳、会话与主机管理、终端工具条与检查器、统一弹层与 Toast、主题/DPI/对比度打磨。业务渲染代码不再包含裸颜色，终端选中色随终端主题；85 项单测（76 通过 + 9 项 Docker 专用跳过）和 9 项容器集成测试通过。
 12. 阶段 7 已完成：侧栏/检查器拖拽与持久化、主机密钥算法与 SHA256 指纹、检查器传输速率/取消与转发启停、标签拖拽排序均有单测；Docker 终端往返测试断言真实会话返回指纹。
-13. 阶段 8 已完成：时间戳日志格式、旧日志兼容回放、尾部记录边界、回放时间轴跳转和检查器 Log 分组均有单测；Docker 会话日志测试验证新格式与单调时间戳。后续候选按用户需求评估：侧栏主机拖拽分组、SFTP 拖放与权限/时间戳保留、RSA/ECDSA 密钥管理、多级跳板和自定义终端渲染。真实 Windows DPI、中文 IME 和字形像素对齐仍作为独立的人工烟测任务。
+13. 阶段 8 已完成：时间戳日志格式、旧日志兼容回放、尾部记录边界、回放时间轴跳转和检查器 Log 分组均有单测；Docker 会话日志测试验证新格式与单调时间戳。后续候选按用户需求评估：侧栏主机拖拽分组、SFTP 拖放与权限/时间戳保留、已有密钥列表与改口令、多级跳板和自定义终端渲染。真实 Windows DPI、中文 IME 和字形像素对齐仍作为独立的人工烟测任务。
 
 ## SSH 参考资料
 
