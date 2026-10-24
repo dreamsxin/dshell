@@ -2,7 +2,48 @@ use std::{collections::HashSet, env, fs, io::ErrorKind, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const DOCUMENT_VERSION: u8 = 1;
+use crate::forward::ForwardRuleSpec;
+
+const DOCUMENT_VERSION: u8 = 2;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 2] = [1, 2];
+pub const MAX_RECENT_CONNECTIONS: usize = 20;
+pub const MAX_FORWARD_RULES: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    #[default]
+    Password,
+    PublicKey,
+    KeyboardInteractive,
+    Agent,
+}
+
+impl AuthMethod {
+    pub const ALL: [Self; 4] = [
+        Self::Password,
+        Self::PublicKey,
+        Self::KeyboardInteractive,
+        Self::Agent,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Password => "Password",
+            Self::PublicKey => "Public key",
+            Self::KeyboardInteractive => "Keyboard interactive",
+            Self::Agent => "SSH agent",
+        }
+    }
+
+    pub const fn uses_password_input(self) -> bool {
+        matches!(self, Self::Password | Self::KeyboardInteractive)
+    }
+
+    fn is_password(&self) -> bool {
+        matches!(self, Self::Password)
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -11,6 +52,37 @@ pub struct HostProfile {
     pub host: String,
     pub port: u16,
     pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub favorite: bool,
+    #[serde(default, skip_serializing_if = "AuthMethod::is_password")]
+    pub auth_method: AuthMethod,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub identity_file: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_jump: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwards: Vec<ForwardRuleSpec>,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub keepalive_seconds: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentConnection {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    #[serde(default)]
+    pub last_used_unix: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HostData {
+    pub profiles: Vec<HostProfile>,
+    pub recent: Vec<RecentConnection>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -18,6 +90,8 @@ pub struct HostProfile {
 struct ProfileDocument {
     version: u8,
     profiles: Vec<HostProfile>,
+    #[serde(default)]
+    recent: Vec<RecentConnection>,
 }
 
 pub struct ProfileStore {
@@ -54,10 +128,10 @@ impl ProfileStore {
         Self { path }
     }
 
-    pub fn load(&self) -> Result<Vec<HostProfile>, String> {
+    pub fn load(&self) -> Result<HostData, String> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HostData::default()),
             Err(error) => {
                 return Err(format!(
                     "Could not read host profiles at {}: {error}",
@@ -71,18 +145,23 @@ impl ProfileStore {
                 self.path.display()
             )
         })?;
-        if document.version != DOCUMENT_VERSION {
+        if !SUPPORTED_DOCUMENT_VERSIONS.contains(&document.version) {
             return Err(format!(
                 "Host profile file version {} is not supported.",
                 document.version
             ));
         }
         validate_profiles(&document.profiles)?;
-        Ok(document.profiles)
+        validate_recent(&document.recent)?;
+        Ok(HostData {
+            profiles: document.profiles,
+            recent: document.recent,
+        })
     }
 
-    pub fn save(&self, profiles: &[HostProfile]) -> Result<(), String> {
-        validate_profiles(profiles)?;
+    pub fn save(&self, data: &HostData) -> Result<(), String> {
+        validate_profiles(&data.profiles)?;
+        validate_recent(&data.recent)?;
         let parent = self
             .path
             .parent()
@@ -95,7 +174,8 @@ impl ProfileStore {
         })?;
         let document = ProfileDocument {
             version: DOCUMENT_VERSION,
-            profiles: profiles.to_vec(),
+            profiles: data.profiles.clone(),
+            recent: data.recent.clone(),
         };
         let contents = serde_json::to_vec_pretty(&document)
             .map_err(|error| format!("Could not serialize host profiles: {error}"))?;
@@ -106,6 +186,55 @@ impl ProfileStore {
             )
         })
     }
+}
+
+pub fn record_recent(recent: &mut Vec<RecentConnection>, entry: RecentConnection) {
+    recent.retain(|candidate| {
+        !(candidate.host.eq_ignore_ascii_case(&entry.host)
+            && candidate.port == entry.port
+            && candidate.username == entry.username)
+    });
+    recent.insert(0, entry);
+    recent.truncate(MAX_RECENT_CONNECTIONS);
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
+}
+
+fn validate_forward_rules(profile: &HostProfile) -> Result<(), String> {
+    if profile.forwards.len() > MAX_FORWARD_RULES {
+        return Err(format!(
+            "Host profile {} cannot have more than {MAX_FORWARD_RULES} forwarding rules.",
+            profile.name
+        ));
+    }
+    if profile.keepalive_seconds > 3600 {
+        return Err(format!(
+            "Host profile {} has a keep-alive interval above one hour.",
+            profile.name
+        ));
+    }
+    for rule in &profile.forwards {
+        if rule.listen_host.trim().is_empty() {
+            return Err(format!(
+                "Host profile {} has a forwarding rule without a listen address.",
+                profile.name
+            ));
+        }
+        if rule.kind.needs_target() && (rule.target_host.trim().is_empty() || rule.target_port == 0)
+        {
+            return Err(format!(
+                "Host profile {} has a forwarding rule without a valid target.",
+                profile.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
@@ -124,6 +253,27 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
                 profile.name
             ));
         }
+        if profile.auth_method == AuthMethod::PublicKey && profile.identity_file.trim().is_empty() {
+            return Err(format!(
+                "Host profile {} uses public key authentication but has no identity file.",
+                profile.name
+            ));
+        }
+        validate_forward_rules(profile)?;
+    }
+    Ok(())
+}
+
+fn validate_recent(recent: &[RecentConnection]) -> Result<(), String> {
+    if recent.len() > MAX_RECENT_CONNECTIONS {
+        return Err(format!(
+            "Recent connections cannot exceed {MAX_RECENT_CONNECTIONS} entries."
+        ));
+    }
+    if recent.iter().any(|entry| {
+        entry.host.trim().is_empty() || entry.username.trim().is_empty() || entry.port == 0
+    }) {
+        return Err("Recent connections require a host, username, and valid port.".to_owned());
     }
     Ok(())
 }
@@ -131,20 +281,58 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forward::{ForwardKind, ForwardRuleSpec};
+
+    fn profile(name: &str) -> HostProfile {
+        HostProfile {
+            name: name.to_owned(),
+            host: "server.example.com".to_owned(),
+            port: 2222,
+            username: "operator".to_owned(),
+            group: String::new(),
+            favorite: false,
+            auth_method: AuthMethod::Password,
+            identity_file: String::new(),
+            proxy_jump: String::new(),
+            forwards: Vec::new(),
+            keepalive_seconds: 0,
+        }
+    }
+
+    fn recent(host: &str, port: u16) -> RecentConnection {
+        RecentConnection {
+            name: "recent".to_owned(),
+            host: host.to_owned(),
+            port,
+            username: "operator".to_owned(),
+            last_used_unix: 1_700_000_000,
+        }
+    }
 
     #[test]
     fn profiles_round_trip_without_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProfileStore::at(directory.path().join("hosts.json"));
-        let profiles = vec![HostProfile {
-            name: "staging".to_owned(),
-            host: "server.example.com".to_owned(),
-            port: 2222,
-            username: "operator".to_owned(),
-        }];
+        let data = HostData {
+            profiles: vec![HostProfile {
+                group: "Production".to_owned(),
+                favorite: true,
+                proxy_jump: "bastion".to_owned(),
+                forwards: vec![ForwardRuleSpec {
+                    kind: ForwardKind::Local,
+                    listen_host: "127.0.0.1".to_owned(),
+                    listen_port: 15432,
+                    target_host: "db.internal".to_owned(),
+                    target_port: 5432,
+                }],
+                keepalive_seconds: 30,
+                ..profile("staging")
+            }],
+            recent: vec![recent("server.example.com", 2222)],
+        };
 
-        store.save(&profiles).unwrap();
-        assert_eq!(store.load().unwrap(), profiles);
+        store.save(&data).unwrap();
+        assert_eq!(store.load().unwrap(), data);
         let contents = fs::read_to_string(&store.path).unwrap();
         assert!(!contents.to_lowercase().contains("password"));
     }
@@ -154,17 +342,53 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = ProfileStore::at(directory.path().join("missing.json"));
 
-        assert!(store.load().unwrap().is_empty());
+        assert_eq!(store.load().unwrap(), HostData::default());
+    }
+
+    #[test]
+    fn version_one_files_load_with_workspace_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "profiles": [
+                    {
+                        "name": "prod",
+                        "host": "prod.example.com",
+                        "port": 22,
+                        "username": "deploy"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let store = ProfileStore::at(path);
+
+        let data = store.load().unwrap();
+        assert_eq!(
+            data.profiles,
+            vec![HostProfile {
+                name: "prod".to_owned(),
+                host: "prod.example.com".to_owned(),
+                port: 22,
+                username: "deploy".to_owned(),
+                group: String::new(),
+                favorite: false,
+                auth_method: AuthMethod::Password,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+            }]
+        );
+        assert!(data.recent.is_empty());
     }
 
     #[test]
     fn duplicate_profile_names_are_rejected() {
-        let profile = HostProfile {
-            name: "prod".to_owned(),
-            host: "one.example.com".to_owned(),
-            port: 22,
-            username: "operator".to_owned(),
-        };
+        let profile = profile("prod");
         let duplicate = HostProfile {
             name: "PROD".to_owned(),
             host: "two.example.com".to_owned(),
@@ -172,5 +396,69 @@ mod tests {
         };
 
         assert!(validate_profiles(&[profile, duplicate]).is_err());
+    }
+
+    #[test]
+    fn public_key_profiles_require_an_identity_file() {
+        let missing_identity = HostProfile {
+            auth_method: AuthMethod::PublicKey,
+            ..profile("key-host")
+        };
+        assert!(validate_profiles(&[missing_identity]).is_err());
+
+        let with_identity = HostProfile {
+            identity_file: "~/.ssh/id_ed25519".to_owned(),
+            auth_method: AuthMethod::PublicKey,
+            ..profile("key-host")
+        };
+        assert!(validate_profiles(&[with_identity]).is_ok());
+    }
+
+    #[test]
+    fn forwarding_rules_are_validated() {
+        let invalid = HostProfile {
+            forwards: vec![ForwardRuleSpec {
+                kind: ForwardKind::Local,
+                listen_host: String::new(),
+                listen_port: 0,
+                target_host: "db.internal".to_owned(),
+                target_port: 5432,
+            }],
+            ..profile("bad-forward")
+        };
+        assert!(validate_profiles(&[invalid]).is_err());
+
+        let dynamic = HostProfile {
+            forwards: vec![ForwardRuleSpec {
+                kind: ForwardKind::Dynamic,
+                listen_host: "127.0.0.1".to_owned(),
+                listen_port: 0,
+                target_host: String::new(),
+                target_port: 0,
+            }],
+            keepalive_seconds: 30,
+            ..profile("socks")
+        };
+        assert!(validate_profiles(&[dynamic]).is_ok());
+    }
+
+    #[test]
+    fn recent_connections_are_deduplicated_and_capped() {
+        let mut entries = Vec::new();
+        record_recent(&mut entries, recent("one.example.com", 22));
+        record_recent(&mut entries, recent("two.example.com", 22));
+        record_recent(&mut entries, recent("ONE.example.com", 22));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].host, "ONE.example.com");
+        assert_eq!(entries[1].host, "two.example.com");
+
+        for index in 0..MAX_RECENT_CONNECTIONS + 5 {
+            record_recent(
+                &mut entries,
+                recent(&format!("host{index}.example.com"), 22),
+            );
+        }
+        assert_eq!(entries.len(), MAX_RECENT_CONNECTIONS);
     }
 }

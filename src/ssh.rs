@@ -1,7 +1,8 @@
 use std::{
+    collections::HashMap,
     env,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, atomic::AtomicBool},
     thread,
     time::Duration,
 };
@@ -9,26 +10,76 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use russh::{
     ChannelMsg, Disconnect,
-    client::{self, AuthResult, Handler},
-    keys::{PublicKey, PublicKeyOrCertificate, check_known_hosts_path},
+    client::{self, AuthResult, Handler, KeyboardInteractiveAuthResponse, Prompt},
+    keys::{
+        PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, check_known_hosts_path,
+        load_secret_key,
+    },
 };
 use tokio::{
+    io::AsyncWriteExt as _,
     sync::{mpsc, watch},
+    task::JoinHandle,
     time::{MissedTickBehavior, interval},
 };
 use zeroize::Zeroizing;
 
-use crate::terminal::{
-    MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton, TerminalMouseEvent,
-    TerminalRequest, TerminalSize,
+use crate::forward::{
+    self, AcceptedConnection, ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec,
+    RemoteTarget, RemoteTargetMap,
 };
+use crate::sftp::{self, SftpCommand, SftpEvent};
+use crate::terminal::{
+    CursorStyle, MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton,
+    TerminalMouseEvent, TerminalRequest, TerminalSearchResult, TerminalSize, TerminalTheme,
+};
+
+pub enum Authentication {
+    Password(Zeroizing<String>),
+    KeyboardInteractive {
+        password: Zeroizing<String>,
+        interactive: bool,
+    },
+    PublicKey {
+        identity_file: PathBuf,
+        passphrase: Zeroizing<String>,
+    },
+    Agent,
+}
+
+pub struct JumpSpec {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub authentication: Authentication,
+}
+
+struct LocalForwardRuntime {
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+struct RemoteForwardRuntime {
+    spec: ForwardRuleSpec,
+    bound_port: u16,
+}
 
 pub struct ConnectionSpec {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: Zeroizing<String>,
+    pub authentication: Authentication,
     pub terminal_size: TerminalSize,
+    pub jump: Option<JumpSpec>,
+    pub keepalive_seconds: u16,
+    pub theme: TerminalTheme,
+    pub cursor_style: CursorStyle,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthPromptInfo {
+    pub prompt: String,
+    pub echo: bool,
 }
 
 pub enum UiEvent {
@@ -36,12 +87,22 @@ pub enum UiEvent {
     Screen(TerminalFrame),
     Failed(String),
     Disconnected,
+    LogState(Option<PathBuf>),
+    AuthPrompt {
+        name: String,
+        instructions: String,
+        prompts: Vec<AuthPromptInfo>,
+        respond_to: tokio::sync::oneshot::Sender<Vec<Zeroizing<String>>>,
+    },
+    SearchResult(TerminalSearchResult),
 }
 
 struct KnownHostsHandler {
     host: String,
     port: u16,
     path: PathBuf,
+    remote_forwards: RemoteTargetMap,
+    forward_events: Option<mpsc::UnboundedSender<ForwardEvent>>,
 }
 
 impl Handler for KnownHostsHandler {
@@ -62,6 +123,64 @@ impl Handler for KnownHostsHandler {
             )),
         }
     }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        let target = {
+            let targets = self
+                .remote_forwards
+                .lock()
+                .map_err(|_| anyhow!("The remote forwarding registry is poisoned"))?;
+            targets.get(&connected_port).cloned()
+        };
+        let Some(target) = target else {
+            return Ok(());
+        };
+        reply.accept().await;
+        let peer = format!("{originator_address}:{originator_port}");
+        let events = self.forward_events.clone();
+        tokio::spawn(async move {
+            let mut remote = channel.into_stream();
+            match tokio::net::TcpStream::connect((target.host.as_str(), target.port)).await {
+                Ok(mut local) => {
+                    if let Some(events) = &events {
+                        let _ = events.send(ForwardEvent::ConnectionOpened {
+                            id: target.rule_id,
+                            peer: peer.clone(),
+                            target: format!("{}:{}", target.host, target.port),
+                        });
+                    }
+                    let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+                    if let Some(events) = events {
+                        let _ = events.send(ForwardEvent::ConnectionClosed {
+                            id: target.rule_id,
+                            peer,
+                        });
+                    }
+                }
+                Err(error) => {
+                    if let Some(events) = events {
+                        let _ = events.send(ForwardEvent::Error {
+                            id: Some(target.rule_id),
+                            error: format!(
+                                "Remote forwarding could not reach {}:{}: {error}",
+                                target.host, target.port
+                            ),
+                        });
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
 }
 
 fn default_known_hosts_path() -> Result<PathBuf> {
@@ -75,12 +194,28 @@ fn is_known_host_key(host: &str, port: u16, key: &PublicKey, path: &Path) -> Res
     check_known_hosts_path(host, port, key, path).map_err(Into::into)
 }
 
+pub struct ConnectionHandles {
+    pub terminal: mpsc::Sender<TerminalRequest>,
+    pub sftp: mpsc::Sender<SftpCommand>,
+    pub cancellation: watch::Sender<bool>,
+    pub sftp_events: mpsc::Receiver<SftpEvent>,
+    pub sftp_cancel: Arc<AtomicBool>,
+    pub forwards: mpsc::Sender<ForwardCommand>,
+    pub forward_events: mpsc::UnboundedReceiver<ForwardEvent>,
+}
+
 pub fn spawn_connection(
     spec: ConnectionSpec,
     events: mpsc::Sender<UiEvent>,
-) -> Result<(mpsc::Sender<TerminalRequest>, watch::Sender<bool>)> {
+) -> Result<ConnectionHandles> {
     let (command_tx, command_rx) = mpsc::channel(128);
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (sftp_command_tx, sftp_command_rx) = mpsc::channel(16);
+    let (sftp_event_tx, sftp_event_rx) = mpsc::channel(32);
+    let (forward_command_tx, forward_command_rx) = mpsc::channel(16);
+    let (forward_event_tx, forward_event_rx) = mpsc::unbounded_channel();
+    let sftp_cancel = Arc::new(AtomicBool::new(false));
+    let thread_sftp_cancel = Arc::clone(&sftp_cancel);
     let error_events = events.clone();
 
     thread::Builder::new()
@@ -99,32 +234,70 @@ pub fn spawn_connection(
                 }
             };
 
-            if let Err(error) =
-                runtime.block_on(run_connection(spec, command_rx, events.clone(), cancel_rx))
-            {
+            if let Err(error) = runtime.block_on(run_connection(
+                spec,
+                command_rx,
+                events.clone(),
+                sftp_command_rx,
+                sftp_event_tx,
+                thread_sftp_cancel,
+                forward_command_rx,
+                forward_event_tx,
+                cancel_rx,
+            )) {
                 let _ =
                     events.blocking_send(UiEvent::Failed(format!("Connection failed: {error}")));
             }
         })
         .context("could not start the SSH runtime thread")?;
 
-    Ok((command_tx, cancel_tx))
+    Ok(ConnectionHandles {
+        terminal: command_tx,
+        sftp: sftp_command_tx,
+        cancellation: cancel_tx,
+        sftp_events: sftp_event_rx,
+        sftp_cancel,
+        forwards: forward_command_tx,
+        forward_events: forward_event_rx,
+    })
 }
 
 async fn run_connection(
     spec: ConnectionSpec,
     commands: mpsc::Receiver<TerminalRequest>,
     events: mpsc::Sender<UiEvent>,
+    sftp_commands: mpsc::Receiver<SftpCommand>,
+    sftp_events: mpsc::Sender<SftpEvent>,
+    sftp_cancel: Arc<AtomicBool>,
+    forward_commands: mpsc::Receiver<ForwardCommand>,
+    forward_events: mpsc::UnboundedSender<ForwardEvent>,
     cancellation: watch::Receiver<bool>,
 ) -> Result<()> {
     let known_hosts_path = default_known_hosts_path()?;
-    run_connection_with_known_hosts(spec, commands, events, known_hosts_path, cancellation).await
+    run_connection_with_known_hosts(
+        spec,
+        commands,
+        events,
+        sftp_commands,
+        sftp_events,
+        sftp_cancel,
+        forward_commands,
+        forward_events,
+        known_hosts_path,
+        cancellation,
+    )
+    .await
 }
 
 async fn run_connection_with_known_hosts(
     spec: ConnectionSpec,
     mut commands: mpsc::Receiver<TerminalRequest>,
     events: mpsc::Sender<UiEvent>,
+    sftp_commands: mpsc::Receiver<SftpCommand>,
+    sftp_events: mpsc::Sender<SftpEvent>,
+    sftp_cancel: Arc<AtomicBool>,
+    mut forward_commands: mpsc::Receiver<ForwardCommand>,
+    forward_events: mpsc::UnboundedSender<ForwardEvent>,
     known_hosts_path: PathBuf,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -132,27 +305,109 @@ async fn run_connection_with_known_hosts(
         host,
         port,
         username,
-        mut password,
+        authentication,
         terminal_size,
+        jump,
+        keepalive_seconds,
+        theme,
+        cursor_style,
     } = spec;
+    let remote_targets: RemoteTargetMap = Arc::new(Mutex::new(HashMap::new()));
+    let (accepted_tx, mut accepted_connections) = mpsc::unbounded_channel();
+    let mut local_forwards: HashMap<u64, LocalForwardRuntime> = HashMap::new();
+    let mut remote_forwards: HashMap<u64, RemoteForwardRuntime> = HashMap::new();
+    let mut next_forward_id = 1u64;
     let setup = async {
-        let handler = KnownHostsHandler {
-            host: host.clone(),
-            port,
-            path: known_hosts_path,
-        };
-        let config = Arc::new(client::Config::default());
-        let mut session = client::connect(config, (host.as_str(), port), handler)
+        let mut config = client::Config::default();
+        if keepalive_seconds > 0 {
+            config.keepalive_interval = Some(Duration::from_secs(u64::from(keepalive_seconds)));
+        }
+        let config = Arc::new(config);
+        let mut session;
+        let mut jump_session = None;
+        if let Some(jump) = jump {
+            let jump_handler = KnownHostsHandler {
+                host: jump.host.clone(),
+                port: jump.port,
+                path: known_hosts_path.clone(),
+                remote_forwards: Arc::new(Mutex::new(HashMap::new())),
+                forward_events: None,
+            };
+            let mut jump_handle = client::connect(
+                Arc::clone(&config),
+                (jump.host.as_str(), jump.port),
+                jump_handler,
+            )
             .await
-            .context("SSH handshake failed")?;
+            .context("SSH jump host handshake failed")?;
+            authenticate(
+                &mut jump_handle,
+                &jump.username,
+                jump.authentication,
+                &events,
+            )
+            .await
+            .context("SSH jump host authentication failed")?;
+            let channel = jump_handle
+                .channel_open_direct_tcpip(host.clone(), u32::from(port), "127.0.0.1", 0)
+                .await
+                .context("The jump host could not connect to the target host")?;
+            let target_handler = KnownHostsHandler {
+                host: host.clone(),
+                port,
+                path: known_hosts_path.clone(),
+                remote_forwards: Arc::clone(&remote_targets),
+                forward_events: Some(forward_events.clone()),
+            };
+            session =
+                client::connect_stream(Arc::clone(&config), channel.into_stream(), target_handler)
+                    .await
+                    .context("SSH target handshake through the jump host failed")?;
+            jump_session = Some(jump_handle);
+        } else {
+            let handler = KnownHostsHandler {
+                host: host.clone(),
+                port,
+                path: known_hosts_path,
+                remote_forwards: Arc::clone(&remote_targets),
+                forward_events: Some(forward_events.clone()),
+            };
+            session = client::connect(config, (host.as_str(), port), handler)
+                .await
+                .context("SSH handshake failed")?;
+        }
 
-        let auth = session
-            .authenticate_password(username.clone(), std::mem::take(&mut *password))
-            .await
-            .context("SSH password authentication failed")?;
-        drop(password);
-        if !matches!(auth, AuthResult::Success) {
-            bail!("SSH password authentication was rejected");
+        authenticate(&mut session, &username, authentication, &events).await?;
+
+        let sftp_setup = tokio::time::timeout(Duration::from_secs(5), async {
+            let channel = session.channel_open_session().await?;
+            channel.request_subsystem(true, "sftp").await?;
+            Ok::<_, russh::Error>(channel)
+        })
+        .await;
+        match sftp_setup {
+            Ok(Ok(channel)) => {
+                tokio::spawn(sftp::run(
+                    channel.into_stream(),
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                ));
+            }
+            Ok(Err(error)) => {
+                let _ = sftp_events
+                    .send(SftpEvent::Error(format!(
+                        "Could not open the SFTP subsystem: {error}"
+                    )))
+                    .await;
+            }
+            Err(_) => {
+                let _ = sftp_events
+                    .send(SftpEvent::Error(
+                        "Timed out opening the SFTP subsystem.".to_owned(),
+                    ))
+                    .await;
+            }
         }
 
         let channel = session.channel_open_session().await?;
@@ -168,10 +423,10 @@ async fn run_connection_with_known_hosts(
             )
             .await?;
         channel.request_shell(true).await?;
-        Ok::<_, anyhow::Error>((session, channel))
+        Ok::<_, anyhow::Error>((session, channel, jump_session))
     };
     tokio::pin!(setup);
-    let (session, channel) = tokio::select! {
+    let (session, channel, jump_session) = tokio::select! {
         result = &mut setup => result?,
         _ = wait_for_cancellation(&mut cancellation) => {
             let _ = events.send(UiEvent::Disconnected).await;
@@ -187,8 +442,11 @@ async fn run_connection_with_known_hosts(
         .context("UI closed while connecting")?;
 
     let (mut reader, writer) = channel.split();
-    let mut terminal = TerminalEmulator::new(terminal_size);
+    let mut terminal = TerminalEmulator::new_with_theme(terminal_size, theme);
+    terminal.set_cursor_style(cursor_style);
     let mut screen_dirty = false;
+    let mut log_file: Option<tokio::fs::File> = None;
+    let mut log_buffer: Vec<u8> = Vec::new();
     let mut render_tick = interval(Duration::from_millis(16));
     render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -249,11 +507,251 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::Paste(text)) => {
                         writer.data_bytes(terminal.paste_bytes(&text)).await?;
                     }
+                    Some(TerminalRequest::StartLog(path)) => {
+                        match open_log_file(&path).await {
+                            Ok(file) => {
+                                log_file = Some(file);
+                                log_buffer.clear();
+                                events
+                                    .send(UiEvent::LogState(Some(path)))
+                                    .await
+                                    .context("UI closed while starting terminal logging")?;
+                            }
+                            Err(error) => {
+                                let _ = events.send(UiEvent::LogState(None)).await;
+                                let _ = events
+                                    .send(UiEvent::Status(format!(
+                                        "Could not start terminal logging: {error:#}"
+                                    )))
+                                    .await;
+                            }
+                        }
+                    }
+                    Some(TerminalRequest::StopLog) => {
+                        if let Err(error) = flush_log(&mut log_file, &mut log_buffer).await {
+                            let _ = events
+                                .send(UiEvent::Status(format!(
+                                    "Could not finish the terminal log: {error:#}"
+                                )))
+                                .await;
+                            log_file = None;
+                            log_buffer.clear();
+                        }
+                        let _ = events.send(UiEvent::LogState(None)).await;
+                    }
+                    Some(TerminalRequest::SetTheme(theme)) => {
+                        terminal.set_theme(theme);
+                        events
+                            .send(UiEvent::Screen(terminal.frame()))
+                            .await
+                            .context("UI closed while changing the terminal theme")?;
+                    }
+                    Some(TerminalRequest::SetCursorStyle(cursor_style)) => {
+                        terminal.set_cursor_style(cursor_style);
+                        events
+                            .send(UiEvent::Screen(terminal.frame()))
+                            .await
+                            .context("UI closed while changing the terminal cursor")?;
+                    }
+                    Some(TerminalRequest::Search { query, direction }) => {
+                        let result = terminal.search(&query, direction);
+                        events
+                            .send(UiEvent::SearchResult(result))
+                            .await
+                            .context("UI closed while searching the terminal")?;
+                        events
+                            .send(UiEvent::Screen(terminal.frame()))
+                            .await
+                            .context("UI closed while showing the search match")?;
+                    }
                     None => break,
                 }
             }
             _ = wait_for_cancellation(&mut cancellation) => break,
+            command = forward_commands.recv() => {
+                match command {
+                    Some(ForwardCommand::Add(spec)) => {
+                        let id = next_forward_id;
+                        next_forward_id = next_forward_id.saturating_add(1);
+                        if spec.kind == ForwardKind::Local || spec.kind == ForwardKind::Dynamic {
+                            match forward::bind_local_rule(
+                                id,
+                                spec.clone(),
+                                accepted_tx.clone(),
+                                forward_events.clone(),
+                            )
+                            .await
+                            {
+                                Ok((bound_port, stop, task)) => {
+                                    local_forwards.insert(
+                                        id,
+                                        LocalForwardRuntime { stop, task },
+                                    );
+                                    let _ = forward_events.send(ForwardEvent::RuleAdded {
+                                        id,
+                                        spec,
+                                        bound_port,
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = forward_events.send(ForwardEvent::Error {
+                                        id: Some(id),
+                                        error: format!("{error:#}"),
+                                    });
+                                }
+                            }
+                        } else {
+                            match session
+                                .tcpip_forward(
+                                    spec.listen_host.clone(),
+                                    u32::from(spec.listen_port),
+                                )
+                                .await
+                            {
+                                Ok(port) => {
+                                    let bound_port = if port == 0 {
+                                        spec.listen_port
+                                    } else {
+                                        u16::try_from(port).unwrap_or(0)
+                                    };
+                                    if bound_port == 0 {
+                                        let _ = forward_events.send(ForwardEvent::Error {
+                                            id: Some(id),
+                                            error: format!(
+                                                "The server did not provide a usable forwarding port (requested {}, returned {port})",
+                                                spec.listen_port
+                                            ),
+                                        });
+                                    } else {
+                                        if let Ok(mut targets) = remote_targets.lock() {
+                                            targets.insert(
+                                                u32::from(bound_port),
+                                                RemoteTarget {
+                                                    rule_id: id,
+                                                    host: spec.target_host.clone(),
+                                                    port: spec.target_port,
+                                                },
+                                            );
+                                        }
+                                        remote_forwards.insert(
+                                            id,
+                                            RemoteForwardRuntime {
+                                                spec: spec.clone(),
+                                                bound_port,
+                                            },
+                                        );
+                                        let _ = forward_events.send(ForwardEvent::RuleAdded {
+                                            id,
+                                            spec,
+                                            bound_port,
+                                        });
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = forward_events.send(ForwardEvent::Error {
+                                        id: Some(id),
+                                        error: format!(
+                                            "Could not request remote forwarding on {}:{}: {error}",
+                                            spec.listen_host, spec.listen_port
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    Some(ForwardCommand::Remove(id)) => {
+                        if let Some(runtime) = local_forwards.remove(&id) {
+                            let LocalForwardRuntime { stop, task } = runtime;
+                            let _ = stop.send(true);
+                            task.abort();
+                            let _ = task.await;
+                            let _ = forward_events.send(ForwardEvent::RuleRemoved { id });
+                        } else if let Some(runtime) = remote_forwards.remove(&id) {
+                            if let Ok(mut targets) = remote_targets.lock() {
+                                targets.remove(&u32::from(runtime.bound_port));
+                            }
+                            let _ = session
+                                .cancel_tcpip_forward(
+                                    runtime.spec.listen_host,
+                                    u32::from(runtime.bound_port),
+                                )
+                                .await;
+                            let _ = forward_events.send(ForwardEvent::RuleRemoved { id });
+                        } else {
+                            let _ = forward_events.send(ForwardEvent::Error {
+                                id: Some(id),
+                                error: "The forwarding rule no longer exists.".to_owned(),
+                            });
+                        }
+                    }
+                    None => {}
+                }
+            }
+            accepted = accepted_connections.recv() => {
+                if let Some(AcceptedConnection {
+                    rule_id,
+                    mut stream,
+                    peer,
+                    target_host,
+                    target_port,
+                    socks5,
+                }) = accepted
+                {
+                    match session
+                        .channel_open_direct_tcpip(
+                            target_host.clone(),
+                            u32::from(target_port),
+                            peer.ip().to_string(),
+                            u32::from(peer.port()),
+                        )
+                        .await
+                    {
+                        Ok(channel) => {
+                            if socks5 {
+                                let _ = forward::socks5_accept(&mut stream).await;
+                            }
+                            let _ = forward_events.send(ForwardEvent::ConnectionOpened {
+                                id: rule_id,
+                                peer: peer.to_string(),
+                                target: format!("{target_host}:{target_port}"),
+                            });
+                            let mut remote = channel.into_stream();
+                            let events = forward_events.clone();
+                            let peer_label = peer.to_string();
+                            tokio::spawn(async move {
+                                let _ =
+                                    tokio::io::copy_bidirectional(&mut stream, &mut remote).await;
+                                let _ = events.send(ForwardEvent::ConnectionClosed {
+                                    id: rule_id,
+                                    peer: peer_label,
+                                });
+                            });
+                        }
+                        Err(error) => {
+                            if socks5 {
+                                let _ = forward::socks5_reject(&mut stream, 4).await;
+                            }
+                            let _ = forward_events.send(ForwardEvent::Error {
+                                id: Some(rule_id),
+                                error: format!(
+                                    "Could not open a forwarded connection to {target_host}:{target_port}: {error}"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
             _ = render_tick.tick(), if screen_dirty => {
+                if let Err(error) = flush_log(&mut log_file, &mut log_buffer).await {
+                    log_file = None;
+                    log_buffer.clear();
+                    let _ = events.send(UiEvent::LogState(None)).await;
+                    let _ = events
+                        .send(UiEvent::Status(format!(
+                            "Terminal logging stopped: {error:#}"
+                        )))
+                        .await;
+                }
                 events.send(UiEvent::Screen(terminal.frame())).await
                     .context("UI closed during terminal output")?;
                 screen_dirty = false;
@@ -262,10 +760,16 @@ async fn run_connection_with_known_hosts(
                 match message {
                     Some(ChannelMsg::Data { data }) => {
                         terminal.feed(&data);
+                        if log_file.is_some() {
+                            log_buffer.extend_from_slice(&data);
+                        }
                         screen_dirty = true;
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
                         terminal.feed(&data);
+                        if log_file.is_some() {
+                            log_buffer.extend_from_slice(&data);
+                        }
                         screen_dirty = true;
                     }
                     Some(ChannelMsg::ExitStatus { .. }) | None => break,
@@ -275,11 +779,237 @@ async fn run_connection_with_known_hosts(
         }
     }
 
+    let _ = flush_log(&mut log_file, &mut log_buffer).await;
+    for (_, runtime) in local_forwards.drain() {
+        let _ = runtime.stop.send(true);
+        runtime.task.abort();
+    }
+    for (_, runtime) in remote_forwards.drain() {
+        let _ = session
+            .cancel_tcpip_forward(runtime.spec.listen_host, u32::from(runtime.bound_port))
+            .await;
+    }
+    if let Ok(mut targets) = remote_targets.lock() {
+        targets.clear();
+    }
     let _ = session
         .disconnect(Disconnect::ByApplication, "client closed", "en")
         .await;
+    if let Some(jump_session) = jump_session {
+        let _ = jump_session
+            .disconnect(Disconnect::ByApplication, "target session closed", "en")
+            .await;
+    }
     let _ = events.send(UiEvent::Disconnected).await;
     Ok(())
+}
+
+fn can_answer_with_password(prompts: &[Prompt], password_used: bool) -> bool {
+    if prompts.is_empty() {
+        return true;
+    }
+    !password_used
+        && prompts.iter().all(|prompt| {
+            let text = prompt.prompt.to_ascii_lowercase();
+            !prompt.echo && (text.contains("password") || text.contains("passphrase"))
+        })
+}
+
+async fn authenticate(
+    session: &mut client::Handle<KnownHostsHandler>,
+    username: &str,
+    authentication: Authentication,
+    events: &mpsc::Sender<UiEvent>,
+) -> Result<()> {
+    match authentication {
+        Authentication::Password(mut password) => {
+            let auth = session
+                .authenticate_password(username.to_owned(), std::mem::take(&mut *password))
+                .await
+                .context("SSH password authentication failed")?;
+            drop(password);
+            if !matches!(auth, AuthResult::Success) {
+                bail!("SSH password authentication was rejected");
+            }
+        }
+        Authentication::KeyboardInteractive {
+            password,
+            interactive,
+        } => {
+            let mut password_used = false;
+            let mut response = session
+                .authenticate_keyboard_interactive_start(username.to_owned(), None::<String>)
+                .await
+                .context("SSH keyboard-interactive authentication failed")?;
+            loop {
+                match response {
+                    KeyboardInteractiveAuthResponse::Success => break,
+                    KeyboardInteractiveAuthResponse::Failure { .. } => {
+                        bail!("SSH keyboard-interactive authentication was rejected");
+                    }
+                    KeyboardInteractiveAuthResponse::InfoRequest {
+                        name,
+                        instructions,
+                        prompts,
+                    } => {
+                        let responses =
+                            if interactive && !can_answer_with_password(&prompts, password_used) {
+                                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                                events
+                                    .send(UiEvent::AuthPrompt {
+                                        name,
+                                        instructions,
+                                        prompts: prompts
+                                            .iter()
+                                            .map(|prompt| AuthPromptInfo {
+                                                prompt: prompt.prompt.clone(),
+                                                echo: prompt.echo,
+                                            })
+                                            .collect(),
+                                        respond_to: response_tx,
+                                    })
+                                    .await
+                                    .context("UI closed while waiting for authentication input")?;
+                                response_rx
+                                    .await
+                                    .context("Keyboard-interactive prompt was dismissed")?
+                            } else {
+                                prompts
+                                    .iter()
+                                    .map(|prompt| {
+                                        if prompt.echo {
+                                            Zeroizing::new(String::new())
+                                        } else {
+                                            password_used = true;
+                                            Zeroizing::new(password.to_string())
+                                        }
+                                    })
+                                    .collect()
+                            };
+                        let responses = responses
+                            .iter()
+                            .map(|value| value.to_string())
+                            .collect::<Vec<_>>();
+                        response = session
+                            .authenticate_keyboard_interactive_respond(responses)
+                            .await
+                            .context("SSH keyboard-interactive authentication failed")?;
+                    }
+                }
+            }
+            drop(password);
+        }
+        Authentication::PublicKey {
+            identity_file,
+            passphrase,
+        } => {
+            let identity_file = expand_user_path(&identity_file);
+            let key = {
+                let passphrase = (!passphrase.is_empty()).then_some(passphrase.as_str());
+                load_secret_key(&identity_file, passphrase).with_context(|| {
+                    format!(
+                        "Could not load SSH identity file {}",
+                        identity_file.display()
+                    )
+                })?
+            };
+            drop(passphrase);
+            let hash_alg = session.best_supported_rsa_hash().await?.flatten();
+            let auth = session
+                .authenticate_publickey(
+                    username.to_owned(),
+                    PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
+                )
+                .await
+                .context("SSH public key authentication failed")?;
+            if !matches!(auth, AuthResult::Success) {
+                bail!("SSH public key authentication was rejected");
+            }
+        }
+        Authentication::Agent => {
+            let mut agent = connect_agent().await?;
+            let identities = agent
+                .request_identities()
+                .await
+                .context("Could not list identities from the SSH agent")?;
+            if identities.is_empty() {
+                bail!("The SSH agent has no identities loaded");
+            }
+            let mut rejection = None;
+            for identity in identities {
+                let key = identity.public_key().into_owned();
+                let hash_alg = if key.algorithm().is_rsa() {
+                    session.best_supported_rsa_hash().await?.flatten()
+                } else {
+                    None
+                };
+                match session
+                    .authenticate_publickey_with(username.to_owned(), key, hash_alg, &mut agent)
+                    .await
+                {
+                    Ok(AuthResult::Success) => return Ok(()),
+                    Ok(AuthResult::Failure { .. }) => {
+                        rejection = Some("the server rejected an agent identity".to_owned());
+                    }
+                    Err(error) => {
+                        rejection = Some(format!("agent signing failed: {error}"));
+                    }
+                }
+            }
+            bail!(
+                "SSH agent authentication was rejected ({})",
+                rejection.unwrap_or_else(|| "no usable identities".to_owned())
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn connect_agent() -> Result<
+    russh::keys::agent::client::AgentClient<
+        Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>,
+    >,
+> {
+    #[cfg(windows)]
+    {
+        let path = env::var_os("SSH_AUTH_SOCK")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"\\.\pipe\openssh-ssh-agent"));
+        match russh::keys::agent::client::AgentClient::connect_named_pipe(&path).await {
+            Ok(client) => return Ok(client.dynamic()),
+            Err(pipe_error) => {
+                match russh::keys::agent::client::AgentClient::connect_pageant().await {
+                    Ok(client) => return Ok(client.dynamic()),
+                    Err(pageant_error) => bail!(
+                        "Could not connect to the OpenSSH agent at {} ({pipe_error}) or Pageant ({pageant_error})",
+                        path.display()
+                    ),
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let client = russh::keys::agent::client::AgentClient::connect_env()
+            .await
+            .context("Could not connect to the SSH agent at SSH_AUTH_SOCK")?;
+        Ok(client.dynamic())
+    }
+}
+
+fn expand_user_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text
+        .strip_prefix("~/")
+        .or_else(|| text.strip_prefix("~\\"))
+        .or_else(|| text.strip_prefix("%d/"))
+        .or_else(|| text.strip_prefix("%d\\"))
+    else {
+        return path.to_path_buf();
+    };
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map_or_else(|| path.to_path_buf(), |home| PathBuf::from(home).join(rest))
 }
 
 async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
@@ -289,20 +1019,85 @@ async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
     let _ = cancellation.changed().await;
 }
 
+async fn open_log_file(path: &Path) -> Result<tokio::fs::File> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Could not create {}", parent.display()))?;
+    }
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .with_context(|| format!("Could not open {}", path.display()))
+}
+
+async fn flush_log(file: &mut Option<tokio::fs::File>, buffer: &mut Vec<u8>) -> Result<()> {
+    let Some(file) = file.as_mut() else {
+        buffer.clear();
+        return Ok(());
+    };
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    file.write_all(buffer).await?;
+    file.flush().await?;
+    buffer.clear();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionSpec, UiEvent, is_known_host_key, run_connection_with_known_hosts};
+    use super::{
+        Authentication, ConnectionSpec, JumpSpec, UiEvent, can_answer_with_password,
+        is_known_host_key, run_connection_with_known_hosts,
+    };
+    use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
+    use crate::sftp::{SftpCommand, SftpEvent};
     use crate::terminal::{
-        TerminalFrame, TerminalKeyInput, TerminalPosition, TerminalRequest, TerminalSize,
+        CursorStyle, SearchDirection, TerminalFrame, TerminalKeyInput, TerminalPosition,
+        TerminalRequest, TerminalSize, TerminalTheme,
     };
     use anyhow::{Context, Result, bail};
+    use russh::client::Prompt;
     use russh::keys::PublicKey;
-    use std::{env, path::PathBuf, time::Duration};
+    use std::{
+        env,
+        path::PathBuf,
+        sync::{Arc, atomic::AtomicBool},
+        time::Duration,
+    };
     use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::{TcpListener, TcpStream},
         sync::{mpsc, watch},
         time::timeout,
     };
     use zeroize::Zeroizing;
+
+    fn forward_test_channels() -> (
+        mpsc::Receiver<ForwardCommand>,
+        mpsc::Sender<ForwardCommand>,
+        mpsc::UnboundedSender<ForwardEvent>,
+        mpsc::UnboundedReceiver<ForwardEvent>,
+    ) {
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        (command_rx, command_tx, event_tx, event_rx)
+    }
+
+    fn sftp_test_channels() -> (
+        mpsc::Receiver<SftpCommand>,
+        mpsc::Sender<SftpEvent>,
+        Arc<AtomicBool>,
+    ) {
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        (command_rx, event_tx, Arc::new(AtomicBool::new(false)))
+    }
 
     const KEY_A: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
@@ -339,6 +1134,38 @@ mod tests {
         assert!(is_known_host_key("localhost", 13265, &changed_key, &path).is_err());
     }
 
+    #[test]
+    fn keyboard_interactive_prompts_choose_between_password_and_ui() {
+        let prompt = |text: &str, echo| Prompt {
+            prompt: text.to_owned(),
+            echo,
+        };
+        assert!(can_answer_with_password(
+            &[prompt("Password: ", false)],
+            false
+        ));
+        assert!(!can_answer_with_password(
+            &[prompt("Password: ", false)],
+            true
+        ));
+        assert!(!can_answer_with_password(
+            &[prompt("Verification code: ", false)],
+            false
+        ));
+        assert!(!can_answer_with_password(
+            &[prompt("Password: ", true)],
+            false
+        ));
+        assert!(!can_answer_with_password(
+            &[
+                prompt("Password: ", false),
+                prompt("Verification code: ", false),
+            ],
+            false
+        ));
+        assert!(can_answer_with_password(&[], false));
+    }
+
     #[tokio::test]
     async fn cancellation_interrupts_ssh_handshake() {
         assert_handshake_cancellation(false).await;
@@ -367,16 +1194,28 @@ mod tests {
             host: address.ip().to_string(),
             port: address.port(),
             username: "test".to_owned(),
-            password: Zeroizing::new("secret".to_owned()),
+            authentication: Authentication::Password(Zeroizing::new("secret".to_owned())),
             terminal_size: TerminalSize {
                 columns: 80,
                 rows: 24,
             },
+            jump: None,
+            keepalive_seconds: 0,
+            theme: TerminalTheme::Default,
+            cursor_style: CursorStyle::Block,
         };
+        let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+        let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+            forward_test_channels();
         let connection = run_connection_with_known_hosts(
             spec,
             command_rx,
             event_tx,
+            sftp_commands,
+            sftp_events,
+            sftp_cancel,
+            forward_commands,
+            forward_events,
             directory.path().join("known_hosts"),
             cancel_rx,
         );
@@ -443,16 +1282,32 @@ mod tests {
                     host,
                     port,
                     username,
-                    password: Zeroizing::new(password),
+                    authentication: Authentication::Password(Zeroizing::new(password)),
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
                     },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
                 };
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (
+                    forward_commands,
+                    _forward_command_tx,
+                    forward_events,
+                    _forward_event_rx,
+                ) = forward_test_channels();
                 let connection = run_connection_with_known_hosts(
                     spec,
                     command_rx,
                     event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
                     known_hosts_path,
                     cancel_rx,
                 );
@@ -470,7 +1325,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::Screen(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
                         }
                     }
 
@@ -483,6 +1338,41 @@ mod tests {
                     next_screen(&mut events, |_| true)
                         .await
                         .context("waiting for the initial terminal screen")?;
+
+                    command_tx
+                        .send(TerminalRequest::SetTheme(TerminalTheme::SolarizedLight))
+                        .await?;
+                    next_screen(&mut events, |frame| {
+                        frame.background == TerminalTheme::SolarizedLight.palette().background
+                    })
+                    .await
+                    .context("waiting for the Solarized light terminal theme")?;
+                    command_tx
+                        .send(TerminalRequest::SetTheme(TerminalTheme::Default))
+                        .await?;
+                    next_screen(&mut events, |frame| {
+                        frame.background == TerminalTheme::Default.palette().background
+                    })
+                    .await
+                    .context("waiting for the default terminal theme")?;
+                    command_tx
+                        .send(TerminalRequest::SetCursorStyle(CursorStyle::Bar))
+                        .await?;
+                    next_screen(&mut events, |frame| {
+                        frame.cursor.is_some_and(|cursor| cursor.style == CursorStyle::Bar)
+                    })
+                    .await
+                    .context("waiting for the bar terminal cursor")?;
+                    command_tx
+                        .send(TerminalRequest::SetCursorStyle(CursorStyle::Block))
+                        .await?;
+                    next_screen(&mut events, |frame| {
+                        frame
+                            .cursor
+                            .is_some_and(|cursor| cursor.style == CursorStyle::Block)
+                    })
+                    .await
+                    .context("waiting for the block terminal cursor")?;
 
                     command_tx
                         .send(TerminalRequest::Paste("stty -echo".to_owned()))
@@ -508,6 +1398,41 @@ mod tests {
                     })
                     .await
                     .context("waiting for the shell command marker")?;
+                    command_tx
+                        .send(TerminalRequest::Search {
+                            query: "dshell_ssh_ready".to_owned(),
+                            direction: SearchDirection::Forward,
+                        })
+                        .await?;
+                    loop {
+                        match timeout(Duration::from_secs(20), events.recv())
+                            .await
+                            .context("timed out waiting for the terminal search result")?
+                            .context("SSH event stream closed during terminal search")?
+                        {
+                            UiEvent::SearchResult(result) => {
+                                assert!(result.found, "terminal search did not find the marker");
+                                assert!(result.total >= 1);
+                                break;
+                            }
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Disconnected => {
+                                bail!("SSH disconnected during terminal search")
+                            }
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. } => {}
+                        }
+                    }
+                    next_screen(&mut events, |frame| {
+                        frame
+                            .selection_text
+                            .as_deref()
+                            .is_some_and(|text| text.eq_ignore_ascii_case("DSHELL_SSH_READY"))
+                    })
+                    .await
+                    .context("waiting for the terminal search selection")?;
                     let position = find_text(&ready, "DSHELL_SSH_READY")
                         .context("SSH output marker was not found in the terminal grid")?;
                     command_tx
@@ -623,9 +1548,11 @@ mod tests {
                             function: false,
                         }))
                         .await?;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     next_screen(&mut events, |frame| frame_text(frame).contains(vim_text))
                         .await
                         .context("waiting for Vim to display Unicode text")?;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     command_tx
                         .send(TerminalRequest::Key(text_key(":wq")))
                         .await?;
@@ -635,6 +1562,7 @@ mod tests {
                     })
                     .await
                     .context("waiting for the shell prompt after Vim exits")?;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                     command_tx
                         .send(TerminalRequest::Paste(
                             "cat /tmp/dshell-vim-smoke; printf '\\nDSHELL_VIM_READBACK_DONE\\n'"
@@ -643,13 +1571,27 @@ mod tests {
                         .await?;
                     command_tx.send(TerminalRequest::Key(enter_key())).await?;
                     let readback = next_screen(&mut events, |frame| {
-                        frame_text(frame).contains("DSHELL_VIM_READBACK_DONE")
+                        frame_has_output_line(frame, "DSHELL_VIM_READBACK_DONE")
                     })
                     .await
                     .context("waiting for Vim file readback")?;
                     let readback_text = frame_text(&readback);
                     if !readback_text.contains(vim_text) {
-                        bail!("Vim file readback did not preserve Unicode text; screen:\n{readback_text}");
+                        command_tx
+                            .send(TerminalRequest::Paste(
+                                "od -An -tx1 /tmp/dshell-vim-smoke; printf '\\nDSHELL_VIM_HEX_DONE\\n'"
+                                    .to_owned(),
+                            ))
+                            .await?;
+                        command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                        let hex = next_screen(&mut events, |frame| {
+                            frame_has_output_line(frame, "DSHELL_VIM_HEX_DONE")
+                        })
+                        .await?;
+                        bail!(
+                            "Vim file readback did not preserve Unicode text; screen:\n{readback_text}\nfile bytes:\n{}",
+                            frame_text(&hex)
+                        );
                     }
 
                     command_tx
@@ -664,7 +1606,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::Screen(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -716,16 +1658,28 @@ mod tests {
                     host,
                     port,
                     username,
-                    password: Zeroizing::new(password),
+                    authentication: Authentication::Password(Zeroizing::new(password)),
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
                     },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
                 };
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
                 let connection = run_connection_with_known_hosts(
                     spec,
                     command_rx,
                     event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
                     known_hosts_path,
                     cancel_rx,
                 );
@@ -741,7 +1695,11 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::Screen(_) => {}
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
                         }
                     }
 
@@ -754,7 +1712,11 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::Screen(_) => {}
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -775,6 +1737,1380 @@ mod tests {
                 Ok::<(), anyhow::Error>(())
             })
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_session_logging() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("session.log");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
+                let spec = ConnectionSpec {
+                    host,
+                    port,
+                    username,
+                    authentication: Authentication::Password(Zeroizing::new(password)),
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the SSH session")?
+                            .context("SSH event stream closed during connection")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+
+                    command_tx
+                        .send(TerminalRequest::StartLog(log_path.clone()))
+                        .await?;
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the logging state")?
+                            .context("SSH event stream closed while starting logging")?
+                        {
+                            UiEvent::LogState(Some(path)) if path == log_path => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected while logging"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+
+                    command_tx
+                        .send(TerminalRequest::Paste(
+                            r"printf 'DSHELL_LOG_MARKER\n'".to_owned(),
+                        ))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut event_rx, |frame| {
+                        frame_text(frame).contains("DSHELL_LOG_MARKER")
+                    })
+                    .await
+                    .context("waiting for the logged terminal output")?;
+
+                    command_tx.send(TerminalRequest::StopLog).await?;
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for logging to stop")?
+                            .context("SSH event stream closed while stopping logging")?
+                        {
+                            UiEvent::LogState(None) => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected while logging"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+                    let logged = std::fs::read_to_string(&log_path)
+                        .context("the terminal log file is unreadable")?;
+                    assert!(
+                        logged.contains("DSHELL_LOG_MARKER"),
+                        "the terminal log did not contain the remote output"
+                    );
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the logging session cleanup")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(60), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker terminal logging test exceeded 60 seconds")?;
+                result?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_jump_host_round_trip() {
+        let jump_host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let jump_port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
+                let spec = ConnectionSpec {
+                    host: "127.0.0.1".to_owned(),
+                    port: 22,
+                    username: username.clone(),
+                    authentication: Authentication::Password(Zeroizing::new(password.clone())),
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: Some(JumpSpec {
+                        host: jump_host,
+                        port: jump_port,
+                        username,
+                        authentication: Authentication::Password(Zeroizing::new(password)),
+                    }),
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the jump host connection")?
+                            .context("SSH event stream closed during connection")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+
+                    command_tx
+                        .send(TerminalRequest::Paste(
+                            r"printf 'DSHELL_JUMP_READY\n'".to_owned(),
+                        ))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut event_rx, |frame| {
+                        frame_text(frame).contains("DSHELL_JUMP_READY")
+                    })
+                    .await
+                    .context("waiting for shell output through the jump host")?;
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for jump host disconnect")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(60), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker jump host test exceeded 60 seconds")?;
+                result?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_keyboard_interactive_authentication() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
+                let spec = ConnectionSpec {
+                    host,
+                    port,
+                    username,
+                    authentication: Authentication::KeyboardInteractive {
+                        password: Zeroizing::new(password),
+                        interactive: false,
+                    },
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for keyboard-interactive authentication")?
+                            .context("SSH event stream closed during authentication")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for keyboard-interactive session cleanup")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(45), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker keyboard-interactive test exceeded 45 seconds")?;
+                result?;
+                drop(command_tx);
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_public_key_authentication() {
+        let (identity_file, passphrase) = docker_identity_settings();
+        assert_public_key_connection(identity_file, passphrase);
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_public_key_wrong_passphrase_is_rejected() {
+        let (identity_file, _) = docker_identity_settings();
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async move {
+            let (_command_tx, command_rx) = mpsc::channel(8);
+            let (event_tx, _event_rx) = mpsc::channel(8);
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            let _cancel_tx = cancel_tx;
+            let spec = ConnectionSpec {
+                host,
+                port,
+                username,
+                authentication: Authentication::PublicKey {
+                    identity_file,
+                    passphrase: Zeroizing::new("definitely-the-wrong-passphrase".to_owned()),
+                },
+                terminal_size: TerminalSize {
+                    columns: 80,
+                    rows: 24,
+                },
+                jump: None,
+                keepalive_seconds: 0,
+                theme: TerminalTheme::Default,
+                cursor_style: CursorStyle::Block,
+            };
+            let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+            let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                forward_test_channels();
+            let error = run_connection_with_known_hosts(
+                spec,
+                command_rx,
+                event_tx,
+                sftp_commands,
+                sftp_events,
+                sftp_cancel,
+                forward_commands,
+                forward_events,
+                known_hosts_path,
+                cancel_rx,
+            )
+            .await
+            .expect_err("a wrong key passphrase must fail the connection");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("identity file"),
+                "the failure did not identify the unreadable identity file: {message}"
+            );
+        });
+    }
+
+    fn docker_identity_settings() -> (PathBuf, String) {
+        (
+            PathBuf::from(
+                env::var_os("DSHELL_DOCKER_SSH_IDENTITY")
+                    .expect("test identity file is not configured"),
+            ),
+            env::var("DSHELL_DOCKER_SSH_KEY_PASSPHRASE")
+                .expect("test identity passphrase is not configured"),
+        )
+    }
+
+    fn assert_public_key_connection(identity_file: PathBuf, passphrase: String) {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let spec = ConnectionSpec {
+                    host,
+                    port,
+                    username,
+                    authentication: Authentication::PublicKey {
+                        identity_file,
+                        passphrase: Zeroizing::new(passphrase),
+                    },
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for SSH public key authentication")?
+                            .context("SSH event stream closed during authentication")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for public key session cleanup")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_)
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(45), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker SSH public key test exceeded 45 seconds")?;
+                result?;
+                drop(command_tx);
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_sftp_round_trip() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let upload_path = directory.path().join("upload.txt");
+        let download_path = directory.path().join("download.txt");
+        let failed_download_path = directory.path().join("unexpected.txt");
+        let tree_upload = directory.path().join("tree-upload");
+        let tree_download = directory.path().join("tree-download");
+        let resume_remote = "dshell-sftp-resume.txt".to_owned();
+        let resume_full_local = directory.path().join("resume-full.txt");
+        let resume_partial_local = directory.path().join("resume-partial.txt");
+        let resume_download = directory.path().join("resume-download.txt");
+        let resume_content = (0..100_000u32)
+            .map(|index| b'a' + (index % 26) as u8)
+            .collect::<Vec<_>>();
+        std::fs::write(&resume_full_local, &resume_content).unwrap();
+        std::fs::write(&resume_partial_local, &resume_content[..40_000]).unwrap();
+        std::fs::create_dir_all(tree_upload.join("nested")).unwrap();
+        std::fs::write(tree_upload.join("nested/file.txt"), b"nested content").unwrap();
+        let content = b"dshell sftp round trip\nUnicode: \xe4\xb8\xad\xe6\x96\x87\n";
+        std::fs::write(&upload_path, content).unwrap();
+        let remote = "dshell-sftp-round-trip.txt".to_owned();
+        let remote_name = remote.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (_command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (sftp_command_tx, sftp_command_rx) = mpsc::channel(16);
+                let (sftp_event_tx, mut sftp_event_rx) = mpsc::channel(32);
+                let sftp_cancel = Arc::new(AtomicBool::new(false));
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
+                let spec = ConnectionSpec {
+                    host,
+                    port,
+                    username,
+                    authentication: Authentication::Password(Zeroizing::new(password)),
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_command_rx,
+                    sftp_event_tx,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the SSH session")?
+                            .context("SSH event stream closed during connection")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+
+                    let home = match next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::Ready { .. })
+                    })
+                    .await?
+                    {
+                        SftpEvent::Ready { path } => path,
+                        _ => unreachable!(),
+                    };
+                    assert!(!home.is_empty());
+
+                    sftp_command_tx
+                        .send(SftpCommand::List(home.clone()))
+                        .await?;
+                    next_sftp_event(
+                        &mut sftp_event_rx,
+                        |event| matches!(event, SftpEvent::Entries { path, .. } if path == &home),
+                    )
+                    .await?;
+
+                    sftp_command_tx
+                        .send(SftpCommand::Upload {
+                            local: upload_path.clone(),
+                            remote: remote.clone(),
+                            overwrite: false,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Upload,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+
+                    sftp_command_tx
+                        .send(SftpCommand::Upload {
+                            local: upload_path.clone(),
+                            remote: remote.clone(),
+                            overwrite: false,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::NeedsOverwrite {
+                                kind: crate::sftp::TransferKind::Upload,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+
+                    sftp_command_tx
+                        .send(SftpCommand::Upload {
+                            local: upload_path.clone(),
+                            remote: remote.clone(),
+                            overwrite: true,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Upload,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+
+                    sftp_command_tx
+                        .send(SftpCommand::List(home.clone()))
+                        .await?;
+                    let entries = next_sftp_event(
+                        &mut sftp_event_rx,
+                        |event| matches!(event, SftpEvent::Entries { path, .. } if path == &home),
+                    )
+                    .await?;
+                    let SftpEvent::Entries { entries, .. } = entries else {
+                        unreachable!()
+                    };
+                    assert!(
+                        entries.iter().any(|entry| entry.name == remote_name),
+                        "uploaded file is missing from the remote listing"
+                    );
+
+                    sftp_command_tx
+                        .send(SftpCommand::Download {
+                            remote: remote.clone(),
+                            local: download_path.clone(),
+                            overwrite: false,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Download,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+                    assert_eq!(
+                        tokio::fs::read(&download_path)
+                            .await
+                            .context("downloaded file is unreadable")?,
+                        content,
+                        "downloaded file content differs from the uploaded file"
+                    );
+
+                    sftp_command_tx
+                        .send(SftpCommand::Upload {
+                            local: resume_partial_local.clone(),
+                            remote: resume_remote.clone(),
+                            overwrite: true,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Upload,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+                    sftp_command_tx
+                        .send(SftpCommand::Upload {
+                            local: resume_full_local.clone(),
+                            remote: resume_remote.clone(),
+                            overwrite: false,
+                            resume: true,
+                        })
+                        .await?;
+                    let resumed = next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Upload,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+                    let SftpEvent::TransferFinished { .. } = resumed else {
+                        unreachable!()
+                    };
+                    sftp_command_tx
+                        .send(SftpCommand::Download {
+                            remote: resume_remote.clone(),
+                            local: resume_download.clone(),
+                            overwrite: true,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Download,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+                    assert_eq!(
+                        tokio::fs::read(&resume_download).await?,
+                        resume_content,
+                        "resumed upload content differs from the source file"
+                    );
+                    std::fs::write(&resume_download, &resume_content[..30_000]).unwrap();
+                    sftp_command_tx
+                        .send(SftpCommand::Download {
+                            remote: resume_remote.clone(),
+                            local: resume_download.clone(),
+                            overwrite: false,
+                            resume: true,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Download,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+                    assert_eq!(
+                        tokio::fs::read(&resume_download).await?,
+                        resume_content,
+                        "resumed download content differs from the remote file"
+                    );
+                    sftp_command_tx
+                        .send(SftpCommand::RemoveFile(resume_remote.clone()))
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Deleted file").await?;
+
+                    let renamed = "dshell-sftp-renamed.txt".to_owned();
+                    sftp_command_tx
+                        .send(SftpCommand::CreateDirectory("dshell-sftp-dir".to_owned()))
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Created directory").await?;
+                    sftp_command_tx
+                        .send(SftpCommand::Rename {
+                            from: remote.clone(),
+                            to: renamed.clone(),
+                        })
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Renamed").await?;
+                    sftp_command_tx
+                        .send(SftpCommand::List(home.clone()))
+                        .await?;
+                    let entries = next_sftp_event(
+                        &mut sftp_event_rx,
+                        |event| matches!(event, SftpEvent::Entries { path, .. } if path == &home),
+                    )
+                    .await?;
+                    let SftpEvent::Entries { entries, .. } = entries else {
+                        unreachable!()
+                    };
+                    assert!(entries.iter().any(|entry| entry.name == renamed));
+                    assert!(!entries.iter().any(|entry| entry.name == remote_name));
+                    sftp_command_tx
+                        .send(SftpCommand::RemoveFile(renamed.clone()))
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Deleted file").await?;
+                    sftp_command_tx
+                        .send(SftpCommand::RemoveDirectory("dshell-sftp-dir".to_owned()))
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Removed directory").await?;
+                    sftp_command_tx
+                        .send(SftpCommand::List(home.clone()))
+                        .await?;
+                    let entries = next_sftp_event(
+                        &mut sftp_event_rx,
+                        |event| matches!(event, SftpEvent::Entries { path, .. } if path == &home),
+                    )
+                    .await?;
+                    let SftpEvent::Entries { entries, .. } = entries else {
+                        unreachable!()
+                    };
+                    assert!(!entries.iter().any(|entry| entry.name == renamed));
+                    assert!(!entries.iter().any(|entry| entry.name == "dshell-sftp-dir"));
+
+                    let tree_remote = "dshell-sftp-tree".to_owned();
+                    sftp_command_tx
+                        .send(SftpCommand::UploadDirectory {
+                            local: tree_upload.clone(),
+                            remote: tree_remote.clone(),
+                            overwrite: false,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Upload,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+                    sftp_command_tx
+                        .send(SftpCommand::List(format!("{tree_remote}/nested")))
+                        .await?;
+                    let entries = next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::Entries { path, .. } if path == &format!("{tree_remote}/nested"))
+                    })
+                    .await?;
+                    let SftpEvent::Entries { entries, .. } = entries else {
+                        unreachable!()
+                    };
+                    assert!(entries.iter().any(|entry| entry.name == "file.txt"));
+
+                    sftp_command_tx
+                        .send(SftpCommand::DownloadDirectory {
+                            remote: tree_remote.clone(),
+                            local: tree_download.clone(),
+                            overwrite: false,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Download,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+                    assert_eq!(
+                        tokio::fs::read(tree_download.join("nested/file.txt"))
+                            .await
+                            .context("downloaded directory content is unreadable")?,
+                        b"nested content"
+                    );
+
+                    sftp_command_tx
+                        .send(SftpCommand::RemoveFile(format!(
+                            "{tree_remote}/nested/file.txt"
+                        )))
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Deleted file").await?;
+                    sftp_command_tx
+                        .send(SftpCommand::RemoveDirectory(format!(
+                            "{tree_remote}/nested"
+                        )))
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Removed directory").await?;
+                    sftp_command_tx
+                        .send(SftpCommand::RemoveDirectory(tree_remote.clone()))
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Removed directory").await?;
+
+                    sftp_command_tx
+                        .send(SftpCommand::Download {
+                            remote: "dshell-sftp-missing-file.txt".to_owned(),
+                            local: failed_download_path.clone(),
+                            overwrite: true,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFailed {
+                                kind: crate::sftp::TransferKind::Download,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for SFTP session cleanup")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(60), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker SFTP test exceeded 60 seconds")?;
+                result?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_port_forwarding() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (
+                    forward_commands,
+                    forward_command_tx,
+                    forward_events,
+                    mut forward_event_rx,
+                ) = forward_test_channels();
+                let spec = ConnectionSpec {
+                    host,
+                    port,
+                    username,
+                    authentication: Authentication::Password(Zeroizing::new(password)),
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the SSH session")?
+                            .context("SSH event stream closed during connection")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+
+                    forward_command_tx
+                        .send(ForwardCommand::Add(ForwardRuleSpec {
+                            kind: ForwardKind::Local,
+                            listen_host: "127.0.0.1".to_owned(),
+                            listen_port: 0,
+                            target_host: "127.0.0.1".to_owned(),
+                            target_port: 22,
+                        }))
+                        .await?;
+                    let (local_id, local_port) =
+                        next_forward_rule(&mut forward_event_rx, ForwardKind::Local).await?;
+                    let mut local_stream = TcpStream::connect(("127.0.0.1", local_port)).await?;
+                    let mut banner = [0u8; 64];
+                    let read = timeout(Duration::from_secs(10), local_stream.read(&mut banner))
+                        .await
+                        .context("timed out reading the local forwarding banner")??;
+                    assert!(
+                        String::from_utf8_lossy(&banner[..read]).starts_with("SSH-"),
+                        "local forwarding did not reach the SSH server"
+                    );
+                    forward_command_tx
+                        .send(ForwardCommand::Remove(local_id))
+                        .await?;
+                    next_forward_removed(&mut forward_event_rx, local_id).await?;
+                    assert!(
+                        TcpStream::connect(("127.0.0.1", local_port)).await.is_err(),
+                        "the local forwarding listener still accepts connections after removal"
+                    );
+
+                    forward_command_tx
+                        .send(ForwardCommand::Add(ForwardRuleSpec {
+                            kind: ForwardKind::Dynamic,
+                            listen_host: "127.0.0.1".to_owned(),
+                            listen_port: 0,
+                            target_host: String::new(),
+                            target_port: 0,
+                        }))
+                        .await?;
+                    let (_, socks_port) =
+                        next_forward_rule(&mut forward_event_rx, ForwardKind::Dynamic).await?;
+                    let mut socks = TcpStream::connect(("127.0.0.1", socks_port)).await?;
+                    socks.write_all(&[5, 1, 0]).await?;
+                    let mut method_reply = [0u8; 2];
+                    socks.read_exact(&mut method_reply).await?;
+                    assert_eq!(method_reply, [5, 0]);
+                    socks
+                        .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0, 22])
+                        .await?;
+                    let mut success_reply = [0u8; 10];
+                    socks.read_exact(&mut success_reply).await?;
+                    assert_eq!(success_reply[1], 0);
+                    let read = timeout(Duration::from_secs(10), socks.read(&mut banner))
+                        .await
+                        .context("timed out reading the SOCKS5 forwarding banner")??;
+                    assert!(
+                        String::from_utf8_lossy(&banner[..read]).starts_with("SSH-"),
+                        "dynamic forwarding did not reach the SSH server"
+                    );
+
+                    let local_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+                    let local_target_port = local_listener.local_addr()?.port();
+                    let (payload_tx, payload_rx) = tokio::sync::oneshot::channel();
+                    tokio::spawn(async move {
+                        if let Ok((mut stream, _)) = local_listener.accept().await {
+                            let mut buffer = [0u8; 128];
+                            let read = stream.read(&mut buffer).await.unwrap_or(0);
+                            let _ = payload_tx.send(
+                                String::from_utf8_lossy(&buffer[..read]).into_owned(),
+                            );
+                        }
+                    });
+                    forward_command_tx
+                        .send(ForwardCommand::Add(ForwardRuleSpec {
+                            kind: ForwardKind::Remote,
+                            listen_host: "127.0.0.1".to_owned(),
+                            listen_port: 0,
+                            target_host: "127.0.0.1".to_owned(),
+                            target_port: local_target_port,
+                        }))
+                        .await?;
+                    let (remote_id, remote_port) =
+                        next_forward_rule(&mut forward_event_rx, ForwardKind::Remote).await?;
+                    command_tx
+                        .send(TerminalRequest::Paste(format!(
+                            "exec 3<>/dev/tcp/127.0.0.1/{remote_port}; printf 'DSHELL_REMOTE_TUNNEL\\n' >&3; exec 3>&-; exec 3<&-"
+                        )))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    let payload = timeout(Duration::from_secs(20), payload_rx)
+                        .await
+                        .context("timed out waiting for the remote forwarding payload")?
+                        .context("the remote forwarding local listener closed")?;
+                    assert!(
+                        payload.contains("DSHELL_REMOTE_TUNNEL"),
+                        "remote forwarding delivered unexpected payload: {payload:?}"
+                    );
+                    next_forward_opened(&mut forward_event_rx, remote_id).await?;
+                    forward_command_tx
+                        .send(ForwardCommand::Remove(remote_id))
+                        .await?;
+                    next_forward_removed(&mut forward_event_rx, remote_id).await?;
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for forwarding session cleanup")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(90), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker port forwarding test exceeded 90 seconds")?;
+                result?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    async fn next_forward_rule(
+        events: &mut mpsc::UnboundedReceiver<ForwardEvent>,
+        kind: ForwardKind,
+    ) -> Result<(u64, u16)> {
+        loop {
+            let event = forward_event_timeout(events).await?;
+            if let ForwardEvent::RuleAdded {
+                id,
+                spec,
+                bound_port,
+            } = event
+                && spec.kind == kind
+            {
+                return Ok((id, bound_port));
+            }
+        }
+    }
+
+    async fn next_forward_removed(
+        events: &mut mpsc::UnboundedReceiver<ForwardEvent>,
+        rule_id: u64,
+    ) -> Result<()> {
+        loop {
+            let event = forward_event_timeout(events).await?;
+            if matches!(event, ForwardEvent::RuleRemoved { id } if id == rule_id) {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn next_forward_opened(
+        events: &mut mpsc::UnboundedReceiver<ForwardEvent>,
+        rule_id: u64,
+    ) -> Result<()> {
+        loop {
+            let event = forward_event_timeout(events).await?;
+            if matches!(event, ForwardEvent::ConnectionOpened { id, .. } if id == rule_id) {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn forward_event_timeout(
+        events: &mut mpsc::UnboundedReceiver<ForwardEvent>,
+    ) -> Result<ForwardEvent> {
+        timeout(Duration::from_secs(20), events.recv())
+            .await
+            .context("timed out waiting for a forwarding event")?
+            .context("the forwarding event stream closed")
+    }
+
+    async fn next_sftp_action(
+        events: &mut mpsc::Receiver<SftpEvent>,
+        action_prefix: &str,
+    ) -> Result<()> {
+        loop {
+            let event = timeout(Duration::from_secs(20), events.recv())
+                .await
+                .context("timed out waiting for an SFTP operation")?
+                .context("the SFTP event stream closed during an operation")?;
+            match event {
+                SftpEvent::OperationFinished { action, .. }
+                    if action.starts_with(action_prefix) =>
+                {
+                    return Ok(());
+                }
+                SftpEvent::Error(error) => bail!("SFTP operation failed: {error}"),
+                _ => {}
+            }
+        }
+    }
+
+    async fn next_sftp_event(
+        events: &mut mpsc::Receiver<SftpEvent>,
+        matches: impl Fn(&SftpEvent) -> bool,
+    ) -> Result<SftpEvent> {
+        let mut last_event = None;
+        loop {
+            let event = match timeout(Duration::from_secs(20), events.recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => bail!("SFTP event stream closed unexpectedly"),
+                Err(_) => bail!("timed out waiting for an SFTP event; last event: {last_event:?}"),
+            };
+            if matches(&event) {
+                return Ok(event);
+            }
+            last_event = Some(format!("{event:?}"));
+        }
     }
 
     async fn next_screen(
@@ -801,7 +3137,10 @@ mod tests {
                 UiEvent::Disconnected => {
                     bail!("SSH disconnected while waiting for terminal output")
                 }
-                UiEvent::Status(_) => {}
+                UiEvent::Status(_)
+                | UiEvent::LogState(_)
+                | UiEvent::AuthPrompt { .. }
+                | UiEvent::SearchResult(_) => {}
             }
         }
     }
@@ -837,6 +3176,16 @@ mod tests {
             .map(|row| row.iter().map(|run| run.text.as_str()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn frame_has_output_line(frame: &TerminalFrame, marker: &str) -> bool {
+        frame.rows.iter().any(|row| {
+            row.iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+                .trim()
+                == marker
+        })
     }
 
     fn find_text(frame: &TerminalFrame, needle: &str) -> Option<TerminalPosition> {

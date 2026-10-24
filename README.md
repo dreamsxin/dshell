@@ -14,26 +14,120 @@ The server host key must already be present in the current user's OpenSSH
 known_hosts file. Unknown or changed keys are rejected. Verify a key out of
 band before adding it to known_hosts.
 
-Run `cargo run --locked`, enter the host, port, user, and password in the
-connection bar, then connect. Each connection opens an independent session tab;
-switching tabs preserves each session's terminal state, and closing a tab ends
-only that SSH session. The password field is masked and cleared when connection
-starts. Passwords are used only for the current SSH authentication attempt and
-are not persisted. Click the terminal area to focus it, then use the keyboard
-as you would in a remote terminal. The terminal grid follows window resizing.
-When the remote application enables mouse tracking, clicks, motion, and the
-wheel are sent to it; otherwise, left-button dragging selects text and the
-wheel browses terminal history.
+Run `cargo run --locked`, enter the host, port, user, and credentials in the
+connection bar, then connect. Authentication supports a password, an OpenSSH
+private key file (with an optional passphrase), keyboard-interactive
+authentication, or the system SSH agent (Windows OpenSSH named pipe or Pageant;
+`SSH_AUTH_SOCK` on Unix). A plain password prompt in keyboard-interactive mode
+uses the password field; one-time-password or other extra prompts open a masked
+dialog that sends responses only to the SSH server. Each connection opens an independent session tab; switching tabs
+preserves each session's terminal state, and closing a tab ends only that SSH
+session. The password and key passphrase fields are masked and cleared when
+connection starts. Credentials are used only for the current SSH authentication
+attempt and are not persisted. Click the terminal area to focus it, then use the
+keyboard as you would in a remote terminal. The terminal grid follows window
+resizing. When the remote application enables mouse tracking, clicks, motion,
+and the wheel are sent to it; otherwise, left-button dragging selects text and
+the wheel browses terminal history.
 
 Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
 active session. Remote exit and connection failure clear the terminal view so a
 new connection starts with a clean session.
 
 Saved hosts can be searched, loaded into the connection bar, updated, and
-deleted from the left panel. The profile file stores only the display name,
-host, port, and username. On Windows it is stored at
-`%APPDATA%\dshell\hosts.json`; passwords are requested for each connection
-and are never written to the profile file.
+deleted from the left panel. Hosts may be assigned to a group, marked as a
+favorite, and filtered by any of those fields. The sidebar lists favorites,
+groups, and the most recent connections; selecting a recent entry loads the
+matching saved host when one exists, otherwise it fills the connection form.
+The `Import` button reads an OpenSSH `config` file
+and creates host profiles for supported entries (Host, HostName, User, Port,
+IdentityFile, LocalForward, RemoteForward, DynamicForward,
+ServerAliveInterval and Include). Hosts containing options that cannot be
+mapped safely — such as ProxyJump, ProxyCommand, StrictHostKeyChecking,
+Match blocks, agent/X11 forwarding or connection multiplexing — are skipped or
+reported rather than silently imported. Imported hosts are placed in the
+`Imported` group.
+The profile file stores only the display name, host, port, username, group,
+favorite flag, authentication method, optional identity file path, and optional
+jump host name, plus the recent connection history. On Windows it is stored at
+`%APPDATA%\dshell\hosts.json`; passwords, passphrases, and key material are
+never written to the profile file.
+
+To connect through another saved host, enter its name in the `Jump host` field
+of the session properties. The jump host and the target authenticate
+separately, and both server keys must already be present in known_hosts.
+Jump-host passwords and key passphrases are requested in their own fields and
+cleared when the connection starts.
+
+Use the `Files` button in the session toolbar to open the SFTP panel. It lists
+the remote working directory, supports entering directories and going up, and
+can upload or download single files and entire nested directories with the
+native file picker. Existing remote or local targets offer Overwrite, Resume or
+Keep existing; Resume continues from the current target size when it is smaller
+than the source and restarts from zero when it is larger. Transfers show
+progress and can be cancelled; cancellation uses a best-effort cleanup of
+entries created by that transfer while preserving partially resumed files. The
+panel can also create directories, rename entries, and delete files or empty
+directories; deletion requires a second confirmation. Symbolic links are
+skipped.
+
+Use the `Tunnels` button to manage port forwarding for the active session.
+Local forwards listen on this machine and connect through the SSH server;
+remote forwards listen on the server and connect back to a target reachable from
+this machine; Dynamic exposes a SOCKS5 proxy whose clients choose the target.
+Listen port `0` asks the operating system or SSH server to choose a port. Each
+rule shows its active connection count and can be stopped independently.
+Forwarding rules added for a saved host are stored in that host profile and
+started automatically the next time it connects.
+
+The session properties also accept a keep-alive interval in seconds (`0`
+disables it). A positive value makes the client send keepalive messages when
+the connection is idle.
+
+Use the `Log` button to record raw terminal output to a file. Logging is off by
+default and starts only after you choose a destination in the native save
+dialog. The file contains the remote byte stream, including ANSI escape
+sequences and anything printed in the terminal, so it may contain sensitive
+data. Stop logging with the same button or by disconnecting.
+
+Use the `Replay log` button to open a previously recorded raw log in a read-only
+terminal overlay. The log is parsed by the same terminal emulator, so colors and
+cursor addressing are reproduced. Files larger than 16 MiB replay their tail;
+use Top, Bottom or the wheel to browse the available scrollback.
+
+Use the `Snippets` button to manage reusable commands. Snippets are stored in
+`%APPDATA%\dshell\snippets.json` on Windows and can be sent to the active
+session or broadcast to explicitly selected connected sessions. The `Press
+Enter` toggle controls whether the command is submitted immediately.
+
+Use the `Keys` button to generate an OpenSSH Ed25519 key pair. Choose the
+private key path, an optional passphrase and a comment; the private key and a
+matching `.pub` file are created without overwriting existing files. The
+passphrase is not stored, and Unix key files are created with mode `0600`. The
+generated public key can be copied from the panel for placement in
+`authorized_keys`.
+
+Use the `Settings` button to change the terminal font family, size (9-32 px),
+color theme (Default dark, Solarized dark or Solarized light), cursor style
+(Block, Underline or Bar) and workspace shortcuts. Settings are stored in
+`%APPDATA%\dshell\settings.json`; applying a new font recalculates cell metrics,
+terminal columns/rows and active PTY sizes, and the selected palette and cursor
+style are pushed to every active session. Shortcut values use the form
+`ctrl+shift+t`, `alt+F12` or `cmd+space`; invalid or duplicate bindings are
+rejected without saving.
+
+While a terminal has focus, the default workspace shortcuts are `Ctrl+Shift+T`
+for a new session, `Ctrl+Shift+W` close tab, `Ctrl+Shift+F` files,
+`Ctrl+Shift+S` snippets, `Ctrl+Shift+O` settings, `Ctrl+Shift+D` disconnect,
+`Ctrl+Shift+R` replay log and `Ctrl+F` find. `Alt+1` through `Alt+9` always
+select a session tab. `Ctrl+Shift+C` and `Ctrl+Shift+V` remain copy and paste.
+
+The find bar searches the active terminal and its scrollback, or the open log
+replay, using case-insensitive single-line matching. Enter moves forward,
+Shift+Enter moves backward, and Prev/Next wrap around; Escape closes the bar.
+Matches are selected in the terminal, so `Ctrl+Shift+C` copies the current
+match. New terminal output or a resize clears the match list and the next search
+starts from the first match.
 
 ## Test and Verify
 

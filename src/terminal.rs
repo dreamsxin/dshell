@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use alacritty_terminal::{
     event::VoidListener,
     grid::{Dimensions, Scroll},
@@ -6,8 +8,114 @@ use alacritty_terminal::{
     term::{Config, Term, TermMode, cell::Flags},
     vte::ansi::{Color, NamedColor, Processor},
 };
+use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalTheme {
+    #[default]
+    Default,
+    SolarizedDark,
+    SolarizedLight,
+}
+
+impl TerminalTheme {
+    pub const ALL: [Self; 3] = [Self::Default, Self::SolarizedDark, Self::SolarizedLight];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default dark",
+            Self::SolarizedDark => "Solarized dark",
+            Self::SolarizedLight => "Solarized light",
+        }
+    }
+
+    pub fn palette(self) -> TerminalPalette {
+        match self {
+            Self::Default => TerminalPalette {
+                foreground: 0xe1e5e9,
+                dim_foreground: 0x9da4aa,
+                background: 0x0b0f13,
+                ansi: [
+                    0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+                    0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+                ],
+            },
+            Self::SolarizedDark => TerminalPalette {
+                foreground: 0x839496,
+                dim_foreground: 0x657b83,
+                background: 0x002b36,
+                ansi: [
+                    0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+                    0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+                ],
+            },
+            Self::SolarizedLight => TerminalPalette {
+                foreground: 0x657b83,
+                dim_foreground: 0x93a1a1,
+                background: 0xfdf6e3,
+                ansi: [
+                    0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+                    0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+                ],
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    Underline,
+    Bar,
+}
+
+impl CursorStyle {
+    pub const ALL: [Self; 3] = [Self::Block, Self::Underline, Self::Bar];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Block => "Block",
+            Self::Underline => "Underline",
+            Self::Bar => "Bar",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalCursor {
+    pub row: u16,
+    pub column: u16,
+    pub style: CursorStyle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalSearchResult {
+    pub found: bool,
+    pub total: usize,
+    pub current: usize,
+    pub wrapped: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalPalette {
+    pub foreground: u32,
+    pub dim_foreground: u32,
+    pub background: u32,
+    pub ansi: [u32; 16],
+}
+
+#[cfg(test)]
 pub const CELL_WIDTH_PX: f32 = 8.0;
+#[cfg(test)]
 pub const CELL_HEIGHT_PX: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,11 +125,14 @@ pub struct TerminalSize {
 }
 
 impl TerminalSize {
+    #[cfg(test)]
     pub fn for_window(width: f32, height: f32) -> Self {
-        let columns = ((width - 56.0) / CELL_WIDTH_PX).floor().clamp(1.0, 240.0);
-        let rows = ((height - 152.0) / CELL_HEIGHT_PX)
-            .floor()
-            .clamp(1.0, 120.0);
+        Self::for_window_with(width, height, CELL_WIDTH_PX, CELL_HEIGHT_PX)
+    }
+
+    pub fn for_window_with(width: f32, height: f32, cell_width: f32, cell_height: f32) -> Self {
+        let columns = ((width - 56.0) / cell_width).floor().clamp(1.0, 240.0);
+        let rows = ((height - 152.0) / cell_height).floor().clamp(1.0, 120.0);
 
         Self {
             columns: columns as u16,
@@ -46,6 +157,14 @@ pub enum TerminalRequest {
     Resize(TerminalSize),
     Mouse(TerminalMouseEvent),
     Paste(String),
+    StartLog(PathBuf),
+    StopLog,
+    SetTheme(TerminalTheme),
+    SetCursorStyle(CursorStyle),
+    Search {
+        query: String,
+        direction: SearchDirection,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,6 +369,9 @@ pub struct TerminalFrame {
     pub rows: Vec<Vec<TerminalRun>>,
     pub selection_text: Option<String>,
     pub mouse_tracking_mode: MouseTrackingMode,
+    pub foreground: u32,
+    pub background: u32,
+    pub cursor: Option<TerminalCursor>,
 }
 
 #[derive(Clone, Copy)]
@@ -285,6 +407,15 @@ pub struct TerminalEmulator {
     term: Term<VoidListener>,
     processor: Processor,
     reported_mouse_encodings: [Option<MouseEncoding>; 3],
+    theme: TerminalTheme,
+    cursor_style: CursorStyle,
+    search: Option<SearchState>,
+}
+
+struct SearchState {
+    query: String,
+    matches: Vec<(Point, Point)>,
+    current: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -295,7 +426,12 @@ enum MouseEncoding {
 }
 
 impl TerminalEmulator {
+    #[cfg(test)]
     pub fn new(size: TerminalSize) -> Self {
+        Self::new_with_theme(size, TerminalTheme::Default)
+    }
+
+    pub fn new_with_theme(size: TerminalSize, theme: TerminalTheme) -> Self {
         Self {
             term: Term::new(
                 Config::default(),
@@ -304,14 +440,153 @@ impl TerminalEmulator {
             ),
             processor: Processor::new(),
             reported_mouse_encodings: [None; 3],
+            theme,
+            cursor_style: CursorStyle::Block,
+            search: None,
         }
     }
 
+    pub fn set_theme(&mut self, theme: TerminalTheme) {
+        self.theme = theme;
+    }
+
+    pub fn set_cursor_style(&mut self, cursor_style: CursorStyle) {
+        self.cursor_style = cursor_style;
+    }
+
+    pub fn search(&mut self, query: &str, direction: SearchDirection) -> TerminalSearchResult {
+        let query = query.trim();
+        if query.is_empty() {
+            self.search = None;
+            return TerminalSearchResult {
+                found: false,
+                total: 0,
+                current: 0,
+                wrapped: false,
+            };
+        }
+        let reset = self
+            .search
+            .as_ref()
+            .is_none_or(|state| !state.query.eq_ignore_ascii_case(query));
+        let (matches, index, wrapped) = if reset {
+            let matches = self.collect_matches(query);
+            let index = match direction {
+                SearchDirection::Forward => 0,
+                SearchDirection::Backward => matches.len().saturating_sub(1),
+            };
+            (matches, index, false)
+        } else {
+            let state = self.search.take().expect("search state exists");
+            let len = state.matches.len();
+            if len == 0 {
+                (Vec::new(), 0, false)
+            } else {
+                let (index, wrapped) = match direction {
+                    SearchDirection::Forward => {
+                        let wrapped = state.current + 1 >= len;
+                        ((state.current + 1) % len, wrapped)
+                    }
+                    SearchDirection::Backward => {
+                        let wrapped = state.current == 0;
+                        (if wrapped { len - 1 } else { state.current - 1 }, wrapped)
+                    }
+                };
+                (state.matches, index, wrapped)
+            }
+        };
+        let total = matches.len();
+        if total == 0 {
+            self.search = None;
+            return TerminalSearchResult {
+                found: false,
+                total: 0,
+                current: 0,
+                wrapped: false,
+            };
+        }
+        let (start, end) = matches[index];
+        self.term.scroll_to_point(start);
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        self.term.selection = Some(selection);
+        self.search = Some(SearchState {
+            query: query.to_ascii_lowercase(),
+            matches,
+            current: index,
+        });
+        TerminalSearchResult {
+            found: true,
+            total,
+            current: index,
+            wrapped,
+        }
+    }
+
+    fn collect_matches(&self, query: &str) -> Vec<(Point, Point)> {
+        let query = query.to_ascii_lowercase();
+        let history = self.term.grid().history_size() as i32;
+        let screen = self.term.screen_lines() as i32;
+        let mut matches = Vec::new();
+        for line in -history..screen {
+            let row = &self.term.grid()[Line(line)];
+            let mut text = String::new();
+            let mut cells: Vec<(usize, usize, Column, usize)> = Vec::new();
+            for column in 0..self.term.columns() {
+                let cell = &row[Column(column)];
+                let flags = cell.flags;
+                if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let start = text.len();
+                text.push(if flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                });
+                if let Some(extra) = cell.zerowidth() {
+                    text.extend(extra);
+                }
+                let width = if flags.contains(Flags::WIDE_CHAR) {
+                    2
+                } else {
+                    1
+                };
+                cells.push((start, text.len(), Column(column), width));
+            }
+            let haystack = text.to_ascii_lowercase();
+            let mut offset = 0;
+            while offset < haystack.len() {
+                let Some(found) = haystack[offset..].find(&query) else {
+                    break;
+                };
+                let start_byte = offset + found;
+                let end_byte = start_byte + query.len();
+                let first = cells.iter().find(|(start, _, _, _)| *start == start_byte);
+                let last = cells.iter().find(|(_, end, _, _)| *end == end_byte);
+                if let (Some((_, _, start_column, _)), Some((_, _, end_column, width))) =
+                    (first, last)
+                {
+                    matches.push((
+                        Point::new(Line(line), *start_column),
+                        Point::new(Line(line), Column(end_column.0 + width - 1)),
+                    ));
+                }
+                offset = end_byte.max(start_byte + 1);
+            }
+        }
+        matches
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.search = None;
+        }
         self.processor.advance(&mut self.term, bytes);
     }
 
     pub fn resize(&mut self, size: TerminalSize) {
+        self.search = None;
         self.term.resize(TerminalDimensions::from(size));
     }
 
@@ -462,7 +737,19 @@ impl TerminalEmulator {
             .as_ref()
             .and_then(|selection| selection.to_range(&self.term));
         let selection_text = self.term.selection_to_string();
+        let palette = self.theme.palette();
         let first_line = -(self.term.grid().display_offset() as i32);
+        let block_cursor = self.cursor_style == CursorStyle::Block;
+        let cursor_row = cursor.line.0 - first_line;
+        let cursor_info = (show_cursor
+            && cursor_row >= 0
+            && cursor_row < self.term.screen_lines() as i32
+            && cursor.column.0 < self.term.columns())
+        .then_some(TerminalCursor {
+            row: cursor_row as u16,
+            column: cursor.column.0 as u16,
+            style: self.cursor_style,
+        });
         let rows = (first_line..first_line + self.term.screen_lines() as i32)
             .map(|line| {
                 let row = &self.term.grid()[Line(line)];
@@ -480,9 +767,9 @@ impl TerminalEmulator {
                     let selected = selection.as_ref().is_some_and(|selection| {
                         selection.contains(Point::new(Line(line), Column(column)))
                     });
-                    let mut foreground = color_to_rgb(cell.fg);
-                    let mut background = color_to_rgb(cell.bg);
-                    if flags.contains(Flags::INVERSE) ^ is_cursor {
+                    let mut foreground = color_to_rgb(cell.fg, &palette);
+                    let mut background = color_to_rgb(cell.bg, &palette);
+                    if flags.contains(Flags::INVERSE) ^ (is_cursor && block_cursor) {
                         std::mem::swap(&mut foreground, &mut background);
                     }
                     let style = (
@@ -545,6 +832,9 @@ impl TerminalEmulator {
             rows,
             selection_text,
             mouse_tracking_mode: self.mouse_tracking_mode(),
+            foreground: palette.foreground,
+            background: palette.background,
+            cursor: cursor_info,
         }
     }
 }
@@ -610,21 +900,17 @@ fn encode_mouse_coordinate(
     Some(())
 }
 
-fn color_to_rgb(color: Color) -> u32 {
+fn color_to_rgb(color: Color, palette: &TerminalPalette) -> u32 {
     match color {
         Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32,
-        Color::Indexed(index) => indexed_color(index),
-        Color::Named(named) => named_color(named),
+        Color::Indexed(index) => indexed_color(index, palette),
+        Color::Named(named) => named_color(named, palette),
     }
 }
 
-fn indexed_color(index: u8) -> u32 {
-    const ANSI: [u32; 16] = [
-        0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
-        0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
-    ];
+fn indexed_color(index: u8, palette: &TerminalPalette) -> u32 {
     match index {
-        0..=15 => ANSI[index as usize],
+        0..=15 => palette.ansi[index as usize],
         16..=231 => {
             let cube = index - 16;
             const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
@@ -639,35 +925,37 @@ fn indexed_color(index: u8) -> u32 {
     }
 }
 
-fn named_color(color: NamedColor) -> u32 {
+fn named_color(color: NamedColor, palette: &TerminalPalette) -> u32 {
     match color {
-        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::Cursor => 0xe1e5e9,
-        NamedColor::DimForeground => 0x9da4aa,
-        NamedColor::Background => 0x0b0f13,
-        NamedColor::Black | NamedColor::DimBlack => 0x000000,
-        NamedColor::Red | NamedColor::DimRed => 0xcd0000,
-        NamedColor::Green | NamedColor::DimGreen => 0x00cd00,
-        NamedColor::Yellow | NamedColor::DimYellow => 0xcdcd00,
-        NamedColor::Blue | NamedColor::DimBlue => 0x0000ee,
-        NamedColor::Magenta | NamedColor::DimMagenta => 0xcd00cd,
-        NamedColor::Cyan | NamedColor::DimCyan => 0x00cdcd,
-        NamedColor::White | NamedColor::DimWhite => 0xe5e5e5,
-        NamedColor::BrightBlack => 0x7f7f7f,
-        NamedColor::BrightRed => 0xff0000,
-        NamedColor::BrightGreen => 0x00ff00,
-        NamedColor::BrightYellow => 0xffff00,
-        NamedColor::BrightBlue => 0x5c5cff,
-        NamedColor::BrightMagenta => 0xff00ff,
-        NamedColor::BrightCyan => 0x00ffff,
-        NamedColor::BrightWhite => 0xffffff,
+        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::Cursor => {
+            palette.foreground
+        }
+        NamedColor::DimForeground => palette.dim_foreground,
+        NamedColor::Background => palette.background,
+        NamedColor::Black | NamedColor::DimBlack => palette.ansi[0],
+        NamedColor::Red | NamedColor::DimRed => palette.ansi[1],
+        NamedColor::Green | NamedColor::DimGreen => palette.ansi[2],
+        NamedColor::Yellow | NamedColor::DimYellow => palette.ansi[3],
+        NamedColor::Blue | NamedColor::DimBlue => palette.ansi[4],
+        NamedColor::Magenta | NamedColor::DimMagenta => palette.ansi[5],
+        NamedColor::Cyan | NamedColor::DimCyan => palette.ansi[6],
+        NamedColor::White | NamedColor::DimWhite => palette.ansi[7],
+        NamedColor::BrightBlack => palette.ansi[8],
+        NamedColor::BrightRed => palette.ansi[9],
+        NamedColor::BrightGreen => palette.ansi[10],
+        NamedColor::BrightYellow => palette.ansi[11],
+        NamedColor::BrightBlue => palette.ansi[12],
+        NamedColor::BrightMagenta => palette.ansi[13],
+        NamedColor::BrightCyan => palette.ansi[14],
+        NamedColor::BrightWhite => palette.ansi[15],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalEmulator, TerminalKeyInput, TerminalPosition,
-        TerminalSize,
+        CELL_HEIGHT_PX, CELL_WIDTH_PX, CursorStyle, SearchDirection, TerminalEmulator,
+        TerminalKeyInput, TerminalPosition, TerminalSize, TerminalTheme,
     };
 
     fn key(key: &str, text: Option<&str>) -> TerminalKeyInput {
@@ -695,6 +983,90 @@ mod tests {
         assert_eq!(first_row[0].text, "ready");
         assert_eq!(first_row[0].foreground, 0xcd0000);
         assert!(terminal.application_cursor_mode());
+    }
+
+    #[test]
+    fn cursor_style_is_reported_in_the_frame() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 8,
+            rows: 2,
+        });
+        terminal.feed(b"hi");
+
+        let cursor = terminal.frame().cursor.expect("cursor is visible");
+        assert_eq!(cursor.style, CursorStyle::Block);
+        assert_eq!(cursor.row, 0);
+        assert_eq!(cursor.column, 2);
+
+        terminal.set_cursor_style(CursorStyle::Bar);
+        let cursor = terminal.frame().cursor.expect("cursor is visible");
+        assert_eq!(cursor.style, CursorStyle::Bar);
+
+        terminal.set_cursor_style(CursorStyle::Underline);
+        let cursor = terminal.frame().cursor.expect("cursor is visible");
+        assert_eq!(cursor.style, CursorStyle::Underline);
+    }
+
+    #[test]
+    fn search_finds_history_matches_and_wraps() {
+        let mut terminal = TerminalEmulator::new(TerminalSize {
+            columns: 12,
+            rows: 2,
+        });
+        terminal.feed(b"one\r\ntwo\r\none more\r\nthree");
+
+        let first = terminal.search("ONE", SearchDirection::Forward);
+        assert!(first.found);
+        assert_eq!(first.total, 2);
+        assert_eq!(first.current, 0);
+        assert!(!first.wrapped);
+        assert!(
+            terminal
+                .frame()
+                .selection_text
+                .as_deref()
+                .is_some_and(|text| text.eq_ignore_ascii_case("one"))
+        );
+
+        let second = terminal.search("one", SearchDirection::Forward);
+        assert_eq!(second.current, 1);
+        assert!(!second.wrapped);
+
+        let wrapped = terminal.search("one", SearchDirection::Forward);
+        assert_eq!(wrapped.current, 0);
+        assert!(wrapped.wrapped);
+
+        let backward = terminal.search("one", SearchDirection::Backward);
+        assert_eq!(backward.current, 1);
+        assert!(backward.wrapped);
+
+        assert!(!terminal.search("   ", SearchDirection::Forward).found);
+        assert!(!terminal.search("missing", SearchDirection::Forward).found);
+    }
+
+    #[test]
+    fn theme_changes_frame_background_and_ansi_palette() {
+        let mut terminal = TerminalEmulator::new_with_theme(
+            TerminalSize {
+                columns: 8,
+                rows: 2,
+            },
+            TerminalTheme::SolarizedLight,
+        );
+        terminal.feed(b"\x1b[31mred");
+
+        let light = TerminalTheme::SolarizedLight.palette();
+        let frame = terminal.frame();
+        assert_eq!(frame.background, light.background);
+        assert_eq!(frame.foreground, light.foreground);
+        assert_eq!(frame.rows[0][0].background, light.background);
+        assert_eq!(frame.rows[0][0].foreground, light.ansi[1]);
+
+        terminal.set_theme(TerminalTheme::SolarizedDark);
+        let dark = TerminalTheme::SolarizedDark.palette();
+        let frame = terminal.frame();
+        assert_eq!(frame.background, dark.background);
+        assert_eq!(frame.rows[0][0].foreground, dark.ansi[1]);
     }
 
     #[test]

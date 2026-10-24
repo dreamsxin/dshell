@@ -5,6 +5,8 @@ $dockerContext = Join-Path $PSScriptRoot "docker-ssh"
 $dockerfile = Join-Path $dockerContext "Dockerfile"
 $containerName = "dshell-ssh-test-$([Guid]::NewGuid().ToString('N'))"
 $knownHostsPath = Join-Path $env:TEMP "$containerName-known_hosts"
+$identityPath = Join-Path $env:TEMP "$containerName-id_ed25519"
+$keyPassphrase = "dshell-test-passphrase-$([Guid]::NewGuid().ToString('N'))"
 $passwordBytes = New-Object byte[] 24
 $random = [Security.Cryptography.RandomNumberGenerator]::Create()
 $random.GetBytes($passwordBytes)
@@ -76,17 +78,33 @@ try {
 
     [System.IO.File]::WriteAllText(
         $knownHostsPath,
-        "[127.0.0.1]:$port $($hostKey.Trim())`n",
+        "[127.0.0.1]:$port $($hostKey.Trim())`n127.0.0.1 $($hostKey.Trim())`n",
         [System.Text.Encoding]::ASCII
     )
+
+    ssh-keygen -q -t ed25519 -N $keyPassphrase -C "dshell-test" -f $identityPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$identityPath.pub")) {
+        throw "Could not generate the temporary public key identity."
+    }
+    $publicKey = [System.IO.File]::ReadAllText("$identityPath.pub").Trim()
+    docker exec $containerName sh -c "install -d -m 700 -o dshelltest -g dshelltest /home/dshelltest/.ssh"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not create the test user's .ssh directory."
+    }
+    $publicKey | docker exec -i $containerName sh -c "cat > /home/dshelltest/.ssh/authorized_keys && chown dshelltest:dshelltest /home/dshelltest/.ssh/authorized_keys && chmod 600 /home/dshelltest/.ssh/authorized_keys"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not install the temporary public key for the test user."
+    }
 
     $env:DSHELL_DOCKER_SSH_HOST = "127.0.0.1"
     $env:DSHELL_DOCKER_SSH_PORT = "$port"
     $env:DSHELL_DOCKER_SSH_USER = "dshelltest"
     $env:DSHELL_DOCKER_SSH_PASSWORD = $password
+    $env:DSHELL_DOCKER_SSH_IDENTITY = $identityPath
+    $env:DSHELL_DOCKER_SSH_KEY_PASSPHRASE = $keyPassphrase
     $env:DSHELL_DOCKER_SSH_KNOWN_HOSTS = $knownHostsPath
 
-    cargo test --locked docker_ssh_ -- --ignored --nocapture
+    cargo test --locked docker_ssh_ -- --ignored --nocapture --test-threads=1
     if ($LASTEXITCODE -ne 0) {
         throw "The application SSH terminal integration test failed."
     }
@@ -96,7 +114,11 @@ finally {
     Remove-Item Env:\DSHELL_DOCKER_SSH_PORT -ErrorAction SilentlyContinue
     Remove-Item Env:\DSHELL_DOCKER_SSH_USER -ErrorAction SilentlyContinue
     Remove-Item Env:\DSHELL_DOCKER_SSH_PASSWORD -ErrorAction SilentlyContinue
+    Remove-Item Env:\DSHELL_DOCKER_SSH_IDENTITY -ErrorAction SilentlyContinue
+    Remove-Item Env:\DSHELL_DOCKER_SSH_KEY_PASSPHRASE -ErrorAction SilentlyContinue
     Remove-Item Env:\DSHELL_DOCKER_SSH_KNOWN_HOSTS -ErrorAction SilentlyContinue
     docker rm --force $containerName *> $null
     Remove-Item -LiteralPath $knownHostsPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $identityPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$identityPath.pub" -Force -ErrorAction SilentlyContinue
 }

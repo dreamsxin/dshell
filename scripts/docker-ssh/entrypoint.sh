@@ -10,6 +10,12 @@ fi
 printf '%s:%s\n' "$user" "$DSHELL_TEST_PASSWORD" | chpasswd
 
 ssh-keygen -A
-printf '\nPasswordAuthentication yes\nPermitRootLogin no\n' >> /etc/ssh/sshd_config
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/99-dshell-test.conf <<'EOF'
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+PermitRootLogin no
+EOF
 sshd -t
 exec /usr/sbin/sshd -D -e
