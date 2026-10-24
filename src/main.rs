@@ -512,10 +512,10 @@ fn remove_session(
 #[cfg(test)]
 mod session_tests {
     use super::{
-        AppShortcut, ForwardViewState, MouseTrackingMode, SessionSplit, SessionState,
-        SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
-        UiEvent, app_shortcut, apply_session_event, enqueue_session_request, mpsc,
-        read_log_for_replay, remove_session, search_result_message,
+        AppShortcut, ForwardViewState, MouseTrackingMode, SessionEditorKey, SessionSplit,
+        SessionState, SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest,
+        TerminalSize, UiEvent, app_shortcut, apply_session_event, enqueue_session_request, mpsc,
+        read_log_for_replay, remove_session, search_result_message, session_editor_key,
         session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
         watch,
     };
@@ -778,6 +778,24 @@ mod session_tests {
             Ok(ForwardCommand::Add(added)) if added == rule
         ));
         assert!(sessions[0].pending_forwards.is_empty());
+    }
+
+    #[test]
+    fn session_editor_escape_and_ctrl_enter_are_keyboard_actions() {
+        assert_eq!(
+            session_editor_key("Escape", false, false),
+            Some(SessionEditorKey::Cancel)
+        );
+        assert_eq!(
+            session_editor_key("enter", true, false),
+            Some(SessionEditorKey::Save)
+        );
+        assert_eq!(
+            session_editor_key("Enter", false, true),
+            Some(SessionEditorKey::Save)
+        );
+        assert_eq!(session_editor_key("enter", false, false), None);
+        assert_eq!(session_editor_key("tab", false, false), None);
     }
 
     #[test]
@@ -3292,6 +3310,24 @@ impl AppView {
             .absolute()
             .size_full()
             .occlude()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                match session_editor_key(
+                    &event.keystroke.key,
+                    modifiers.control,
+                    modifiers.platform,
+                ) {
+                    Some(SessionEditorKey::Cancel) => {
+                        cx.stop_propagation();
+                        this.cancel_session_editor(window, cx);
+                    }
+                    Some(SessionEditorKey::Save) => {
+                        cx.stop_propagation();
+                        this.save_profile(cx);
+                    }
+                    None => {}
+                }
+            }))
             .flex()
             .items_center()
             .justify_center()
@@ -3421,6 +3457,7 @@ impl AppView {
 
     fn saved_host_row(
         &self,
+        tokens: &ThemeTokens,
         prefix: &'static str,
         index: usize,
         profile: &HostProfile,
@@ -3428,80 +3465,97 @@ impl AppView {
     ) -> AnyElement {
         let is_selected = self.selected_profile.as_deref() == Some(&profile.name);
         let favorite = profile.favorite;
-        let favorite_label = if favorite { "★" } else { "☆" };
-        let favorite_color = if favorite {
-            rgb(0xc08b23)
-        } else {
-            rgb(0x8a949b)
-        };
-        let toggle_name = profile.name.clone();
+        let favorite_name = profile.name.clone();
         let selected_profile = profile.clone();
-        let mut name_button = Button::new((prefix, index)).label(profile.name.clone());
-        if is_selected {
-            name_button = name_button.primary();
-        }
-        div()
+        let edit_profile = profile.clone();
+        let actions = div()
             .flex()
-            .flex_col()
-            .gap(px(1.))
+            .items_center()
+            .gap(px(2.0))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .child(
-                        Button::new((ElementId::from((prefix, index)), "favorite"))
-                            .label(favorite_label)
-                            .text_color(favorite_color)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_favorite(&toggle_name, cx);
-                            })),
-                    )
-                    .child(
-                        name_button.on_click(cx.listener(move |this, _, window, cx| {
-                            this.load_profile(&selected_profile, window, cx);
-                        })),
-                    ),
+                components::icon_button(
+                    tokens,
+                    (ElementId::from((prefix, index)), "favorite"),
+                    IconName::Star,
+                    if favorite {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    if favorite {
+                        "Remove favorite"
+                    } else {
+                        "Add favorite"
+                    },
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_favorite(&favorite_name, cx);
+                })),
             )
             .child(
-                div()
-                    .px(px(10.))
-                    .text_size(px(11.))
-                    .text_color(rgb(0x667078))
-                    .child(format!(
-                        "{}@{}:{}",
-                        profile.username, profile.host, profile.port
-                    )),
-            )
-            .into_any_element()
+                components::icon_button(
+                    tokens,
+                    (ElementId::from((prefix, index)), "edit"),
+                    IconName::Settings2,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    "Edit host",
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.load_profile(&edit_profile, window, cx);
+                })),
+            );
+        components::SidebarRow::new(
+            tokens,
+            (prefix, index),
+            profile.name.clone(),
+            format!("{}@{}:{}", profile.username, profile.host, profile.port),
+        )
+        .selected(is_selected)
+        .actions(actions)
+        .into_row()
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.load_profile(&selected_profile, window, cx);
+        }))
+        .into_any_element()
     }
 
     fn recent_host_row(
         &self,
+        tokens: &ThemeTokens,
         index: usize,
         entry: &RecentConnection,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected_entry = entry.clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(1.))
-            .child(
-                Button::new(("recent-host", index))
-                    .label(entry.name.clone())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.load_recent(&selected_entry, window, cx);
-                    })),
-            )
-            .child(
-                div()
-                    .px(px(10.))
-                    .text_size(px(11.))
-                    .text_color(rgb(0x667078))
-                    .child(format!("{}@{}:{}", entry.username, entry.host, entry.port)),
-            )
-            .into_any_element()
+        let row_entry = entry.clone();
+        let actions = components::icon_button(
+            tokens,
+            ("recent-host-action", index),
+            IconName::ArrowRight,
+            ButtonKind::Ghost,
+            ButtonSize::Small,
+            "Load into the connection form",
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            this.load_recent(&selected_entry, window, cx);
+        }));
+        components::SidebarRow::new(
+            tokens,
+            ("recent-host", index),
+            entry.name.clone(),
+            format!("{}@{}:{}", entry.username, entry.host, entry.port),
+        )
+        .actions(actions)
+        .into_row()
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.load_recent(&row_entry, window, cx);
+        }))
+        .into_any_element()
     }
 
     fn apply_sftp_event(&mut self, id: u64, event: SftpEvent) -> bool {
@@ -6074,6 +6128,7 @@ impl AppView {
                 for index in favorite_indexes {
                     let profile = &self.profiles[index];
                     profile_list = profile_list.child(self.saved_host_row(
+                        tokens,
                         "favorite-host",
                         index,
                         profile,
@@ -6102,8 +6157,13 @@ impl AppView {
                 profile_list = profile_list.child(components::section_header(tokens, display));
                 for index in indexes {
                     let profile = &self.profiles[index];
-                    profile_list =
-                        profile_list.child(self.saved_host_row("group-host", index, profile, cx));
+                    profile_list = profile_list.child(self.saved_host_row(
+                        tokens,
+                        "group-host",
+                        index,
+                        profile,
+                        cx,
+                    ));
                 }
                 matching_profiles += 1;
             }
@@ -6111,7 +6171,8 @@ impl AppView {
             if !self.recent.is_empty() {
                 profile_list = profile_list.child(components::section_header(tokens, "RECENT"));
                 for (index, entry) in self.recent.iter().enumerate() {
-                    profile_list = profile_list.child(self.recent_host_row(index, entry, cx));
+                    profile_list =
+                        profile_list.child(self.recent_host_row(tokens, index, entry, cx));
                 }
                 matching_profiles += 1;
             }
@@ -6126,21 +6187,58 @@ impl AppView {
                     continue;
                 }
                 matching_profiles += 1;
-                profile_list =
-                    profile_list.child(self.saved_host_row("search-host", index, profile, cx));
+                profile_list = profile_list.child(self.saved_host_row(
+                    tokens,
+                    "search-host",
+                    index,
+                    profile,
+                    cx,
+                ));
             }
         }
         if matching_profiles == 0 {
-            let empty_message = if self.profiles.is_empty() {
-                "No saved hosts"
+            if self.profiles.is_empty() {
+                profile_list = profile_list.child(
+                    components::empty_state(
+                        tokens,
+                        "No saved hosts",
+                        "Import an OpenSSH config or create a host to get started.",
+                    )
+                    .child(
+                        components::button(
+                            tokens,
+                            "empty-new-host",
+                            "New host",
+                            ButtonKind::Primary,
+                            ButtonSize::Small,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_profile(window, cx);
+                        })),
+                    ),
+                );
             } else {
-                "No matching hosts"
-            };
-            profile_list = profile_list.child(
-                div()
-                    .p(px(ui_tokens::SPACE_2))
-                    .child(components::help_text(tokens, empty_message)),
-            );
+                profile_list = profile_list.child(
+                    components::empty_state(
+                        tokens,
+                        "No matching hosts",
+                        "Try a different name, group, user or port.",
+                    )
+                    .child(
+                        components::button(
+                            tokens,
+                            "clear-host-search",
+                            "Clear search",
+                            ButtonKind::Secondary,
+                            ButtonSize::Small,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            Self::set_input_value(&this.profile_search, "", window, cx);
+                            cx.notify();
+                        })),
+                    ),
+                );
+            }
         }
 
         div()
@@ -6829,6 +6927,20 @@ fn render_terminal_run(run: &TerminalRun, settings: &AppSettings) -> impl IntoEl
         cell_run = cell_run.underline();
     }
     cell_run.child(run.text.clone())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionEditorKey {
+    Cancel,
+    Save,
+}
+
+fn session_editor_key(key: &str, control: bool, platform: bool) -> Option<SessionEditorKey> {
+    match key.to_ascii_lowercase().as_str() {
+        "escape" => Some(SessionEditorKey::Cancel),
+        "enter" if control || platform => Some(SessionEditorKey::Save),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

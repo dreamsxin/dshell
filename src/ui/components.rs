@@ -8,7 +8,11 @@
 
 #![allow(dead_code)]
 
-use gpui::{Div, ElementId, Entity, ParentElement as _, SharedString, Styled, div, px};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AnyElement, Div, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, Stateful, Styled, div, px,
+};
 use gpui_component::{
     IconName, StyledExt as _,
     button::{Button, ButtonVariants as _},
@@ -186,6 +190,94 @@ pub fn section_header(tokens: &ThemeTokens, text: impl Into<SharedString>) -> Di
         .font_semibold()
         .text_color(tokens.text_secondary)
         .child(text.into())
+}
+
+/// Two-line list row: title, subtitle and always-visible row actions.
+///
+/// Actions stay visible (rather than hover-only) so keyboard users can reach
+/// them with `Tab`; callers attach navigation handlers to the returned row.
+pub struct SidebarRow {
+    tokens: ThemeTokens,
+    id: ElementId,
+    title: SharedString,
+    subtitle: SharedString,
+    selected: bool,
+    actions: Option<AnyElement>,
+}
+
+impl SidebarRow {
+    pub fn new(
+        tokens: &ThemeTokens,
+        id: impl Into<ElementId>,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            tokens: *tokens,
+            id: id.into(),
+            title: title.into(),
+            subtitle: subtitle.into(),
+            selected: false,
+            actions: None,
+        }
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn actions(mut self, actions: impl IntoElement) -> Self {
+        self.actions = Some(actions.into_any_element());
+        self
+    }
+
+    pub fn into_row(self) -> Stateful<Div> {
+        let tokens = &self.tokens;
+        div()
+            .id(self.id)
+            .flex()
+            .items_center()
+            .gap(px(tokens::SPACE_2))
+            .h(px(tokens::LIST_ROW_HEIGHT))
+            .px(px(tokens::SPACE_2))
+            .rounded(px(tokens::RADIUS_CONTROL))
+            .border_l_2()
+            .border_color(if self.selected {
+                tokens.accent
+            } else {
+                tokens.surface
+            })
+            .bg(if self.selected {
+                tokens.accent.opacity(0.14)
+            } else {
+                tokens.surface
+            })
+            .hover(|style| style.bg(tokens.surface_overlay))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_size(px(tokens::FONT_BODY))
+                            .text_color(tokens.text_primary)
+                            .child(self.title),
+                    )
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_size(px(tokens::FONT_CAPTION))
+                            .text_color(tokens.text_secondary)
+                            .child(self.subtitle),
+                    ),
+            )
+            .when_some(self.actions, |row, actions| row.child(actions))
+    }
 }
 
 /// Standard docked panel container. Callers set width and children.
