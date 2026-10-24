@@ -442,6 +442,99 @@ pub fn status_dot(tokens: &ThemeTokens, tone: Tone) -> Div {
         .bg(tone.color(tokens))
 }
 
+/// Full-window scrim used by every modal.
+pub fn modal_overlay(tokens: &ThemeTokens, id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .size_full()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(tokens::SPACE_4))
+        .bg(tokens.scrim)
+}
+
+/// Modal surface: raised background, 12 px radius, strong border and shadow.
+pub fn modal_panel(tokens: &ThemeTokens, id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .min_h_0()
+        .border_1()
+        .border_color(tokens.border_strong)
+        .rounded(px(tokens::RADIUS_PANEL))
+        .shadow_lg()
+        .overflow_hidden()
+        .bg(tokens.surface_overlay)
+        .text_color(tokens.text_primary)
+}
+
+/// 48 px modal title bar. Append actions to keep the title and actions apart.
+pub fn modal_header(tokens: &ThemeTokens, title: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .h(px(tokens::MODAL_HEADER_HEIGHT))
+        .flex_shrink_0()
+        .px(px(tokens::SPACE_4))
+        .border_b_1()
+        .border_color(tokens.border_subtle)
+        .bg(tokens.surface)
+        .text_size(px(tokens::FONT_TITLE))
+        .font_semibold()
+        .text_color(tokens.text_primary)
+        .child(title.into())
+}
+
+/// 60 px modal footer with right-aligned actions.
+pub fn modal_footer(tokens: &ThemeTokens) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap(px(tokens::SPACE_2))
+        .h(px(tokens::MODAL_FOOTER_HEIGHT))
+        .flex_shrink_0()
+        .px(px(tokens::SPACE_4))
+        .border_t_1()
+        .border_color(tokens.border_subtle)
+        .bg(tokens.surface)
+}
+
+/// Transient notification card: tone icon plus text. Callers append a close
+/// action and position the card themselves.
+pub fn toast(tokens: &ThemeTokens, tone: Tone, message: impl Into<SharedString>) -> Div {
+    let color = tone.color(tokens);
+    let icon = match tone {
+        Tone::Success => IconName::CircleCheck,
+        Tone::Warning => IconName::TriangleAlert,
+        Tone::Danger => IconName::CircleX,
+        Tone::Accent | Tone::Neutral => IconName::Info,
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(tokens::SPACE_2))
+        .min_w(px(280.0))
+        .max_w(px(420.0))
+        .py(px(tokens::SPACE_2))
+        .pl(px(tokens::SPACE_3))
+        .pr(px(tokens::SPACE_1))
+        .rounded(px(tokens::RADIUS_CARD))
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .bg(tokens.surface_overlay)
+        .shadow_lg()
+        .text_size(px(tokens::FONT_BODY))
+        .text_color(tokens.text_primary)
+        .child(Icon::new(icon).with_size(Size::Small).text_color(color))
+        .child(div().flex_1().min_w_0().child(message.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

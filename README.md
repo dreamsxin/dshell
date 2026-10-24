@@ -100,21 +100,33 @@ Use the `Snippets` button to manage reusable commands. Snippets are stored in
 session or broadcast to explicitly selected connected sessions. The `Press
 Enter` toggle controls whether the command is submitted immediately.
 
-Use the `Keys` button to generate an OpenSSH Ed25519 key pair. Choose the
-private key path, an optional passphrase and a comment; the private key and a
-matching `.pub` file are created without overwriting existing files. The
+Use the `Keys` button to generate an OpenSSH Ed25519 key pair. The generator
+opens in a 560 px modal. Choose the private key path, an optional passphrase and
+a comment; the private key and a matching `.pub` file are created without
+overwriting existing files. The
 passphrase is not stored, and Unix key files are created with mode `0600`. The
 generated public key can be copied from the panel for placement in
 `authorized_keys`.
 
 Use the `Settings` button to change the terminal font family, size (9-32 px),
 color theme (Default dark, Solarized dark or Solarized light), cursor style
-(Block, Underline or Bar) and workspace shortcuts. Settings are stored in
+(Block, Underline or Bar) and workspace shortcuts. Settings open in a centered
+760×600 modal. Settings are stored in
 `%APPDATA%\dshell\settings.json`; applying a new font recalculates cell metrics,
 terminal columns/rows and active PTY sizes, and the selected palette and cursor
 style are pushed to every active session. Shortcut values use the form
 `ctrl+shift+t`, `alt+F12` or `cmd+space`; invalid or duplicate bindings are
 rejected without saving.
+
+Session properties, settings, key generation, keyboard-interactive
+authentication and log replay open as modal overlays sharing the same scrim,
+radius, border and shadow. `Escape` closes any of them; when a deletion is
+awaiting confirmation, the first `Escape` cancels only the confirmation. In
+destructive confirmations the safe action (Keep, Cancel or Keep existing) comes
+before the danger action in the focus order. Successful profile saves, deletions,
+imports, settings changes, key generation and terminal copy/paste appear as
+auto-dismissing toasts in the lower-right corner; a toast can also be closed
+manually.
 
 While a terminal has focus, the default workspace shortcuts are `Ctrl+Shift+T`
 for a new session, `Ctrl+Shift+W` close tab, `Ctrl+Shift+F` files,

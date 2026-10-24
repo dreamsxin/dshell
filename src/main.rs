@@ -21,7 +21,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec, ForwardRuleUiState};
@@ -94,6 +94,12 @@ fn terminal_size_for_viewport(
         - TERMINAL_PANEL_HEADER_PX
         - TERMINAL_CARD_BORDER_PX;
     TerminalSize::for_window_with(width, height, settings.cell_width(), settings.cell_height())
+}
+
+#[derive(Clone, Debug)]
+struct ToastState {
+    message: String,
+    tone: Tone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -521,12 +527,12 @@ fn remove_session(
 #[cfg(test)]
 mod session_tests {
     use super::{
-        AppShortcut, ForwardViewState, MouseTrackingMode, SessionEditorKey, SessionSplit,
-        SessionState, SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest,
-        TerminalSize, UiEvent, app_shortcut, apply_session_event, enqueue_session_request, mpsc,
-        read_log_for_replay, remove_session, search_result_message, session_editor_key,
-        session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
-        watch,
+        AppShortcut, ForwardViewState, MouseTrackingMode, SessionEditorEscape, SessionEditorKey,
+        SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession, TerminalFrame,
+        TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
+        enqueue_session_request, mpsc, read_log_for_replay, remove_session, search_result_message,
+        session_editor_escape, session_editor_key, session_terminal_size_for_split,
+        split_panel_terminal_size, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::settings::AppSettings;
@@ -808,6 +814,18 @@ mod session_tests {
     }
 
     #[test]
+    fn escape_cancels_a_pending_delete_before_closing_the_editor() {
+        assert_eq!(
+            session_editor_escape(true),
+            SessionEditorEscape::CancelDelete
+        );
+        assert_eq!(
+            session_editor_escape(false),
+            SessionEditorEscape::CloseEditor
+        );
+    }
+
+    #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
         let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
@@ -996,6 +1014,10 @@ struct AppView {
     terminal_size: TerminalSize,
     terminal_bounds: Rc<RefCell<HashMap<u64, Bounds<Pixels>>>>,
     terminal_focus: FocusHandle,
+    overlay_focus: FocusHandle,
+    overlay_focus_pending: bool,
+    toast: Option<ToastState>,
+    toast_generation: u64,
     side_by_side_state: Entity<ResizableState>,
     stacked_state: Entity<ResizableState>,
     profiles: Vec<HostProfile>,
@@ -1195,6 +1217,10 @@ impl AppView {
             terminal_size,
             terminal_bounds: Rc::default(),
             terminal_focus: cx.focus_handle(),
+            overlay_focus: cx.focus_handle(),
+            overlay_focus_pending: false,
+            toast: None,
+            toast_generation: 0,
             side_by_side_state,
             stacked_state,
             profiles: data.profiles,
@@ -1247,6 +1273,59 @@ impl AppView {
 
     fn tokens(&self) -> ThemeTokens {
         self.ui_theme.tokens()
+    }
+
+    fn request_overlay_focus(&mut self) {
+        self.overlay_focus_pending = true;
+    }
+
+    fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+        self.toast = None;
+        self.toast_generation = self.toast_generation.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn show_toast(&mut self, message: impl Into<String>, tone: Tone, cx: &mut Context<Self>) {
+        self.toast = Some(ToastState {
+            message: message.into(),
+            tone,
+        });
+        self.toast_generation = self.toast_generation.wrapping_add(1);
+        let generation = self.toast_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(4)).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.toast_generation == generation {
+                    view.toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn toast_overlay(&mut self, toast: ToastState, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        div()
+            .absolute()
+            .bottom(px(ui_tokens::STATUS_BAR_HEIGHT + ui_tokens::SPACE_3))
+            .right(px(ui_tokens::SPACE_4))
+            .occlude()
+            .child(
+                components::toast(&tokens, toast.tone, toast.message).child(
+                    components::icon_button(
+                        &tokens,
+                        "toast-close",
+                        IconName::Close,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        "Dismiss",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.dismiss_toast(cx))),
+                ),
+            )
+            .into_any_element()
     }
 
     fn session(&self, id: u64) -> Option<&SshSession> {
@@ -1602,6 +1681,7 @@ impl AppView {
             message,
             scroll_remainder: 0.0,
         });
+        self.request_overlay_focus();
         cx.notify();
     }
 
@@ -1673,118 +1753,94 @@ impl AppView {
             } else {
                 None
             };
-        div()
-            .id("log-replay-overlay")
-            .absolute()
-            .size_full()
-            .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(ui_tokens::SPACE_4))
-            .bg(tokens.scrim)
+        components::modal_overlay(&tokens, "log-replay-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    if this.search_visible && this.search_target == Some(SearchTarget::LogReplay) {
+                        this.close_search(window, cx);
+                    } else {
+                        this.close_log_replay(cx);
+                        window.focus(&this.terminal_focus);
+                    }
+                }
+            }))
             .child(
-                div()
-                    .id("log-replay")
-                    .flex()
-                    .flex_col()
+                components::modal_panel(&tokens, "log-replay")
                     .relative()
                     .w_full()
                     .h_full()
                     .max_w(px(1100.))
                     .max_h(px(760.))
-                    .min_h_0()
-                    .border_1()
-                    .border_color(tokens.border_strong)
-                    .rounded(px(ui_tokens::RADIUS_PANEL))
-                    .shadow_lg()
-                    .overflow_hidden()
-                    .bg(tokens.surface_overlay)
-                    .text_color(tokens.text_primary)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(ui_tokens::MODAL_HEADER_HEIGHT))
-                            .flex_shrink_0()
-                            .px(px(ui_tokens::SPACE_4))
-                            .border_b_1()
-                            .border_color(tokens.border_subtle)
-                            .bg(tokens.surface)
-                            .child(
-                                div()
-                                    .text_size(px(ui_tokens::FONT_TITLE))
-                                    .font_semibold()
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(ui_tokens::SPACE_1))
-                                    .child(
-                                        components::button(
-                                            &tokens,
-                                            "log-replay-find",
-                                            "Find",
-                                            ButtonKind::Ghost,
-                                            ButtonSize::Small,
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, window, cx| {
-                                                this.search_target = Some(SearchTarget::LogReplay);
-                                                this.search_visible = true;
-                                                let focus =
-                                                    this.search_input.read(cx).focus_handle(cx);
-                                                window.focus(&focus);
-                                                cx.notify();
-                                            }),
-                                        ),
+                        components::modal_header(&tokens, title).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(ui_tokens::SPACE_1))
+                                .child(
+                                    components::button(
+                                        &tokens,
+                                        "log-replay-find",
+                                        "Find",
+                                        ButtonKind::Ghost,
+                                        ButtonSize::Small,
                                     )
-                                    .child(
-                                        components::button(
-                                            &tokens,
-                                            "log-replay-top",
-                                            "Top",
-                                            ButtonKind::Ghost,
-                                            ButtonSize::Small,
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.scroll_log_replay_to(true, cx);
-                                            }),
-                                        ),
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.search_target = Some(SearchTarget::LogReplay);
+                                            this.search_visible = true;
+                                            let focus = this.search_input.read(cx).focus_handle(cx);
+                                            window.focus(&focus);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    components::button(
+                                        &tokens,
+                                        "log-replay-top",
+                                        "Top",
+                                        ButtonKind::Ghost,
+                                        ButtonSize::Small,
                                     )
-                                    .child(
-                                        components::button(
-                                            &tokens,
-                                            "log-replay-bottom",
-                                            "Bottom",
-                                            ButtonKind::Ghost,
-                                            ButtonSize::Small,
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.scroll_log_replay_to(false, cx);
-                                            }),
-                                        ),
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.scroll_log_replay_to(true, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    components::button(
+                                        &tokens,
+                                        "log-replay-bottom",
+                                        "Bottom",
+                                        ButtonKind::Ghost,
+                                        ButtonSize::Small,
                                     )
-                                    .child(
-                                        components::button(
-                                            &tokens,
-                                            "log-replay-close",
-                                            "Close",
-                                            ButtonKind::Secondary,
-                                            ButtonSize::Small,
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.close_log_replay(cx);
-                                            }),
-                                        ),
-                                    ),
-                            ),
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.scroll_log_replay_to(false, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    components::button(
+                                        &tokens,
+                                        "log-replay-close",
+                                        "Close",
+                                        ButtonKind::Secondary,
+                                        ButtonSize::Small,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.close_log_replay(cx);
+                                            window.focus(&this.terminal_focus);
+                                        },
+                                    )),
+                                ),
+                        ),
                     )
                     .child(
                         div()
@@ -1891,8 +1947,13 @@ impl AppView {
                 ));
             }
         }
+        let tone = if added == 0 || skipped > 0 || !imported.warnings.is_empty() {
+            Tone::Warning
+        } else {
+            Tone::Success
+        };
         self.profile_message = summary;
-        cx.notify();
+        self.show_toast(self.profile_message.clone(), tone, cx);
     }
 
     fn new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1913,6 +1974,7 @@ impl AppView {
         self.selected_profile = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
+        self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message.clear();
         cx.notify();
@@ -1941,6 +2003,7 @@ impl AppView {
         self.selected_profile = Some(profile.name.clone());
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
+        self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message =
             format!("Loaded {}. Enter the credentials to connect.", profile.name);
@@ -1982,6 +2045,7 @@ impl AppView {
         self.selected_profile = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
+        self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message =
             "Loaded a recent connection. Save it as a host profile if you want to keep it."
@@ -2189,7 +2253,7 @@ impl AppView {
         self.selected_profile = Some(name.clone());
         self.confirm_delete = false;
         self.profile_message = format!("Saved {name}.");
-        cx.notify();
+        self.show_toast(self.profile_message.clone(), Tone::Success, cx);
     }
 
     fn request_profile_delete(&mut self, cx: &mut Context<Self>) {
@@ -2219,8 +2283,10 @@ impl AppView {
 
         self.new_profile(window, cx);
         self.session_editor_open = false;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
         self.profile_message = format!("Deleted {selected}.");
-        cx.notify();
+        self.show_toast(self.profile_message.clone(), Tone::Success, cx);
     }
 
     fn cancel_session_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2230,6 +2296,8 @@ impl AppView {
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
         self.confirm_delete = false;
         self.session_editor_open = false;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
         cx.notify();
     }
 
@@ -2421,6 +2489,7 @@ impl AppView {
                 self.terminal_bounds.borrow_mut().clear();
                 self.active_session_id = Some(id);
                 self.session_editor_open = false;
+                self.overlay_focus_pending = false;
                 let mut recent = self.recent.clone();
                 record_recent(
                     &mut recent,
@@ -2661,7 +2730,7 @@ impl AppView {
                 AppShortcut::CloseSession => self.close_session(session_id, window, cx),
                 AppShortcut::ToggleFiles => self.toggle_sftp(session_id, cx),
                 AppShortcut::ToggleSnippets => self.toggle_snippets(cx),
-                AppShortcut::ToggleSettings => self.toggle_settings(cx),
+                AppShortcut::ToggleSettings => self.toggle_settings(window, cx),
                 AppShortcut::ToggleSidebar => self.toggle_sidebar(window, cx),
                 AppShortcut::Disconnect => self.disconnect_session(session_id, cx),
                 AppShortcut::ReplayLog => self.begin_log_replay(cx),
@@ -2913,6 +2982,7 @@ impl AppView {
             .filter(|text| !text.is_empty())
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.show_toast("Copied selection.", Tone::Success, cx);
         }
     }
 
@@ -2924,6 +2994,7 @@ impl AppView {
                 "Terminal paste",
                 cx,
             );
+            self.show_toast("Pasted from clipboard.", Tone::Success, cx);
         }
     }
 
@@ -3476,18 +3547,6 @@ impl AppView {
                     .child(
                         components::button(
                             &tokens,
-                            "confirm-delete-profile",
-                            "Delete",
-                            ButtonKind::Danger,
-                            ButtonSize::Regular,
-                        )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.delete_profile(window, cx)),
-                        ),
-                    )
-                    .child(
-                        components::button(
-                            &tokens,
                             "cancel-delete-profile",
                             "Keep",
                             ButtonKind::Ghost,
@@ -3497,6 +3556,18 @@ impl AppView {
                             this.confirm_delete = false;
                             cx.notify();
                         })),
+                    )
+                    .child(
+                        components::button(
+                            &tokens,
+                            "confirm-delete-profile",
+                            "Delete",
+                            ButtonKind::Danger,
+                            ButtonSize::Regular,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.delete_profile(window, cx)),
+                        ),
                     );
             } else {
                 profile_actions = profile_actions.child(
@@ -3517,11 +3588,8 @@ impl AppView {
         } else {
             "New SSH Session"
         };
-        div()
-            .id("session-editor-overlay")
-            .absolute()
-            .size_full()
-            .occlude()
+        components::modal_overlay(&tokens, "session-editor-overlay")
+            .track_focus(&self.overlay_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 match session_editor_key(
@@ -3531,7 +3599,15 @@ impl AppView {
                 ) {
                     Some(SessionEditorKey::Cancel) => {
                         cx.stop_propagation();
-                        this.cancel_session_editor(window, cx);
+                        match session_editor_escape(this.confirm_delete) {
+                            SessionEditorEscape::CancelDelete => {
+                                this.confirm_delete = false;
+                                cx.notify();
+                            }
+                            SessionEditorEscape::CloseEditor => {
+                                this.cancel_session_editor(window, cx);
+                            }
+                        }
                     }
                     Some(SessionEditorKey::Save) => {
                         cx.stop_propagation();
@@ -3540,27 +3616,12 @@ impl AppView {
                     None => {}
                 }
             }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(ui_tokens::SPACE_4))
-            .bg(tokens.scrim)
             .child(
-                div()
-                    .id("session-editor")
-                    .flex()
-                    .flex_col()
+                components::modal_panel(&tokens, "session-editor")
                     .w_full()
                     .max_w(px(ui_tokens::MODAL_WIDTH_SESSION))
                     .h_full()
                     .max_h(px(ui_tokens::MODAL_HEIGHT_SESSION))
-                    .min_h_0()
-                    .border_1()
-                    .border_color(tokens.border_strong)
-                    .rounded(px(ui_tokens::RADIUS_PANEL))
-                    .shadow_lg()
-                    .bg(tokens.surface_raised)
-                    .text_color(tokens.text_primary)
                     .child(
                         div()
                             .flex()
@@ -4437,16 +4498,34 @@ impl AppView {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(Button::new("sftp-delete-confirm").label("Delete").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.confirm_sftp_delete(session_id, cx);
-                                }),
-                            ))
-                            .child(Button::new("sftp-delete-cancel").label("Cancel").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.cancel_sftp_delete(session_id, cx);
-                                }),
-                            )),
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "sftp-delete-cancel",
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.cancel_sftp_delete(session_id, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "sftp-delete-confirm",
+                                    "Delete",
+                                    ButtonKind::Danger,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.confirm_sftp_delete(session_id, cx);
+                                    },
+                                )),
+                            ),
                     ),
             );
         }
@@ -4507,21 +4586,48 @@ impl AppView {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(Button::new("sftp-overwrite").label("Overwrite").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.confirm_sftp_overwrite(session_id, cx);
-                                }),
-                            ))
-                            .child(Button::new("sftp-resume").label("Resume").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.confirm_sftp_resume(session_id, cx);
-                                }),
-                            ))
-                            .child(Button::new("sftp-keep").label("Keep existing").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.dismiss_sftp_overwrite(session_id, cx);
-                                }),
-                            )),
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "sftp-keep",
+                                    "Keep existing",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.dismiss_sftp_overwrite(session_id, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "sftp-resume",
+                                    "Resume",
+                                    ButtonKind::Secondary,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.confirm_sftp_resume(session_id, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "sftp-overwrite",
+                                    "Overwrite",
+                                    ButtonKind::Danger,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.confirm_sftp_overwrite(session_id, cx);
+                                    },
+                                )),
+                            ),
                     ),
             );
         }
@@ -5479,7 +5585,7 @@ impl AppView {
         cx.notify();
     }
 
-    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_visible = !self.settings_visible;
         if self.settings_visible {
             self.snippets_visible = false;
@@ -5490,6 +5596,9 @@ impl AppView {
                 session.sftp.visible = false;
                 session.forwards.visible = false;
             }
+            self.request_overlay_focus();
+        } else {
+            window.focus(&self.terminal_focus);
         }
         cx.notify();
     }
@@ -5536,7 +5645,7 @@ impl AppView {
         cx.notify();
     }
 
-    fn toggle_keys(&mut self, cx: &mut Context<Self>) {
+    fn toggle_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.keys_visible = !self.keys_visible;
         if self.keys_visible {
             self.settings_visible = false;
@@ -5547,6 +5656,9 @@ impl AppView {
                 session.sftp.visible = false;
                 session.forwards.visible = false;
             }
+            self.request_overlay_focus();
+        } else {
+            window.focus(&self.terminal_focus);
         }
         cx.notify();
     }
@@ -5581,10 +5693,12 @@ impl AppView {
                             generated.public_path.display()
                         );
                         view.key_public = Some(generated.public_key);
+                        view.show_toast("Ed25519 key pair generated.", Tone::Success, cx);
                     }
                     Err(error) => {
                         view.key_message = format!("{error:#}");
                         view.key_public = None;
+                        view.show_toast("Key generation failed.", Tone::Danger, cx);
                     }
                 }
                 cx.notify();
@@ -5597,120 +5711,106 @@ impl AppView {
         let tokens = self.tokens();
         let message = self.key_message.clone();
         let public_key = self.key_public.clone();
-        div()
-            .id("keys-panel")
+        let mut body = div()
+            .id("keys-body")
             .flex()
             .flex_col()
-            .w(px(360.))
-            .flex_shrink_0()
+            .flex_1()
             .min_h_0()
-            .ml(px(6.))
-            .border_1()
-            .border_color(rgb(0x343c42))
-            .bg(rgb(0x11161b))
-            .text_color(rgb(0xd4dade))
+            .overflow_y_scroll()
+            .gap(px(ui_tokens::SPACE_3))
+            .p(px(ui_tokens::SPACE_4))
+            .child(components::field(
+                &tokens,
+                "Private key path",
+                &self.key_path,
+                false,
+            ))
+            .child(components::field(
+                &tokens,
+                "Passphrase (optional)",
+                &self.new_key_passphrase,
+                true,
+            ))
+            .child(components::field(&tokens, "Comment", &self.key_comment, false))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(TERMINAL_PANEL_HEADER_PX))
-                    .flex_shrink_0()
-                    .px(px(8.))
-                    .bg(rgb(0x171d22))
-                    .child(div().text_size(px(11.)).child("User keys"))
-                    .child(Button::new("keys-close").label("Close").on_click(cx.listener(
-                        |this, _, _, cx| this.toggle_keys(cx),
-                    ))),
+                components::button(
+                    &tokens,
+                    "generate-key",
+                    "Generate Ed25519 key",
+                    ButtonKind::Primary,
+                    ButtonSize::Regular,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.generate_key(window, cx);
+                })),
             )
+            .child(components::help_text(
+                &tokens,
+                "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600.",
+            ));
+        if !message.is_empty() {
+            body = body.child(components::help_text(&tokens, message));
+        }
+        if let Some(public_key) = public_key {
+            body = body
+                .child(components::section_label(&tokens, "Public key"))
+                .child(
+                    div()
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(tokens.border_subtle)
+                        .bg(tokens.surface)
+                        .text_size(px(ui_tokens::FONT_CAPTION))
+                        .text_color(tokens.text_primary)
+                        .child(public_key),
+                )
+                .child(
+                    components::button(
+                        &tokens,
+                        "copy-public-key",
+                        "Copy public key",
+                        ButtonKind::Secondary,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(key) = this.key_public.clone() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(key));
+                            this.show_toast("Public key copied.", Tone::Success, cx);
+                        }
+                    })),
+                );
+        }
+
+        components::modal_overlay(&tokens, "keys-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.toggle_keys(window, cx);
+                }
+            }))
             .child(
-                div()
-                    .id("keys-body")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .gap(px(8.))
-                    .p(px(8.))
-                    .child(components::field(
-                        &tokens,
-                        "Private key path",
-                        &self.key_path,
-                        false,
-                    ))
-                    .child(components::field(
-                        &tokens,
-                        "Passphrase (optional)",
-                        &self.new_key_passphrase,
-                        false,
-                    ))
-                    .child(components::field(
-                        &tokens,
-                        "Comment",
-                        &self.key_comment,
-                        false,
-                    ))
+                components::modal_panel(&tokens, "keys-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .max_h(px(640.))
                     .child(
-                        Button::new("generate-key")
-                            .primary()
-                            .label("Generate Ed25519 key")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.generate_key(window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(0x8a949b))
-                            .child(
-                                "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600.",
+                        components::modal_header(&tokens, "User keys").child(
+                            components::icon_button(
+                                &tokens,
+                                "keys-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                "Close",
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_keys(window, cx)),
                             ),
+                        ),
                     )
-                    .when(!message.is_empty(), |body| {
-                        body.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(0x9aa4ab))
-                                .child(message),
-                        )
-                    })
-                    .when(public_key.is_some(), |body| {
-                        body.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(0x8a949b))
-                                        .child("Public key"),
-                                )
-                                .child(
-                                    div()
-                                        .p(px(6.))
-                                        .rounded(px(3.))
-                                        .bg(rgb(0x0b1014))
-                                        .text_size(px(10.))
-                                        .child(public_key.expect("public key is present")),
-                                )
-                                .child(
-                                    Button::new("copy-public-key")
-                                        .label("Copy public key")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(key) = this.key_public.clone() {
-                                                cx.write_to_clipboard(
-                                                    ClipboardItem::new_string(key),
-                                                );
-                                                this.key_message =
-                                                    "Public key copied.".to_owned();
-                                                cx.notify();
-                                            }
-                                        })),
-                                ),
-                        )
-                    }),
+                    .child(body),
             )
             .into_any_element()
     }
@@ -5820,7 +5920,7 @@ impl AppView {
         }
         self.settings_message = "Appearance and shortcuts applied.".to_owned();
         self.resize_terminal(window, cx);
-        cx.notify();
+        self.show_toast(self.settings_message.clone(), Tone::Success, cx);
     }
 
     fn reset_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5869,7 +5969,7 @@ impl AppView {
         }
         self.settings_message = "Appearance and shortcuts reset to defaults.".to_owned();
         self.resize_terminal(window, cx);
-        cx.notify();
+        self.show_toast(self.settings_message.clone(), Tone::Success, cx);
     }
 
     fn begin_auth_prompt(
@@ -5905,6 +6005,7 @@ impl AppView {
             prompts,
             respond_to: Some(respond_to),
         });
+        self.request_overlay_focus();
     }
 
     fn submit_auth_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5928,6 +6029,8 @@ impl AppView {
         if let Some(session) = self.session_mut(prompt.session_id) {
             session.status = "Submitting authentication response...".to_owned();
         }
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
         cx.notify();
     }
 
@@ -5941,6 +6044,8 @@ impl AppView {
         self.clear_auth_prompt_inputs(window, cx);
         self.auth_prompt_needs_clear = false;
         self.disconnect_session(prompt.session_id, cx);
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
     }
 
     fn clear_auth_prompt_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5954,6 +6059,7 @@ impl AppView {
     }
 
     fn auth_prompt_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let Some(prompt) = self.auth_prompt.as_ref() else {
             return div().into_any_element();
         };
@@ -5964,104 +6070,81 @@ impl AppView {
         };
         let instructions = prompt.instructions.trim().to_owned();
         let prompts = prompt.prompts.clone();
-        let mut fields = div().flex().flex_col().gap(px(10.));
+        let mut fields = div().flex().flex_col().gap(px(ui_tokens::SPACE_3));
         for (index, info) in prompts.iter().enumerate() {
             let input = if info.echo {
                 &self.auth_prompt_plain_inputs[index]
             } else {
                 &self.auth_prompt_inputs[index]
             };
-            fields = fields.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x59636a))
-                            .child(info.prompt.clone()),
-                    )
-                    .child(TextInput::new(input)),
-            );
+            fields = fields.child(components::field(
+                &tokens,
+                info.prompt.clone(),
+                input,
+                !info.echo,
+            ));
         }
-        div()
-            .id("auth-prompt-overlay")
-            .absolute()
-            .size_full()
-            .occlude()
+        let mut body = div()
+            .id("auth-prompt-body")
             .flex()
-            .items_center()
-            .justify_center()
-            .p(px(16.))
-            .bg(hsla(0., 0., 0., 0.42))
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_3))
+            .p(px(ui_tokens::SPACE_4))
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(fields);
+        if !instructions.is_empty() {
+            body = body.child(components::help_text(&tokens, instructions));
+        }
+        body = body.child(components::help_text(
+            &tokens,
+            "Responses are sent only to the SSH server and are not stored.",
+        ));
+
+        components::modal_overlay(&tokens, "auth-prompt-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.cancel_auth_prompt(window, cx);
+                }
+            }))
             .child(
-                div()
-                    .id("auth-prompt")
-                    .flex()
-                    .flex_col()
+                components::modal_panel(&tokens, "auth-prompt")
                     .w_full()
-                    .max_w(px(520.))
-                    .max_h(px(520.))
-                    .min_h_0()
-                    .border_1()
-                    .border_color(rgb(0xbfc7cc))
-                    .rounded(px(4.))
-                    .bg(rgb(0xf7f8f9))
-                    .text_color(rgb(0x20262b))
+                    .max_w(px(ui_tokens::MODAL_WIDTH_AUTH))
+                    .max_h(px(640.))
+                    .child(components::modal_header(&tokens, title))
+                    .child(body)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(48.))
-                            .flex_shrink_0()
-                            .px(px(16.))
-                            .border_b_1()
-                            .border_color(rgb(0xd8dde0))
-                            .child(div().text_size(px(14.)).font_semibold().child(title))
-                            .child(Button::new("auth-prompt-cancel").label("Cancel").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.cancel_auth_prompt(window, cx);
-                                }),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.))
-                            .p(px(16.))
-                            .when(!instructions.is_empty(), |body| {
-                                body.child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(0x59636a))
-                                        .child(instructions),
-                                )
-                            })
-                            .child(fields)
+                        components::modal_footer(&tokens)
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(
-                                        Button::new("auth-prompt-submit")
-                                            .primary()
-                                            .label("Continue")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.submit_auth_prompt(window, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(0x7a858c))
-                                            .child(
-                                                "Responses are sent only to the SSH server and are not stored.",
-                                            ),
-                                    ),
+                                components::button(
+                                    &tokens,
+                                    "auth-prompt-cancel",
+                                    "Cancel",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.cancel_auth_prompt(window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "auth-prompt-submit",
+                                    "Continue",
+                                    ButtonKind::Primary,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.submit_auth_prompt(window, cx);
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -6124,30 +6207,42 @@ impl AppView {
             ));
         }
 
-        components::panel(&tokens)
-            .id("settings-panel")
-            .w(px(ui_tokens::INSPECTOR_WIDTH))
-            .ml(px(ui_tokens::SPACE_2))
+        components::modal_overlay(&tokens, "settings-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.toggle_settings(window, cx);
+                }
+            }))
             .child(
-                components::panel_header(&tokens, "Settings").child(
-                    components::button(
-                        &tokens,
-                        "settings-close",
-                        "Close",
-                        ButtonKind::Ghost,
-                        ButtonSize::Small,
+                components::modal_panel(&tokens, "settings-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_SETTINGS))
+                    .h_full()
+                    .max_h(px(ui_tokens::MODAL_HEIGHT_SETTINGS))
+                    .child(
+                        components::modal_header(&tokens, "Settings").child(
+                            components::button(
+                                &tokens,
+                                "settings-close",
+                                "Close",
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)),
+                            ),
+                        ),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
-                ),
-            )
-            .child(
-                div()
-                    .id("settings-body")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .id("settings-body")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
                     .gap(px(ui_tokens::SPACE_4))
                     .p(px(ui_tokens::SPACE_4))
                     .child(components::field(
@@ -6196,37 +6291,35 @@ impl AppView {
                             "Allowed range: {MIN_FONT_SIZE:.0}-{MAX_FONT_SIZE:.0} px. Cell size and PTY dimensions follow the font size."
                         ),
                     ))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(ui_tokens::SPACE_2))
-                            .child(
-                                components::button(
-                                    &tokens,
-                                    "settings-apply",
-                                    "Apply",
-                                    ButtonKind::Primary,
-                                    ButtonSize::Regular,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.apply_settings(window, cx);
-                                })),
-                            )
-                            .child(
-                                components::button(
-                                    &tokens,
-                                    "settings-reset",
-                                    "Reset",
-                                    ButtonKind::Secondary,
-                                    ButtonSize::Regular,
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.reset_settings(window, cx);
-                                })),
-                            ),
-                    )
                     .child(components::help_text(&tokens, message)),
+            )
+            .child(
+                components::modal_footer(&tokens)
+                    .child(
+                        components::button(
+                            &tokens,
+                            "settings-reset",
+                            "Reset",
+                            ButtonKind::Secondary,
+                            ButtonSize::Regular,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.reset_settings(window, cx);
+                        })),
+                    )
+                    .child(
+                        components::button(
+                            &tokens,
+                            "settings-apply",
+                            "Apply",
+                            ButtonKind::Primary,
+                            ButtonSize::Regular,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_settings(window, cx);
+                        })),
+                    ),
+            )
             )
             .into_any_element()
     }
@@ -6769,6 +6862,7 @@ impl AppView {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.session_editor_section = SessionEditorSection::Connection;
                     this.session_editor_open = true;
+                    this.request_overlay_focus();
                     cx.notify();
                 })),
             );
@@ -6952,7 +7046,7 @@ impl AppView {
                     },
                     ButtonSize::Small,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_keys(window, cx))),
             )
             .child(
                 components::icon_button(
@@ -6978,7 +7072,7 @@ impl AppView {
                     ButtonSize::Small,
                     "Settings",
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx))),
             );
 
         div()
@@ -7489,6 +7583,20 @@ fn session_editor_key(key: &str, control: bool, platform: bool) -> Option<Sessio
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionEditorEscape {
+    CancelDelete,
+    CloseEditor,
+}
+
+fn session_editor_escape(confirm_delete: bool) -> SessionEditorEscape {
+    if confirm_delete {
+        SessionEditorEscape::CancelDelete
+    } else {
+        SessionEditorEscape::CloseEditor
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppShortcut {
     NewSession,
     CloseSession,
@@ -7599,6 +7707,9 @@ impl Render for AppView {
             self.clear_auth_prompt_inputs(window, cx);
             self.auth_prompt_needs_clear = false;
         }
+        if std::mem::take(&mut self.overlay_focus_pending) {
+            window.focus(&self.overlay_focus);
+        }
         let tokens = self.tokens();
         let command_bar = self.command_bar(&tokens, cx);
         let sidebar = self.sidebar(&tokens, cx);
@@ -7688,12 +7799,6 @@ impl Render for AppView {
         if self.snippets_visible {
             terminal_workspace = terminal_workspace.child(self.snippets_panel(cx));
         }
-        if self.settings_visible {
-            terminal_workspace = terminal_workspace.child(self.settings_panel(cx));
-        }
-        if self.keys_visible {
-            terminal_workspace = terminal_workspace.child(self.keys_panel(cx));
-        }
 
         let mut root = div()
             .relative()
@@ -7722,6 +7827,12 @@ impl Render for AppView {
                     ),
             )
             .child(status_bar);
+        if self.keys_visible {
+            root = root.child(self.keys_panel(cx));
+        }
+        if self.settings_visible {
+            root = root.child(self.settings_panel(cx));
+        }
         if self.session_editor_open {
             root = root.child(self.session_editor(cx));
         }
@@ -7730,6 +7841,9 @@ impl Render for AppView {
         }
         if self.log_replay.is_some() {
             root = root.child(self.log_replay_overlay(cx));
+        }
+        if let Some(toast) = self.toast.clone() {
+            root = root.child(self.toast_overlay(toast, cx));
         }
         root
     }

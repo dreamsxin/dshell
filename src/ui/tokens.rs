@@ -42,6 +42,9 @@ pub const PANEL_HEADER_HEIGHT: f32 = 32.0;
 pub const SIDEBAR_HEADER_HEIGHT: f32 = 48.0;
 pub const MODAL_HEADER_HEIGHT: f32 = 48.0;
 pub const MODAL_FOOTER_HEIGHT: f32 = 60.0;
+pub const MODAL_WIDTH_CONFIRM: f32 = 440.0;
+pub const MODAL_WIDTH_AUTH: f32 = 480.0;
+pub const MODAL_WIDTH_KEYGEN: f32 = 560.0;
 pub const MODAL_WIDTH_SESSION: f32 = 720.0;
 pub const MODAL_HEIGHT_SESSION: f32 = 640.0;
 pub const MODAL_WIDTH_SETTINGS: f32 = 760.0;
@@ -99,5 +102,13 @@ mod tests {
         assert!(FONT_TITLE < FONT_DISPLAY);
         assert!(MOTION_QUICK_MS < MOTION_MODAL_MS);
         assert!(MOTION_MODAL_MS < MOTION_PANEL_MS);
+    }
+
+    #[test]
+    fn modal_widths_follow_the_dialog_spec() {
+        assert!(MODAL_WIDTH_CONFIRM < MODAL_WIDTH_AUTH);
+        assert!(MODAL_WIDTH_AUTH < MODAL_WIDTH_KEYGEN);
+        assert!(MODAL_WIDTH_KEYGEN < MODAL_WIDTH_SESSION);
+        assert!(MODAL_WIDTH_SETTINGS > MODAL_WIDTH_SESSION);
     }
 }
