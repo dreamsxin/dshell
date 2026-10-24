@@ -36,9 +36,11 @@ new connection starts with a clean session.
 
 Saved hosts can be searched, loaded into the connection bar, updated, and
 deleted from the left panel. Hosts may be assigned to a group, marked as a
-favorite, and filtered by any of those fields. The sidebar lists favorites,
-groups, and the most recent connections; selecting a recent entry loads the
-matching saved host when one exists, otherwise it fills the connection form.
+favorite, and filtered by any of those fields. Drag a saved host row onto a group
+header (or `UNGROUPED`) to move it; the new group is saved immediately. The
+sidebar lists favorites, groups, and the most recent connections; selecting a
+recent entry loads the matching saved host when one exists, otherwise it fills
+the connection form.
 The `Import` button reads an OpenSSH `config` file
 and creates host profiles for supported entries (Host, HostName, User, Port,
 IdentityFile, LocalForward, RemoteForward, DynamicForward,
