@@ -1639,6 +1639,8 @@ struct AppView {
     key_message: String,
     key_public: Option<String>,
     key_algorithm: keygen::KeyAlgorithm,
+    existing_keys: Vec<keygen::ExistingKey>,
+    key_discovery_message: String,
     auth_prompt: Option<AuthPromptState>,
     auth_prompt_inputs: Vec<Entity<InputState>>,
     auth_prompt_plain_inputs: Vec<Entity<InputState>>,
@@ -1888,6 +1890,8 @@ impl AppView {
             key_message: String::new(),
             key_public: None,
             key_algorithm: keygen::KeyAlgorithm::default(),
+            existing_keys: Vec::new(),
+            key_discovery_message: String::new(),
             auth_prompt: None,
             auth_prompt_inputs,
             auth_prompt_plain_inputs,
@@ -1912,6 +1916,7 @@ impl AppView {
             _stacked_subscription: stacked_subscription,
         };
         view.set_language_placeholders(window, cx);
+        view.refresh_existing_keys();
         view
     }
 
@@ -7821,6 +7826,7 @@ impl AppView {
     fn toggle_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.keys_visible = !self.keys_visible;
         if self.keys_visible {
+            self.refresh_existing_keys();
             self.settings_visible = false;
             self.snippets_visible = false;
             if let Some(session_id) = self.active_session_id
@@ -7836,6 +7842,42 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_existing_keys(&mut self) {
+        let directory = home_directory().join(".ssh");
+        match keygen::discover(&directory) {
+            Ok(keys) => {
+                self.existing_keys = keys;
+                self.key_discovery_message.clear();
+            }
+            Err(error) => {
+                self.existing_keys.clear();
+                self.key_discovery_message = format!(
+                    "{} {}: {error:#}",
+                    self.tr("Could not scan"),
+                    directory.display()
+                );
+            }
+        }
+    }
+
+    fn use_existing_key(
+        &mut self,
+        key: &keygen::ExistingKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = key.private_path.display().to_string();
+        Self::set_input_value(&self.identity_file, &path, window, cx);
+        self.key_public = key.public_key.clone();
+        self.key_message = format!(
+            "{} {}",
+            key.private_path.display(),
+            self.tr("Selected for the next SSH connection.")
+        );
+        self.show_toast(self.tr("Identity file selected."), Tone::Success, cx);
+        cx.notify();
+    }
+
     fn generate_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.key_path.read(cx).value().trim().to_owned();
         if path.is_empty() {
@@ -7848,7 +7890,12 @@ impl AppView {
         let comment = self.key_comment.read(cx).value().trim().to_owned();
         let algorithm = self.key_algorithm;
         Self::set_input_value(&self.new_key_passphrase, "", window, cx);
-        self.key_message = format!("Generating {} key...", algorithm.label());
+        self.key_message = format!(
+            "{} {} {}...",
+            self.tr("Generating"),
+            algorithm.label(),
+            self.tr("key")
+        );
         self.key_public = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -7862,13 +7909,15 @@ impl AppView {
                 match result {
                     Ok(generated) => {
                         view.key_message = format!(
-                            "Created {} and {}.",
+                            "{} {} and {}.",
+                            view.tr("Created"),
                             generated.private_path.display(),
                             generated.public_path.display()
                         );
                         view.key_public = Some(generated.public_key);
+                        view.refresh_existing_keys();
                         view.show_toast(
-                            format!("{} key pair generated.", algorithm.label()),
+                            format!("{} {}.", algorithm.label(), view.tr("key pair generated")),
                             Tone::Success,
                             cx,
                         );
@@ -7876,7 +7925,7 @@ impl AppView {
                     Err(error) => {
                         view.key_message = format!("{error:#}");
                         view.key_public = None;
-                        view.show_toast("Key generation failed.", Tone::Danger, cx);
+                        view.show_toast(view.tr("Key generation failed."), Tone::Danger, cx);
                     }
                 }
                 cx.notify();
@@ -7889,6 +7938,8 @@ impl AppView {
         let tokens = self.tokens();
         let message = self.key_message.clone();
         let public_key = self.key_public.clone();
+        let existing_keys = self.existing_keys.clone();
+        let discovery_message = self.key_discovery_message.clone();
         let selected_algorithm = self.key_algorithm;
         let mut algorithm_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
         for (index, algorithm) in keygen::KeyAlgorithm::ALL.into_iter().enumerate() {
@@ -7912,6 +7963,97 @@ impl AppView {
                 })),
             );
         }
+        let mut existing_keys_panel = div()
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_2))
+            .child(components::section_label(&tokens, self.tr("Existing keys")));
+        if existing_keys.is_empty() {
+            existing_keys_panel = existing_keys_panel.child(components::help_text(
+                &tokens,
+                self.tr("No existing OpenSSH keys found in ~/.ssh."),
+            ));
+        } else {
+            for (index, key) in existing_keys.iter().enumerate() {
+                let private_path = key.private_path.clone();
+                let file_name = private_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("identity")
+                    .to_owned();
+                let algorithm = key.algorithm.clone();
+                let public_key = key.public_key.clone();
+                let path_summary = private_path.display().to_string();
+                let use_tooltip = self.tr("Use for SSH");
+                let copy_tooltip = self.tr("Copy public key");
+                let mut actions = div().flex().items_center().gap(px(ui_tokens::SPACE_1));
+                actions = actions.child(
+                    components::icon_button(
+                        &tokens,
+                        ("existing-key-use", index),
+                        IconName::ArrowRight,
+                        ButtonKind::Secondary,
+                        ButtonSize::Small,
+                        use_tooltip,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(key) = this.existing_keys.get(index).cloned() {
+                            this.use_existing_key(&key, window, cx);
+                        }
+                    })),
+                );
+                if let Some(public_key) = public_key {
+                    actions = actions.child(
+                        components::icon_button(
+                            &tokens,
+                            ("existing-key-copy", index),
+                            IconName::Copy,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            copy_tooltip,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(public_key.clone()));
+                            this.show_toast(this.tr("Public key copied."), Tone::Success, cx);
+                        })),
+                    );
+                }
+                existing_keys_panel = existing_keys_panel.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(ui_tokens::SPACE_2))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(tokens.border_subtle)
+                        .bg(tokens.surface)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w_0()
+                                .gap(px(ui_tokens::SPACE_1))
+                                .child(
+                                    div()
+                                        .text_size(px(ui_tokens::FONT_BODY))
+                                        .text_color(tokens.text_primary)
+                                        .child(file_name),
+                                )
+                                .child(components::help_text(
+                                    &tokens,
+                                    format!("{algorithm} · {path_summary}"),
+                                )),
+                        )
+                        .child(actions),
+                );
+            }
+        }
+        if !discovery_message.is_empty() {
+            existing_keys_panel =
+                existing_keys_panel.child(components::help_text(&tokens, discovery_message));
+        }
         let mut body = div()
             .id("keys-body")
             .flex()
@@ -7921,43 +8063,55 @@ impl AppView {
             .overflow_y_scroll()
             .gap(px(ui_tokens::SPACE_3))
             .p(px(ui_tokens::SPACE_4))
+            .child(existing_keys_panel)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(ui_tokens::SPACE_2))
-                    .child(components::section_label(&tokens, "Algorithm"))
+                    .child(components::section_label(&tokens, self.tr("Algorithm")))
                     .child(algorithm_selector)
                     .child(components::help_text(
                         &tokens,
-                        selected_algorithm.description(),
+                        self.tr(selected_algorithm.description()),
                     ))
                     .child(components::help_text(
                         &tokens,
                         format!(
-                            "Suggested private key path: {}",
+                            "{}: {}",
+                            self.tr("Suggested private key path"),
                             selected_algorithm.path_hint()
                         ),
                     )),
             )
             .child(components::field(
                 &tokens,
-                "Private key path",
+                self.tr("Private key path"),
                 &self.key_path,
                 false,
             ))
             .child(components::field(
                 &tokens,
-                "Passphrase (optional)",
+                self.tr("Passphrase (optional)"),
                 &self.new_key_passphrase,
                 true,
             ))
-            .child(components::field(&tokens, "Comment", &self.key_comment, false))
+            .child(components::field(
+                &tokens,
+                self.tr("Comment"),
+                &self.key_comment,
+                false,
+            ))
             .child(
                 components::button(
                     &tokens,
                     "generate-key",
-                    format!("Generate {} key", selected_algorithm.label()),
+                    format!(
+                        "{} {} {}",
+                        self.tr("Generate"),
+                        selected_algorithm.label(),
+                        self.tr("key")
+                    ),
                     ButtonKind::Primary,
                     ButtonSize::Regular,
                 )
@@ -7967,13 +8121,14 @@ impl AppView {
             )
             .child(components::help_text(
                 &tokens,
-                "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600.",            ));
+                self.tr("Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600."),
+            ));
         if !message.is_empty() {
             body = body.child(components::help_text(&tokens, message));
         }
         if let Some(public_key) = public_key {
             body = body
-                .child(components::section_label(&tokens, "Public key"))
+                .child(components::section_label(&tokens, self.tr("Public key")))
                 .child(
                     div()
                         .p(px(ui_tokens::SPACE_2))
@@ -7989,14 +8144,14 @@ impl AppView {
                     components::button(
                         &tokens,
                         "copy-public-key",
-                        "Copy public key",
+                        self.tr("Copy public key"),
                         ButtonKind::Secondary,
                         ButtonSize::Small,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(key) = this.key_public.clone() {
                             cx.write_to_clipboard(ClipboardItem::new_string(key));
-                            this.show_toast("Public key copied.", Tone::Success, cx);
+                            this.show_toast(this.tr("Public key copied."), Tone::Success, cx);
                         }
                     })),
                 );
@@ -8015,14 +8170,14 @@ impl AppView {
                     .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
                     .max_h(px(640.))
                     .child(
-                        components::modal_header(&tokens, "User keys").child(
+                        components::modal_header(&tokens, self.tr("User keys")).child(
                             components::icon_button(
                                 &tokens,
                                 "keys-close",
                                 IconName::Close,
                                 ButtonKind::Ghost,
                                 ButtonSize::Small,
-                                "Close",
+                                self.tr("Close"),
                             )
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.toggle_keys(window, cx)),
@@ -10655,7 +10810,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.0 · native GPUI · Esc closes"),
+                        self.tr("dshell 0.1.4 · native GPUI · Esc closes"),
                     )),
             );
 

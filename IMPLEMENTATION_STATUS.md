@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：已有 OpenSSH 身份发现与复用、Keys 弹窗简体中文本地化完成，准备发布 `v0.1.4`。Keys 面板只扫描用户 `~/.ssh` 目录中的候选私钥文件，不读取私钥内容；显示已有公钥算法和路径，可一键填入主机认证表单，并在 `.pub` 文件可用时复制公钥。生成新密钥后自动刷新列表；算法说明、路径、口令、生成和复制操作均已接入简体中文翻译。新增密钥发现过滤、排序、公钥注释行处理和异常路径单测；`cargo fmt --all`、离线 `cargo check --locked`、`cargo test --locked --offline`（104 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。Windows 人工截图确认新鲜构建的中文 Keys 面板，证据保存在 `artifacts/dshell-v0.1.4-keys-cn.jpg`。
+
 2026-10-24，Windows/MSVC：SFTP 文件传输队列完成并准备发布 `v0.1.3`。文件选择器支持一次选择多个本地文件上传；每个会话维护 FIFO 队列，文件和目录传输共用串行调度。当前任务独占进度与覆盖确认，成功、失败或取消后自动派发下一项；SFTP 面板显示等待数量并可清空等待队列。`cargo fmt --all`、离线 `cargo check`、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1` 通过；单元测试 101 项通过、9 项 Docker 专项测试跳过，Docker 集成测试 9 项全部通过。
 
 2026-10-24，Windows/MSVC：新增 English / 简体中文界面语言设置，写入版本 1 的 `settings.json`，旧配置缺失语言字段时默认 English。命令栏、More 菜单、布局菜单、侧栏、会话属性、设置和常用工具面板的主要文案接入翻译表；终端输出与用户主机名、命令片段保持原样。新增 `scripts/start-docker-ssh-manual.ps1`，以 Docker Ubuntu 24.04 镜像启动仅绑定 `127.0.0.1:2222` 的临时 SSH 服务，输出临时账号、密码、host key 指纹和待人工核验的 known_hosts 行，不自动修改用户 known_hosts。`cargo fmt --all`、`scripts\verify-hard-constraints.ps1` 通过，单元测试 99 项通过、9 项 Docker 专用测试跳过；`scripts\test-docker-ssh.ps1` 9 项全部通过。Windows 人工截图确认 v0.1.2 新鲜构建的中文工作区和 SSH 连接表单，证据保存在 `artifacts/dshell-v0.1.2-chinese-shell.png` 与 `artifacts/dshell-v0.1.2-chinese-connection-form.png`；真实 DPI、IME 与字形像素对齐仍需隔离输入环境复核。
@@ -158,7 +160,7 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 - UI 改版六阶段和阶段 7（可调工作区与连接可观测性）已完成。侧栏（200–360px）与检查器（300–520px）可拖拽并持久化宽度，标签可拖拽排序且 `Alt+1..9` 跟随视觉顺序；列表行的悬停才显示动作（当前动作常驻以支持键盘）仍未实现。命令条已改为扁平图标工具栏，More 菜单按 Session/View/Tools 分组提供图标、名称和快捷键提示，标签上下文菜单也已支持右键和省略号入口；仍不支持子菜单、自定义工具栏或面板停靠。Transfers 组已显示实时速率并可取消，但不支持暂停；Forwards 组可停止并重新启动规则，已停止规则只保留在当前会话内。Connection 组展示主机密钥算法与 SHA256 指纹，但 russh 0.64.1 未暴露协商后的 kex/cipher/MAC。标签顺序不跨重启持久化。会话属性、设置、密钥生成、认证提示和日志回放已统一为模态并支持 `Esc`；SFTP、转发和片段面板仍是右侧停靠样式，模态尚无 140–180 ms 的出现/关闭过渡动画，Toast 也没有排队或历史记录。深/浅主题对比度与 9–32 px 字号、三档 DPI 对应的逻辑视口已用单测覆盖，但 Windows 100%/150%/200% 实际缩放、中文 IME 组合输入和终端字形像素对齐仍需在隔离桌面人工烟测。
 - 键盘映射覆盖常见按键和修饰键，但尚未验证完整 IME 组合输入；文本选择仍按字符范围处理，终端图像协议未实现。
 - 当前通过 GPUI flex 元素绘制样式化网格，尚未实现自定义 `TerminalElement`、字体 shaping、精确字素宽度/重排或渲染性能优化。
-- 当前认证已覆盖密码、OpenSSH 私钥、键盘交互（含 OTP/多因素逐提示输入）和系统 agent；Keys 面板可生成 Ed25519、RSA 3072/4096 和 ECDSA P-256/P-384，尚不支持已有密钥列表、改口令、导入导出或删除；GSSAPI、证书文件和硬件密钥仍待实现。Windows 上私钥文件权限依赖用户目录 ACL，未额外设置 ACL。
+- 当前认证已覆盖密码、OpenSSH 私钥、键盘交互（含 OTP/多因素逐提示输入）和系统 agent；Keys 面板可发现 `~/.ssh` 中的候选身份、填入主机认证表单并复制 `.pub` 公钥，也可生成 Ed25519、RSA 3072/4096 和 ECDSA P-256/P-384。改口令、导入导出或删除、GSSAPI、证书文件和硬件密钥仍待实现。Windows 上私钥文件权限依赖用户目录 ACL，未额外设置 ACL。
 - 首次连接不会弹出信任确认；用户需先通过独立可信渠道验证服务器指纹并写入 OpenSSH known_hosts。
 - Windows OpenSSH agent/Pageant 路径已实现但尚未在安装并加载身份的桌面环境做自动化验证；私钥口令错误与隔离 Docker 私钥认证已覆盖。
 - 跳板机当前只支持一层已保存主机引用，不支持 `ProxyJump` 列表、ProxyCommand、按通配符/`Match` 自动选择，也不支持在连接提示中临时输入跳板缺口令以外的交互式认证。跳板连接失败原因会显示在会话状态中，但不会针对单跳弹出独立重试对话框。
@@ -175,7 +177,7 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 - 同步输入目标只保存在当前进程，不跨重启；同步范围是键盘、粘贴和组合输入，不包含鼠标、滚动、resize 或片段广播。多会话广播尚无“全选/按分组选择”。关键字高亮已交付但规则只保存在当前进程，最多 32 条且仅支持字面量、不区分大小写匹配；触发器、本地 Shell 和脚本自动化尚未实现。快速命令网格已交付，Xshell 对照能力矩阵与阶段 9 顺序见 ROADMAP。
 - 侧栏分组是单层字符串，已支持拖拽主机到现有分组或 UNGROUPED；尚不支持拖拽创建/重排分组、嵌套目录或分组折叠状态持久化；最近连接记录在连接启动时写入，不区分认证失败和成功握手。
 
-当前发布版 `v0.1.3`、维护版本 `v0.1.2`、`v0.1.1` 和首个公开版本 `v0.1.0` 的发布范围及验证记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前发布版 `v0.1.4`、维护版本 `v0.1.3`、`v0.1.2`、`v0.1.1` 和首个公开版本 `v0.1.0` 的发布范围及验证记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 下一段接力
 

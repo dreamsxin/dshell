@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.3`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.4`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -125,13 +125,14 @@ to the active session or broadcast to explicitly selected connected sessions.
 The `Send + Enter` / `Paste only` toggle controls whether the command is
 submitted immediately.
 
-Use the `Keys` button to generate an OpenSSH key pair. The generator opens in a
-560 px modal and supports Ed25519, RSA 3072/4096 and ECDSA P-256/P-384. Choose
-the private key path, an optional passphrase and a comment; the private key and a
-matching `.pub` file are created without overwriting existing files. The
-passphrase is not stored, and Unix key files are created with mode `0600`. The
-generated public key can be copied from the panel for placement in
-`authorized_keys`.
+Use the `Keys` button to manage local OpenSSH identities. The 560 px modal
+discovers likely private keys in `~/.ssh` without reading private-key contents,
+shows their public-key algorithm and path, and can fill a host's identity-file
+field or copy a matching `.pub` key. It also generates new key pairs and
+supports Ed25519, RSA 3072/4096 and ECDSA P-256/P-384. Choose the private key
+path, an optional passphrase and a comment; the private key and a matching `.pub`
+file are created without overwriting existing files. The passphrase is not
+stored, and Unix key files are created with mode `0600`.
 
 Use the `Settings` button to change the terminal font family, size (9-32 px),
 color theme (Default dark, Solarized dark or Solarized light), cursor style

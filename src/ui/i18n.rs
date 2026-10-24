@@ -191,7 +191,32 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Algorithm" => "算法",
         "Comment" => "备注",
         "Generate" => "生成",
+        "key" => "密钥",
+        "Private key path" => "私钥路径",
+        "Passphrase (optional)" => "口令（可选）",
+        "Suggested private key path" => "建议私钥路径",
+        "Modern default, small keys and fast signatures." => "现代默认算法，密钥较小、签名速度快。",
+        "Compatible RSA key with a 3072-bit modulus." => "兼容性 RSA 密钥，模长为 3072 位。",
+        "Larger RSA key with a 4096-bit modulus." => "更大的 RSA 密钥，模长为 4096 位。",
+        "NIST P-256 ECDSA key." => "NIST P-256 ECDSA 密钥。",
+        "NIST P-384 ECDSA key." => "NIST P-384 ECDSA 密钥。",
+        "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600." => {
+            "创建 OpenSSH 私钥和 .pub 公钥文件。不会覆盖已有文件。口令不会保存；Unix 私钥文件权限为 0600。"
+        }
+        "Copy public key" => "复制公钥",
+        "Public key copied." => "公钥已复制。",
+        "Created" => "已创建",
+        "Generating" => "正在生成",
+        "key pair generated" => "密钥对已生成",
+        "Key generation failed." => "密钥生成失败。",
+        "Enter a private key path." => "请输入私钥路径。",
+        "Selected for the next SSH connection." => "已选中，将用于下一次 SSH 连接。",
+        "Could not scan" => "无法扫描",
         "User keys" => "用户密钥",
+        "Existing keys" => "已有密钥",
+        "No existing OpenSSH keys found in ~/.ssh." => "在 ~/.ssh 中没有找到已有 OpenSSH 密钥。",
+        "Use for SSH" => "用于 SSH",
+        "Identity file selected." => "已选择身份文件。",
         "No saved hosts" => "没有已保存的主机",
         "No matching hosts" => "没有匹配的主机",
         "Import an OpenSSH config or create a host to get started." => {
@@ -238,7 +263,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Stop logging" => "停止记录",
         "Quick commands (Ctrl+Shift+S)" => "快捷命令 (Ctrl+Shift+S)",
         "Settings (Ctrl+Shift+O)" => "设置 (Ctrl+Shift+O)",
-        "dshell 0.1.0 · native GPUI · Esc closes" => "dshell 0.1.0 · 原生 GPUI · 按 Esc 关闭",
+        "dshell 0.1.4 · native GPUI · Esc closes" => "dshell 0.1.4 · 原生 GPUI · 按 Esc 关闭",
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",
@@ -294,6 +319,18 @@ mod tests {
     #[test]
     fn simplified_chinese_translates_shell_labels_and_preserves_names() {
         assert_eq!(translate(Language::SimplifiedChinese, "Settings"), "设置");
+        assert_eq!(translate(Language::SimplifiedChinese, "Generate"), "生成");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Private key path"),
+            "私钥路径"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600."
+            ),
+            "创建 OpenSSH 私钥和 .pub 公钥文件。不会覆盖已有文件。口令不会保存；Unix 私钥文件权限为 0600。"
+        );
         assert_eq!(translate(Language::SimplifiedChinese, "my-host"), "my-host");
     }
 }

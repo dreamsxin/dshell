@@ -2,6 +2,23 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.4] - 2026-10-25
+
+Improves local SSH identity management for repeatable server connections.
+
+### Added
+
+- Discover likely OpenSSH private keys in the user's `.ssh` directory without reading private-key contents.
+- Show existing identity paths and public-key algorithms in the Keys panel.
+- Fill the host authentication form with a discovered identity using one action.
+- Copy a discovered public key when its `.pub` file is available.
+- Refresh the discovered key list after generating a new key pair.
+- Localize the complete Keys modal, including discovery, generation and copy actions, in Simplified Chinese.
+
+### Verification
+
+- `cargo fmt --all`, offline `cargo check --locked`, `cargo test --locked --offline` (104 passed, 9 ignored), hard-constraint verification and Docker SSH integration (9 passed) passed.
+
 ## [0.1.3] - 2026-10-24
 
 Improves the SFTP workflow for repeated server administration tasks.

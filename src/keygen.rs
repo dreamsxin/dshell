@@ -19,6 +19,18 @@ pub struct GeneratedKey {
     pub public_key: String,
 }
 
+/// A locally discovered OpenSSH identity file.
+///
+/// Discovery only inspects directory entries and optional public-key files;
+/// it never reads private-key contents.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExistingKey {
+    pub private_path: PathBuf,
+    pub public_path: Option<PathBuf>,
+    pub public_key: Option<String>,
+    pub algorithm: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeyAlgorithm {
     #[default]
@@ -162,6 +174,74 @@ pub fn generate(
     })
 }
 
+/// Discover likely OpenSSH private-key files in a user's `.ssh` directory.
+///
+/// The function deliberately uses conservative filename rules and ignores
+/// metadata files. A malformed or unreadable sibling `.pub` file does not
+/// prevent the private-key candidate from being listed.
+pub fn discover(directory: &Path) -> Result<Vec<ExistingKey>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    if !directory.is_dir() {
+        bail!("{} is not a directory.", directory.display());
+    }
+
+    let mut entries = fs::read_dir(directory)
+        .with_context(|| format!("Could not read the key directory {}", directory.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let mut keys = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        if !entry.file_type()?.is_file() || !is_private_key_candidate(&path) {
+            continue;
+        }
+
+        let public_path = public_key_path(&path);
+        let public_key = fs::read_to_string(&public_path).ok().and_then(|contents| {
+            contents
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_owned)
+        });
+        let algorithm = public_key
+            .as_deref()
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or("OpenSSH")
+            .to_owned();
+
+        keys.push(ExistingKey {
+            private_path: path,
+            public_path: public_path.exists().then_some(public_path),
+            public_key,
+            algorithm,
+        });
+    }
+    Ok(keys)
+}
+
+fn is_private_key_candidate(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if matches!(
+        name,
+        "config" | "known_hosts" | "known_hosts.old" | "authorized_keys"
+    ) || name.ends_with(".pub")
+        || name.ends_with("-cert.pub")
+    {
+        return false;
+    }
+
+    name.starts_with("id_")
+        || path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pem"))
+}
+
 fn public_key_path(path: &Path) -> PathBuf {
     let mut name: OsString = path.as_os_str().to_owned();
     name.push(".pub");
@@ -170,7 +250,9 @@ fn public_key_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyAlgorithm, generate};
+    use std::fs;
+
+    use super::{KeyAlgorithm, discover, generate};
     use russh::keys::PrivateKey;
 
     #[test]
@@ -257,5 +339,76 @@ mod tests {
             );
             assert!(russh::keys::load_secret_key(&path, None).is_ok());
         }
+    }
+
+    #[test]
+    fn discovers_private_keys_without_reading_metadata_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let ed25519 = directory.path().join("id_ed25519");
+        let generated = generate(&ed25519, "", "operator@dshell", KeyAlgorithm::Ed25519).unwrap();
+        fs::write(
+            directory.path().join("id_ed25519.pub"),
+            format!("# comment\n{}\n", generated.public_key),
+        )
+        .unwrap();
+        fs::write(directory.path().join("config"), "Host *\n").unwrap();
+        fs::write(
+            directory.path().join("known_hosts"),
+            "localhost ssh-ed25519 key\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("authorized_keys"),
+            "ssh-ed25519 key\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("readme.txt"), "not a key\n").unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+
+        let keys = discover(directory.path()).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].private_path, ed25519);
+        assert_eq!(
+            keys[0].public_path,
+            Some(directory.path().join("id_ed25519.pub"))
+        );
+        assert_eq!(keys[0].algorithm, "ssh-ed25519");
+        assert_eq!(
+            keys[0].public_key.as_deref(),
+            Some(generated.public_key.as_str())
+        );
+    }
+
+    #[test]
+    fn discovers_pem_candidates_and_handles_missing_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("server.pem"), "private key\n").unwrap();
+        fs::write(
+            directory.path().join("server.pem.pub"),
+            "ssh-rsa AAAA comment\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("id_ecdsa-cert.pub"),
+            "ssh-rsa AAAA cert\n",
+        )
+        .unwrap();
+
+        let keys = discover(directory.path()).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].algorithm, "ssh-rsa");
+        assert!(
+            discover(&directory.path().join("missing"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_non_directory_discovery_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("id_ed25519");
+        fs::write(&file, "private key\n").unwrap();
+        assert!(discover(&file).is_err());
     }
 }
