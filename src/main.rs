@@ -109,6 +109,53 @@ struct ToastState {
     tone: Tone,
 }
 
+#[derive(Clone, Debug)]
+struct TabDragData {
+    session_id: u64,
+    title: SharedString,
+}
+
+struct TabDragPreview {
+    title: SharedString,
+    tokens: ThemeTokens,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(ui_tokens::SPACE_3))
+            .py(px(ui_tokens::SPACE_1))
+            .rounded(px(ui_tokens::RADIUS_CONTROL))
+            .border_1()
+            .border_color(self.tokens.border_strong)
+            .bg(self.tokens.surface_overlay)
+            .text_size(px(ui_tokens::FONT_BODY))
+            .text_color(self.tokens.text_primary)
+            .child(self.title.clone())
+    }
+}
+
+fn reorder_session_ids(ids: &mut Vec<u64>, dragged: u64, target: u64) -> bool {
+    if dragged == target {
+        return false;
+    }
+    let Some(from) = ids.iter().position(|id| *id == dragged) else {
+        return false;
+    };
+    let Some(original_target) = ids.iter().position(|id| *id == target) else {
+        return false;
+    };
+    let moving_right = from < original_target;
+    let session = ids.remove(from);
+    let Some(to) = ids.iter().position(|id| *id == target) else {
+        ids.insert(from, session);
+        return false;
+    };
+    let insert_at = if moving_right { to + 1 } else { to };
+    ids.insert(insert_at.min(ids.len()), session);
+    true
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LayoutDragTarget {
     Sidebar,
@@ -593,9 +640,10 @@ mod session_tests {
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
         dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_rate, mpsc,
-        read_log_for_replay, remember_stopped_forward, remove_session, search_result_message,
-        session_editor_escape, session_editor_key, session_terminal_size_for_split,
-        split_panel_terminal_size, terminal_size_for_viewport, watch,
+        read_log_for_replay, remember_stopped_forward, remove_session, reorder_session_ids,
+        search_result_message, session_editor_escape, session_editor_key,
+        session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
+        watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::settings::AppSettings;
@@ -967,6 +1015,18 @@ mod session_tests {
         assert_eq!(format_rate(0.0), "0 B/s");
         assert_eq!(format_rate(f64::NAN), "0 B/s");
         assert!(format_rate(1536.0).ends_with("/s"));
+    }
+
+    #[test]
+    fn tab_drag_reorders_sessions_without_changing_their_identity() {
+        let mut ids = vec![1, 2, 3, 4];
+        assert!(reorder_session_ids(&mut ids, 1, 3));
+        assert_eq!(ids, vec![2, 3, 1, 4]);
+        assert!(reorder_session_ids(&mut ids, 4, 2));
+        assert_eq!(ids, vec![4, 2, 3, 1]);
+        assert!(!reorder_session_ids(&mut ids, 2, 2));
+        assert!(!reorder_session_ids(&mut ids, 9, 2));
+        assert_eq!(ids, vec![4, 2, 3, 1]);
     }
 
     #[test]
@@ -2826,6 +2886,23 @@ impl AppView {
         .detach();
         window.focus(&self.terminal_focus);
         cx.notify();
+    }
+
+    fn reorder_sessions_before(&mut self, dragged_id: u64, target_id: u64) -> bool {
+        let mut ids = self.sessions.iter().map(|session| session.id).collect();
+        if !reorder_session_ids(&mut ids, dragged_id, target_id) {
+            return false;
+        }
+        let mut sessions: HashMap<u64, SshSession> = self
+            .sessions
+            .drain(..)
+            .map(|session| (session.id, session))
+            .collect();
+        self.sessions = ids
+            .into_iter()
+            .filter_map(|id| sessions.remove(&id))
+            .collect();
+        true
     }
 
     fn select_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -6910,6 +6987,7 @@ impl AppView {
     }
 
     fn session_tabs(&self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let preview_tokens = *tokens;
         let mut tabs = div()
             .id("session-tabs")
             .flex()
@@ -6950,6 +7028,24 @@ impl AppView {
                 .hover(|style| style.bg(tokens.surface_raised))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.select_session(id, window, cx);
+                }))
+                .on_drag(
+                    TabDragData {
+                        session_id: id,
+                        title: session.title.clone().into(),
+                    },
+                    move |data: &TabDragData, _, _, cx| {
+                        let title = data.title.clone();
+                        cx.new(|_| TabDragPreview {
+                            title: title.clone(),
+                            tokens: preview_tokens,
+                        })
+                    },
+                )
+                .on_drop(cx.listener(move |this, data: &TabDragData, _, cx| {
+                    if this.reorder_sessions_before(data.session_id, id) {
+                        cx.notify();
+                    }
                 }))
                 .child(components::status_dot(tokens, session_tone(session.state)))
                 .child(
