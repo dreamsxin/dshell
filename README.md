@@ -61,6 +61,13 @@ separately, and both server keys must already be present in known_hosts.
 Jump-host passwords and key passphrases are requested in their own fields and
 cleared when the connection starts.
 
+The Authentication section can save reusable templates in
+`%APPDATA%\dshell\auth_profiles.json`. A template stores the authentication
+method, optional identity-file path, optional jump-host reference and keep-alive
+interval. Passwords, passphrases and key material are never stored. Applying a
+template fills those fields and clears any secret inputs; it does not start a
+connection. Templates are edited explicitly with Save template and Delete.
+
 Use the `Files` button in the session toolbar to open the SFTP panel. It lists
 the remote working directory, supports entering directories and going up, and
 can upload or download single files and entire nested directories with the
