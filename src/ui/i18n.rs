@@ -152,6 +152,53 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Compose" => "编辑命令",
         "Quick commands" => "快捷命令",
         "Keyword highlights" => "关键词高亮",
+        "Triggers" => "触发器",
+        "Highlight" => "高亮",
+        "Notify" => "通知",
+        "Send text" => "发送文本",
+        "Send text + Enter" => "发送文本并回车",
+        "No triggers" => "没有触发器",
+        "Add a disabled rule, then enable it when you are ready." => {
+            "先添加一条禁用规则，确认后再启用。"
+        }
+        "Trigger keyword" => "触发关键词",
+        "Action" => "动作",
+        "Preset text" => "预设文本",
+        "Send + Enter" => "发送并回车",
+        "Paste only" => "仅粘贴",
+        "Add trigger" => "添加触发器",
+        "Enable trigger" => "启用触发器",
+        "Disable trigger" => "停用触发器",
+        "Remove trigger" => "删除触发器",
+        "Enable trigger engine" => "启用触发器引擎",
+        "Disable trigger engine" => "停用触发器引擎",
+        "Close triggers" => "关闭触发器",
+        "Rules are disabled by default. Actions are limited to highlighting, a toast, or preset text." => {
+            "规则默认禁用，动作仅限于高亮、Toast 提示或发送预设文本。"
+        }
+        "Enable individual rules to react to new terminal output." => {
+            "启用单条规则后，它才会响应新的终端输出。"
+        }
+        "The trigger engine is off until you enable it." => "启用触发器引擎后才会开始匹配。",
+        "Trigger engine enabled." => "触发器引擎已启用。",
+        "Trigger engine disabled." => "触发器引擎已停用。",
+        "Triggers are limited to 32 rules." => "触发器最多支持 32 条规则。",
+        "Trigger is already listed:" => "触发器已存在：",
+        "Added disabled trigger:" => "已添加禁用触发器：",
+        "Enabled trigger:" => "已启用触发器：",
+        "Disabled trigger:" => "已停用触发器：",
+        "Removed trigger:" => "已删除触发器：",
+        "Trigger matched:" => "触发器匹配：",
+        "Trigger could not send:" => "触发器无法发送：",
+        "Trigger could not send Enter:" => "触发器无法发送回车：",
+        "Trigger sent preset text for:" => "触发器已发送预设文本：",
+        "Enter a keyword for the trigger." => "请输入触发器关键词。",
+        "Trigger keywords are limited to 128 characters." => "触发器关键词最多 128 个字符。",
+        "Enter preset text for the trigger." => "请输入触发器预设文本。",
+        "Preset trigger text is limited to 1024 characters." => "触发器预设文本最多 1024 个字符。",
+        "preset command, for example: systemctl status ssh" => {
+            "预设命令，例如：systemctl status ssh"
+        }
         "Inspector" => "检查器",
         "Connection info" => "连接信息",
         "Transfers" => "传输",
@@ -263,7 +310,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Stop logging" => "停止记录",
         "Quick commands (Ctrl+Shift+S)" => "快捷命令 (Ctrl+Shift+S)",
         "Settings (Ctrl+Shift+O)" => "设置 (Ctrl+Shift+O)",
-        "dshell 0.1.4 · native GPUI · Esc closes" => "dshell 0.1.4 · 原生 GPUI · 按 Esc 关闭",
+        "dshell 0.1.5 · native GPUI · Esc closes" => "dshell 0.1.5 · 原生 GPUI · 按 Esc 关闭",
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",
@@ -320,6 +367,18 @@ mod tests {
     fn simplified_chinese_translates_shell_labels_and_preserves_names() {
         assert_eq!(translate(Language::SimplifiedChinese, "Settings"), "设置");
         assert_eq!(translate(Language::SimplifiedChinese, "Generate"), "生成");
+        assert_eq!(translate(Language::SimplifiedChinese, "Triggers"), "触发器");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Trigger engine enabled."),
+            "触发器引擎已启用。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "preset command, for example: systemctl status ssh"
+            ),
+            "预设命令，例如：systemctl status ssh"
+        );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Private key path"),
             "私钥路径"

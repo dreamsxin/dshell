@@ -2,6 +2,24 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.5] - 2026-10-25
+
+Adds a bounded trigger workflow for common terminal reactions.
+
+### Added
+
+- Add a Bell icon entry in the command bar and More menu for Triggers.
+- Keep the trigger engine and every rule disabled until explicitly enabled.
+- Support literal, case-insensitive rules with Highlight, Notify and preset-text actions.
+- Allow preset text to be sent with an explicit Enter choice through the existing terminal queue.
+- Merge enabled trigger highlights into live terminal and log replay rendering.
+- Localize the trigger panel, validation messages and input placeholders in Simplified Chinese.
+- Clear trigger latches when a session disconnects and keep side panels mutually exclusive.
+
+### Verification
+
+- `cargo fmt --all`, offline `cargo check --locked`, `cargo test --locked --offline` (107 passed, 9 ignored), `scripts\\verify-hard-constraints.ps1` and `scripts\\test-docker-ssh.ps1` passed.
+
 ## [0.1.4] - 2026-10-25
 
 Improves local SSH identity management for repeatable server connections.

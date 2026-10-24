@@ -10,6 +10,7 @@ mod shortcuts;
 mod snippets;
 mod ssh;
 mod terminal;
+mod triggers;
 mod ui;
 
 use std::{
@@ -50,6 +51,10 @@ use terminal::{
     TerminalSize, TerminalTheme,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+use triggers::{
+    MAX_TRIGGER_RULES, TriggerAction, TriggerActionKind, TriggerRule, matching_keys,
+    normalize_keyword, normalize_trigger_text,
+};
 use ui::{
     assets::AppAssets,
     components::{self, ButtonKind, ButtonSize, Tone},
@@ -1622,6 +1627,15 @@ struct AppView {
     keyword_highlighting_enabled: bool,
     keyword_message: String,
     keywords_visible: bool,
+    trigger_keyword_input: Entity<InputState>,
+    trigger_text_input: Entity<InputState>,
+    trigger_rules: Vec<TriggerRule>,
+    trigger_action_kind: TriggerActionKind,
+    trigger_send_enter: bool,
+    trigger_engine_enabled: bool,
+    trigger_message: String,
+    triggers_visible: bool,
+    trigger_latches: HashMap<u64, HashSet<String>>,
     settings: AppSettings,
     settings_store: Option<SettingsStore>,
     settings_font_family: Entity<InputState>,
@@ -1699,6 +1713,12 @@ impl AppView {
         let snippet_command = cx.new(|cx| InputState::new(window, cx).placeholder("uptime"));
         let keyword_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("ERROR or timeout"));
+        let trigger_keyword_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("ERROR or timeout"));
+        let trigger_text_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("preset command, for example: systemctl status ssh")
+        });
         let (settings_store, settings, settings_message) = match SettingsStore::discover() {
             Ok(store) => match store.load() {
                 Ok(settings) => (Some(store), settings, String::new()),
@@ -1873,6 +1893,15 @@ impl AppView {
             keyword_highlighting_enabled: false,
             keyword_message: String::new(),
             keywords_visible: false,
+            trigger_keyword_input,
+            trigger_text_input,
+            trigger_rules: Vec::new(),
+            trigger_action_kind: TriggerActionKind::Notify,
+            trigger_send_enter: false,
+            trigger_engine_enabled: false,
+            trigger_message: String::new(),
+            triggers_visible: false,
+            trigger_latches: HashMap::new(),
             settings_theme: settings.theme,
             settings_cursor: settings.cursor_style,
             settings_language: settings.language,
@@ -1934,6 +1963,11 @@ impl AppView {
             (&self.jump_passphrase, "Jump key passphrase"),
             (&self.snippet_name, "Snippet name"),
             (&self.keyword_input, "ERROR or timeout"),
+            (&self.trigger_keyword_input, "ERROR or timeout"),
+            (
+                &self.trigger_text_input,
+                "preset command, for example: systemctl status ssh",
+            ),
             (&self.search_input, "Search terminal"),
             (&self.key_path, "Path for the new private key"),
             (&self.new_key_passphrase, "Optional passphrase"),
@@ -2556,11 +2590,19 @@ impl AppView {
         let message = replay.message.clone();
         let frame = replay.frame.clone();
         let palette = self.settings.theme.palette();
-        let keyword_highlights = if self.keyword_highlighting_enabled {
+        let mut keyword_highlights = if self.keyword_highlighting_enabled {
             self.keyword_highlights.clone()
         } else {
             Vec::new()
         };
+        for keyword in self.trigger_highlight_keywords() {
+            if !keyword_highlights
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&keyword))
+            {
+                keyword_highlights.push(keyword);
+            }
+        }
         let has_timeline = !replay.timeline.is_empty();
         let timeline_label = replay.timeline_index.and_then(|index| {
             replay.timeline.get(index).map(|entry| {
@@ -3638,20 +3680,32 @@ impl AppView {
                     }
                     event => {
                         let result = this.update(cx, |view, cx| {
+                            let screen = match &event {
+                                UiEvent::Screen(frame) => Some(frame.clone()),
+                                _ => None,
+                            };
                             if apply_session_event(&mut view.sessions, id, event) {
                                 cx.notify();
+                            }
+                            if let Some(frame) = screen {
+                                view.process_triggers(id, &frame, cx);
                             }
                             if view
                                 .session(id)
                                 .is_some_and(|session| session.state == SessionState::Disconnected)
-                                && view
+                            {
+                                let had_auth_prompt = view
                                     .auth_prompt
                                     .as_ref()
-                                    .is_some_and(|prompt| prompt.session_id == id)
-                            {
-                                view.auth_prompt = None;
-                                view.auth_prompt_needs_clear = true;
-                                cx.notify();
+                                    .is_some_and(|prompt| prompt.session_id == id);
+                                let had_trigger_latch = view.trigger_latches.remove(&id).is_some();
+                                if had_auth_prompt {
+                                    view.auth_prompt = None;
+                                    view.auth_prompt_needs_clear = true;
+                                }
+                                if had_auth_prompt || had_trigger_latch {
+                                    cx.notify();
+                                }
                             }
                         });
                         if result.is_err() {
@@ -3673,6 +3727,15 @@ impl AppView {
                     if let Some(session) = view.session_mut(id) {
                         session.terminal_message =
                             "The SSH session ended unexpectedly. Connect again.".to_owned();
+                    }
+                    view.trigger_latches.remove(&id);
+                    if view
+                        .auth_prompt
+                        .as_ref()
+                        .is_some_and(|prompt| prompt.session_id == id)
+                    {
+                        view.auth_prompt = None;
+                        view.auth_prompt_needs_clear = true;
                     }
                     cx.notify();
                 }
@@ -3737,6 +3800,7 @@ impl AppView {
             self.search_target = None;
             self.search_message.clear();
         }
+        self.trigger_latches.remove(&id);
         let Some(session) = self.session_mut(id) else {
             return;
         };
@@ -3767,6 +3831,7 @@ impl AppView {
             self.tab_menu_session = None;
         }
         self.terminal_bounds.borrow_mut().remove(&id);
+        self.trigger_latches.remove(&id);
         self.snippet_targets.remove(&id);
         if self.sync_targets.remove(&id) && self.sync_targets.is_empty() {
             self.sync_input_enabled = false;
@@ -4378,11 +4443,19 @@ impl AppView {
     fn terminal_surface(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
         let terminal_bounds = Rc::clone(&self.terminal_bounds);
         let palette = self.settings.theme.palette();
-        let keyword_highlights = if self.keyword_highlighting_enabled {
+        let mut keyword_highlights = if self.keyword_highlighting_enabled {
             self.keyword_highlights.clone()
         } else {
             Vec::new()
         };
+        for keyword in self.trigger_highlight_keywords() {
+            if !keyword_highlights
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&keyword))
+            {
+                keyword_highlights.push(keyword);
+            }
+        }
         let mut terminal_view = div()
             .flex()
             .flex_col()
@@ -5567,6 +5640,9 @@ impl AppView {
         if opening {
             self.snippets_visible = false;
             self.settings_visible = false;
+            self.keys_visible = false;
+            self.keywords_visible = false;
+            self.triggers_visible = false;
         }
         if let Some((Some(sftp_tx), path)) = list_request {
             let _ = sftp_tx.try_send(SftpCommand::List(path));
@@ -6426,6 +6502,9 @@ impl AppView {
         if opening {
             self.snippets_visible = false;
             self.settings_visible = false;
+            self.keys_visible = false;
+            self.keywords_visible = false;
+            self.triggers_visible = false;
         }
         cx.notify();
     }
@@ -6820,6 +6899,8 @@ impl AppView {
         if self.snippets_visible {
             self.settings_visible = false;
             self.keys_visible = false;
+            self.keywords_visible = false;
+            self.triggers_visible = false;
         }
         if self.snippets_visible
             && let Some(session_id) = self.active_session_id
@@ -6837,6 +6918,7 @@ impl AppView {
             self.snippets_visible = false;
             self.settings_visible = false;
             self.keys_visible = false;
+            self.triggers_visible = false;
             if let Some(session_id) = self.active_session_id
                 && let Some(session) = self.session_mut(session_id)
             {
@@ -6849,6 +6931,244 @@ impl AppView {
             window.focus(&self.terminal_focus);
         }
         cx.notify();
+    }
+
+    fn toggle_triggers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.triggers_visible = !self.triggers_visible;
+        if self.triggers_visible {
+            self.keywords_visible = false;
+            self.snippets_visible = false;
+            self.settings_visible = false;
+            self.keys_visible = false;
+            if let Some(session_id) = self.active_session_id
+                && let Some(session) = self.session_mut(session_id)
+            {
+                session.sftp.visible = false;
+                session.forwards.visible = false;
+            }
+            let focus = self.trigger_keyword_input.read(cx).focus_handle(cx);
+            window.focus(&focus);
+        } else {
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn toggle_trigger_engine(&mut self, cx: &mut Context<Self>) {
+        self.trigger_engine_enabled = !self.trigger_engine_enabled;
+        if !self.trigger_engine_enabled {
+            self.trigger_latches.clear();
+        }
+        self.trigger_message = if self.trigger_engine_enabled {
+            self.tr("Trigger engine enabled.")
+        } else {
+            self.tr("Trigger engine disabled.")
+        };
+        cx.notify();
+    }
+
+    fn set_trigger_action_kind(&mut self, kind: TriggerActionKind, cx: &mut Context<Self>) {
+        self.trigger_action_kind = kind;
+        cx.notify();
+    }
+
+    fn toggle_trigger_send_enter(&mut self, cx: &mut Context<Self>) {
+        self.trigger_send_enter = !self.trigger_send_enter;
+        cx.notify();
+    }
+
+    fn add_trigger(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keyword = match normalize_keyword(self.trigger_keyword_input.read(cx).value().as_str())
+        {
+            Ok(keyword) => keyword,
+            Err(error) => {
+                self.trigger_message = self.tr(error);
+                cx.notify();
+                return;
+            }
+        };
+        if self.trigger_rules.len() >= MAX_TRIGGER_RULES {
+            self.trigger_message = self.tr("Triggers are limited to 32 rules.");
+            cx.notify();
+            return;
+        }
+        if self
+            .trigger_rules
+            .iter()
+            .any(|rule| rule.keyword.eq_ignore_ascii_case(&keyword))
+        {
+            self.trigger_message = format!("{} {keyword}", self.tr("Trigger is already listed:"));
+            cx.notify();
+            return;
+        }
+        let action = match self.trigger_action_kind {
+            TriggerActionKind::Highlight => TriggerAction::Highlight,
+            TriggerActionKind::Notify => TriggerAction::Notify,
+            TriggerActionKind::SendText => {
+                let text =
+                    match normalize_trigger_text(self.trigger_text_input.read(cx).value().as_str())
+                    {
+                        Ok(text) => text,
+                        Err(error) => {
+                            self.trigger_message = self.tr(error);
+                            cx.notify();
+                            return;
+                        }
+                    };
+                TriggerAction::SendText {
+                    text,
+                    send_enter: self.trigger_send_enter,
+                }
+            }
+        };
+        self.trigger_rules.push(TriggerRule {
+            keyword: keyword.clone(),
+            action,
+            enabled: false,
+        });
+        self.trigger_message = format!("{} {keyword}", self.tr("Added disabled trigger:"));
+        Self::set_input_value(&self.trigger_keyword_input, "", window, cx);
+        Self::set_input_value(&self.trigger_text_input, "", window, cx);
+        cx.notify();
+    }
+
+    fn toggle_trigger_rule(&mut self, keyword: &str, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .trigger_rules
+            .iter()
+            .position(|rule| rule.keyword.eq_ignore_ascii_case(keyword))
+        else {
+            cx.notify();
+            return;
+        };
+        let (enabled, rule_keyword) = {
+            let rule = &mut self.trigger_rules[index];
+            rule.enabled = !rule.enabled;
+            let key = rule.match_key();
+            for latched in self.trigger_latches.values_mut() {
+                latched.remove(&key);
+            }
+            (rule.enabled, rule.keyword.clone())
+        };
+        self.trigger_message = if enabled {
+            format!("{} {rule_keyword}", self.tr("Enabled trigger:"))
+        } else {
+            format!("{} {rule_keyword}", self.tr("Disabled trigger:"))
+        };
+        cx.notify();
+    }
+
+    fn remove_trigger(&mut self, keyword: &str, cx: &mut Context<Self>) {
+        self.trigger_rules
+            .retain(|rule| !rule.keyword.eq_ignore_ascii_case(keyword));
+        let key = keyword.to_lowercase();
+        for latched in self.trigger_latches.values_mut() {
+            latched.remove(&key);
+        }
+        self.trigger_message = format!("{} {keyword}", self.tr("Removed trigger:"));
+        cx.notify();
+    }
+
+    fn process_triggers(&mut self, session_id: u64, frame: &TerminalFrame, cx: &mut Context<Self>) {
+        if !self.trigger_engine_enabled {
+            self.trigger_latches.remove(&session_id);
+            return;
+        }
+        let matches = matching_keys(&triggers::frame_text(frame), &self.trigger_rules);
+        let newly_matched = {
+            let previous = self.trigger_latches.entry(session_id).or_default();
+            let newly_matched = self
+                .trigger_rules
+                .iter()
+                .filter(|rule| {
+                    let key = rule.match_key();
+                    matches.contains(&key) && !previous.contains(&key)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            previous.retain(|key| matches.contains(key));
+            previous.extend(matches.iter().cloned());
+            newly_matched
+        };
+        for rule in newly_matched {
+            self.fire_trigger(session_id, &rule, cx);
+        }
+    }
+
+    fn fire_trigger(&mut self, session_id: u64, rule: &TriggerRule, cx: &mut Context<Self>) {
+        match &rule.action {
+            TriggerAction::Highlight => {}
+            TriggerAction::Notify => {
+                self.show_toast(
+                    format!("{} {}", self.tr("Trigger matched:"), rule.keyword),
+                    Tone::Warning,
+                    cx,
+                );
+            }
+            TriggerAction::SendText { text, send_enter } => {
+                if self
+                    .session(session_id)
+                    .is_none_or(|session| session.state != SessionState::Connected)
+                {
+                    return;
+                }
+                if let Err(error) = enqueue_session_request(
+                    &self.sessions,
+                    session_id,
+                    TerminalRequest::Paste(text.clone()),
+                ) {
+                    self.show_toast(
+                        format!("{} {error}", self.tr("Trigger could not send:")),
+                        Tone::Danger,
+                        cx,
+                    );
+                    return;
+                }
+                if *send_enter {
+                    let key = TerminalKeyInput {
+                        key: "enter".to_owned(),
+                        text: None,
+                        control: false,
+                        alt: false,
+                        shift: false,
+                        platform: false,
+                        function: false,
+                    };
+                    if let Err(error) = enqueue_session_request(
+                        &self.sessions,
+                        session_id,
+                        TerminalRequest::Key(key),
+                    ) {
+                        self.show_toast(
+                            format!("{} {error}", self.tr("Trigger could not send Enter:")),
+                            Tone::Danger,
+                            cx,
+                        );
+                        return;
+                    }
+                }
+                self.show_toast(
+                    format!(
+                        "{} {}",
+                        self.tr("Trigger sent preset text for:"),
+                        rule.keyword
+                    ),
+                    Tone::Accent,
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn trigger_highlight_keywords(&self) -> Vec<String> {
+        if !self.trigger_engine_enabled {
+            return Vec::new();
+        }
+        self.trigger_rules
+            .iter()
+            .filter(|rule| rule.enabled && matches!(&rule.action, TriggerAction::Highlight))
+            .map(|rule| rule.keyword.clone())
+            .collect()
     }
 
     fn toggle_keyword_highlighting(&mut self, cx: &mut Context<Self>) {
@@ -7166,6 +7486,292 @@ impl AppView {
                         "Literal matches are highlighted in the terminal."
                     } else {
                         "Highlighting is off until you enable it."
+                    })
+                    .when(!message.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .pt(px(ui_tokens::SPACE_1))
+                                .text_color(tokens.accent_text)
+                                .child(message),
+                        )
+                    }),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
+    fn triggers_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let rules = self.trigger_rules.clone();
+        let message = self.trigger_message.clone();
+        let mut list = div()
+            .id("trigger-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .gap(px(ui_tokens::SPACE_1))
+            .overflow_y_scroll();
+        if rules.is_empty() {
+            list = list.child(components::empty_state(
+                &tokens,
+                self.tr("No triggers"),
+                self.tr("Add a disabled rule, then enable it when you are ready."),
+            ));
+        } else {
+            for (index, rule) in rules.into_iter().enumerate() {
+                let toggle_keyword = rule.keyword.clone();
+                let delete_keyword = rule.keyword.clone();
+                let action_label = match rule.action.kind() {
+                    TriggerActionKind::Highlight => self.tr("Highlight"),
+                    TriggerActionKind::Notify => self.tr("Notify"),
+                    TriggerActionKind::SendText => match &rule.action {
+                        TriggerAction::SendText {
+                            send_enter: true, ..
+                        } => self.tr("Send text + Enter"),
+                        TriggerAction::SendText { .. } => self.tr("Send text"),
+                        _ => unreachable!("trigger action kind must match action"),
+                    },
+                };
+                list = list.child(
+                    div()
+                        .id(("trigger-row", index))
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_2))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(tokens.border_subtle)
+                        .bg(tokens.surface)
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                ("trigger-toggle", index),
+                                if rule.enabled {
+                                    IconName::Eye
+                                } else {
+                                    IconName::EyeOff
+                                },
+                                if rule.enabled {
+                                    ButtonKind::Secondary
+                                } else {
+                                    ButtonKind::Ghost
+                                },
+                                ButtonSize::Small,
+                                if rule.enabled {
+                                    self.tr("Disable trigger")
+                                } else {
+                                    self.tr("Enable trigger")
+                                },
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.toggle_trigger_rule(&toggle_keyword, cx);
+                                },
+                            )),
+                        )
+                        .child(Icon::new(IconName::Bell).with_size(Size::Small).text_color(
+                            if rule.enabled {
+                                tokens.warning_text
+                            } else {
+                                tokens.text_disabled
+                            },
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(ui_tokens::FONT_BODY))
+                                        .text_color(tokens.text_primary)
+                                        .child(rule.keyword),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(ui_tokens::FONT_CAPTION))
+                                        .text_color(tokens.text_secondary)
+                                        .child(action_label),
+                                ),
+                        )
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                ("trigger-delete", index),
+                                IconName::Delete,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Remove trigger"),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.remove_trigger(&delete_keyword, cx);
+                                },
+                            )),
+                        ),
+                );
+            }
+        }
+
+        let mut action_modes = div().flex().items_center().gap(px(ui_tokens::SPACE_1));
+        for (index, kind) in TriggerActionKind::ALL.into_iter().enumerate() {
+            let selected = self.trigger_action_kind == kind;
+            action_modes = action_modes.child(
+                components::button(
+                    &tokens,
+                    ("trigger-action", index),
+                    self.tr(kind.label()),
+                    if selected {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_trigger_action_kind(kind, cx);
+                })),
+            );
+        }
+
+        let mut editor = div()
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .p(px(ui_tokens::SPACE_2))
+            .border_b_1()
+            .border_color(tokens.border_subtle)
+            .child(components::label_text(&tokens, self.tr("Trigger keyword")))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            TextInput::new(&self.trigger_keyword_input)
+                                .h(px(ui_tokens::CONTROL_HEIGHT_SM)),
+                        ),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            "trigger-add",
+                            IconName::Plus,
+                            ButtonKind::Primary,
+                            ButtonSize::Small,
+                            self.tr("Add trigger"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_trigger(window, cx);
+                        })),
+                    ),
+            )
+            .child(components::label_text(&tokens, self.tr("Action")))
+            .child(action_modes);
+        if self.trigger_action_kind == TriggerActionKind::SendText {
+            editor = editor
+                .child(components::label_text(&tokens, self.tr("Preset text")))
+                .child(TextInput::new(&self.trigger_text_input).h(px(ui_tokens::CONTROL_HEIGHT_SM)))
+                .child(
+                    components::button(
+                        &tokens,
+                        "trigger-send-mode",
+                        if self.trigger_send_enter {
+                            self.tr("Send + Enter")
+                        } else {
+                            self.tr("Paste only")
+                        },
+                        if self.trigger_send_enter {
+                            ButtonKind::Secondary
+                        } else {
+                            ButtonKind::Ghost
+                        },
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_trigger_send_enter(cx);
+                    })),
+                );
+        }
+
+        div()
+            .id("triggers-panel")
+            .flex()
+            .flex_col()
+            .w(px(ui_tokens::QUICK_COMMAND_PANEL_WIDTH))
+            .flex_shrink_0()
+            .min_h_0()
+            .ml(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .bg(tokens.surface_raised)
+            .text_color(tokens.text_primary)
+            .child(
+                components::panel_header(&tokens, self.tr("Triggers")).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "trigger-engine-toggle",
+                                if self.trigger_engine_enabled {
+                                    IconName::Eye
+                                } else {
+                                    IconName::EyeOff
+                                },
+                                if self.trigger_engine_enabled {
+                                    ButtonKind::Secondary
+                                } else {
+                                    ButtonKind::Ghost
+                                },
+                                ButtonSize::Small,
+                                if self.trigger_engine_enabled {
+                                    self.tr("Disable trigger engine")
+                                } else {
+                                    self.tr("Enable trigger engine")
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_trigger_engine(cx);
+                            })),
+                        )
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "trigger-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close triggers"),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_triggers(window, cx);
+                            })),
+                        ),
+                ),
+            )
+            .child(components::help_text(
+                &tokens,
+                self.tr("Rules are disabled by default. Actions are limited to highlighting, a toast, or preset text."),
+            ))
+            .child(editor)
+            .child(
+                div()
+                    .px(px(ui_tokens::SPACE_2))
+                    .pb(px(ui_tokens::SPACE_2))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_secondary)
+                    .child(if self.trigger_engine_enabled {
+                        self.tr("Enable individual rules to react to new terminal output.")
+                    } else {
+                        self.tr("The trigger engine is off until you enable it.")
                     })
                     .when(!message.is_empty(), |row| {
                         row.child(
@@ -7609,6 +8215,8 @@ impl AppView {
         if self.settings_visible {
             self.snippets_visible = false;
             self.keys_visible = false;
+            self.keywords_visible = false;
+            self.triggers_visible = false;
             if let Some(session_id) = self.active_session_id
                 && let Some(session) = self.session_mut(session_id)
             {
@@ -7829,6 +8437,8 @@ impl AppView {
             self.refresh_existing_keys();
             self.settings_visible = false;
             self.snippets_visible = false;
+            self.keywords_visible = false;
+            self.triggers_visible = false;
             if let Some(session_id) = self.active_session_id
                 && let Some(session) = self.session_mut(session_id)
             {
@@ -9566,6 +10176,23 @@ impl AppView {
             .child(
                 components::icon_button(
                     tokens,
+                    "toggle-triggers",
+                    IconName::Bell,
+                    if self.triggers_visible || self.trigger_engine_enabled {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    self.tr("Triggers"),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_triggers(window, cx);
+                })),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
                     "toggle-snippets",
                     IconName::Asterisk,
                     if self.snippets_visible {
@@ -10762,6 +11389,21 @@ impl AppView {
             .child(
                 menu_item(
                     tokens,
+                    "menu-triggers",
+                    IconName::Bell,
+                    self.tr("Triggers"),
+                    "",
+                    self.triggers_visible || self.trigger_engine_enabled,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    this.toggle_triggers(window, cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
                     "menu-snippets",
                     IconName::Asterisk,
                     self.tr("Quick commands"),
@@ -10810,7 +11452,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.4 · native GPUI · Esc closes"),
+                        self.tr("dshell 0.1.5 · native GPUI · Esc closes"),
                     )),
             );
 
@@ -11680,6 +12322,9 @@ impl Render for AppView {
         }
         if self.keywords_visible {
             terminal_workspace = terminal_workspace.child(self.keywords_panel(cx));
+        }
+        if self.triggers_visible {
+            terminal_workspace = terminal_workspace.child(self.triggers_panel(cx));
         }
 
         let mut content_row = div().flex().flex_1().min_h_0().min_w_0().child(sidebar);

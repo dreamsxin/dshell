@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.4`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.5`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -251,9 +251,11 @@ freshly built Windows binary:
 ![Simplified Chinese SSH connection form](artifacts/dshell-v0.1.2-chinese-connection-form.png)
 
 Use the `Keyword highlights` button to keep up to 32 literal keywords in memory.
-Highlighting is disabled by default, case-insensitive, applies to live terminals
-and log replay, and can be enabled or disabled with the eye icon. Rules never
-execute commands; trigger automation remains outside the current scope.
+Highlighting is disabled by default, case-insensitive, and applies to live
+terminals and log replay. The `Triggers` Bell button adds bounded rules that are
+also disabled by default. Each rule can highlight matching output, show a Toast,
+or send preset text through the existing terminal queue, optionally followed by
+Enter. Trigger rules never execute arbitrary scripts and are kept in memory only.
 
 dshell targets the daily Xshell-style workflow as an open-source, native
 application: session management with groups and recents, tabbed and split
@@ -261,7 +263,7 @@ terminals, an inspector for transfers/tunnels/connection/logging, SFTP with
 resume, local/remote/SOCKS5 forwarding, timestamped logs with a replay timeline,
 and Ed25519/RSA/ECDSA key generation. Telnet, Rlogin, Serial and RDP are outside
 the current scope. See [ROADMAP.md](ROADMAP.md) for the capability matrix and
-the remaining trigger evaluation.
+remaining work.
 
 ## Test and Verify
 
