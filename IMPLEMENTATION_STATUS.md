@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：已有 OpenSSH 私钥修改口令完成并准备发布 `v0.1.6`。Keys 面板为每个发现的身份提供修改口令图标和简体中文弹窗；旧口令先验证，错误时原文件保持不变；新口令为空时移除加密；修改过程使用同目录临时文件和 Windows 原子替换，并保留 OpenSSH 公钥注释。旧口令、新口令只在 `Zeroizing` 中短暂存在，输入在取消、提交和失败后清空。新增 8 个 keygen 测试覆盖旧口令失败保护、加密/解密转换、未加密密钥加口令和注释保留。`cargo fmt --all`、离线 `cargo check --locked`、`cargo test --locked --offline`（109 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。真实 Windows DPI、中文 IME、Keys 弹窗实际交互仍需用户手工烟测。
+
 2026-10-25，Windows/MSVC：受限触发器完成并准备发布 `v0.1.5`。命令条和 More 菜单新增 Bell 图标入口；触发器引擎与单条规则默认关闭，规则最多 32 条，关键词按字面量不区分大小写匹配。动作限定为终端高亮、Toast 提示或通过既有终端队列发送预设文本，可选择追加 Enter；不执行任意脚本，规则只保存在内存。实时终端和日志回放共用触发器高亮，断开会话清理锁存，SFTP/隧道/快捷命令/设置/密钥/关键词面板保持互斥。新增触发器面板、输入提示和验证文案的简体中文翻译。`cargo fmt --all`、离线 `cargo check --locked`、`cargo test --locked --offline`（107 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。真实 Windows DPI、中文 IME 和触发器实际桌面交互仍需用户手工烟测。
 
 2026-10-25，Windows/MSVC：已有 OpenSSH 身份发现与复用、Keys 弹窗简体中文本地化完成，准备发布 `v0.1.4`。Keys 面板只扫描用户 `~/.ssh` 目录中的候选私钥文件，不读取私钥内容；显示已有公钥算法和路径，可一键填入主机认证表单，并在 `.pub` 文件可用时复制公钥。生成新密钥后自动刷新列表；算法说明、路径、口令、生成和复制操作均已接入简体中文翻译。新增密钥发现过滤、排序、公钥注释行处理和异常路径单测；`cargo fmt --all`、离线 `cargo check --locked`、`cargo test --locked --offline`（104 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。Windows 人工截图确认新鲜构建的中文 Keys 面板，证据保存在 `artifacts/dshell-v0.1.4-keys-cn.jpg`。
@@ -179,7 +181,7 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 - 同步输入目标只保存在当前进程，不跨重启；同步范围是键盘、粘贴和组合输入，不包含鼠标、滚动、resize 或片段广播。多会话广播尚无“全选/按分组选择”。关键字高亮与受限触发器规则只保存在当前进程，均最多 32 条且仅支持字面量、不区分大小写匹配；触发器动作限定为高亮、Toast 或预设文本，不执行本地 Shell 或任意脚本。快速命令网格已交付，Xshell 对照能力矩阵与阶段 9 顺序见 ROADMAP。
 - 侧栏分组是单层字符串，已支持拖拽主机到现有分组或 UNGROUPED；尚不支持拖拽创建/重排分组、嵌套目录或分组折叠状态持久化；最近连接记录在连接启动时写入，不区分认证失败和成功握手。
 
-当前发布版 `v0.1.5`、维护版本 `v0.1.4`、`v0.1.3`、`v0.1.2`、`v0.1.1` 和首个公开版本 `v0.1.0` 的发布范围及验证记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前发布版 `v0.1.6`、维护版本 `v0.1.5`、`v0.1.4`、`v0.1.3`、`v0.1.2`、`v0.1.1` 和首个公开版本 `v0.1.0` 的发布范围及验证记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 下一段接力
 

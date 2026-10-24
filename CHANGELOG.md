@@ -2,6 +2,24 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.6] - 2026-10-25
+
+Adds local SSH identity passphrase management.
+
+### Added
+
+- Add a localized Change passphrase action for every discovered OpenSSH private key.
+- Verify the old passphrase before writing and keep the original file unchanged on failure.
+- Allow an empty new passphrase to remove encryption while preserving the key comment.
+- Stage updates beside the original key and atomically replace it, including Windows `MoveFileExW` replacement semantics.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, offline `cargo check --locked`, `cargo test --locked --offline` (109 passed, 9 ignored), and `scripts\\verify-hard-constraints.ps1` passed.
+- `scripts\\test-docker-ssh.ps1` passed all 9 Docker SSH tests.
+- Existing Windows screenshots confirm the Simplified Chinese shell and Keys modal; the new passphrase modal and real DPI/IME behavior remain manual checks.
+
 ## [0.1.5] - 2026-10-25
 
 Adds a bounded trigger workflow for common terminal reactions.

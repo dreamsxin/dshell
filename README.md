@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.5`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.6`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -35,6 +35,13 @@ keyboard as you would in a remote terminal. The terminal grid follows window
 resizing. When the remote application enables mouse tracking, clicks, motion,
 and the wheel are sent to it; otherwise, left-button dragging selects text and
 the wheel browses terminal history.
+
+For a repeatable local manual test, run
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start-docker-ssh-manual.ps1`.
+It starts a temporary Ubuntu OpenSSH service bound only to `127.0.0.1:2222`
+and prints a generated username, password, SHA256 host-key fingerprint and the
+`known_hosts` line for review. Add that line manually only after checking the
+fingerprint; stop the service with `docker rm --force dshell-ssh-manual`.
 
 Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
 active session. Remote exit and connection failure clear the terminal view so a
@@ -132,7 +139,11 @@ field or copy a matching `.pub` key. It also generates new key pairs and
 supports Ed25519, RSA 3072/4096 and ECDSA P-256/P-384. Choose the private key
 path, an optional passphrase and a comment; the private key and a matching `.pub`
 file are created without overwriting existing files. The passphrase is not
-stored, and Unix key files are created with mode `0600`.
+stored, and Unix key files are created with mode `0600`. Each discovered key
+also has a Change passphrase action. The old passphrase is checked before any
+write, an empty new passphrase removes encryption, and the public-key comment
+is preserved. Updates are staged beside the original key and replaced
+atomically.
 
 Use the `Settings` button to change the terminal font family, size (9-32 px),
 color theme (Default dark, Solarized dark or Solarized light), cursor style

@@ -1655,6 +1655,11 @@ struct AppView {
     key_algorithm: keygen::KeyAlgorithm,
     existing_keys: Vec<keygen::ExistingKey>,
     key_discovery_message: String,
+    key_change_path: Option<PathBuf>,
+    key_change_old_passphrase: Entity<InputState>,
+    key_change_new_passphrase: Entity<InputState>,
+    key_change_message: String,
+    key_change_visible: bool,
     auth_prompt: Option<AuthPromptState>,
     auth_prompt_inputs: Vec<Entity<InputState>>,
     auth_prompt_plain_inputs: Vec<Entity<InputState>>,
@@ -1777,6 +1782,12 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Optional passphrase"));
         new_key_passphrase.update(cx, |state, cx| state.set_masked(true, window, cx));
         let key_comment = cx.new(|cx| InputState::new(window, cx).default_value("dshell"));
+        let key_change_old_passphrase =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Current passphrase"));
+        key_change_old_passphrase.update(cx, |state, cx| state.set_masked(true, window, cx));
+        let key_change_new_passphrase =
+            cx.new(|cx| InputState::new(window, cx).placeholder("New passphrase (optional)"));
+        key_change_new_passphrase.update(cx, |state, cx| state.set_masked(true, window, cx));
         let host = cx.new(|cx| InputState::new(window, cx).placeholder("server.example.com"));
         let port = cx.new(|cx| InputState::new(window, cx).default_value("22"));
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("user"));
@@ -1921,6 +1932,11 @@ impl AppView {
             key_algorithm: keygen::KeyAlgorithm::default(),
             existing_keys: Vec::new(),
             key_discovery_message: String::new(),
+            key_change_path: None,
+            key_change_old_passphrase,
+            key_change_new_passphrase,
+            key_change_message: String::new(),
+            key_change_visible: false,
             auth_prompt: None,
             auth_prompt_inputs,
             auth_prompt_plain_inputs,
@@ -1971,6 +1987,8 @@ impl AppView {
             (&self.search_input, "Search terminal"),
             (&self.key_path, "Path for the new private key"),
             (&self.new_key_passphrase, "Optional passphrase"),
+            (&self.key_change_old_passphrase, "Current passphrase"),
+            (&self.key_change_new_passphrase, "New passphrase (optional)"),
             (&self.host, "server.example.com"),
             (&self.username, "user"),
             (&self.password, "Password"),
@@ -8435,6 +8453,9 @@ impl AppView {
         self.keys_visible = !self.keys_visible;
         if self.keys_visible {
             self.refresh_existing_keys();
+            self.key_change_visible = false;
+            self.key_change_path = None;
+            self.key_change_message.clear();
             self.settings_visible = false;
             self.snippets_visible = false;
             self.keywords_visible = false;
@@ -8447,6 +8468,11 @@ impl AppView {
             }
             self.request_overlay_focus();
         } else {
+            self.key_change_visible = false;
+            self.key_change_path = None;
+            self.key_change_message.clear();
+            Self::set_input_value(&self.key_change_old_passphrase, "", window, cx);
+            Self::set_input_value(&self.key_change_new_passphrase, "", window, cx);
             window.focus(&self.terminal_focus);
         }
         cx.notify();
@@ -8486,6 +8512,80 @@ impl AppView {
         );
         self.show_toast(self.tr("Identity file selected."), Tone::Success, cx);
         cx.notify();
+    }
+
+    fn open_key_passphrase(
+        &mut self,
+        key: &keygen::ExistingKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.key_change_path = Some(key.private_path.clone());
+        self.key_change_message.clear();
+        Self::set_input_value(&self.key_change_old_passphrase, "", window, cx);
+        Self::set_input_value(&self.key_change_new_passphrase, "", window, cx);
+        self.key_change_visible = true;
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn close_key_passphrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_change_visible = false;
+        self.key_change_path = None;
+        self.key_change_message.clear();
+        Self::set_input_value(&self.key_change_old_passphrase, "", window, cx);
+        Self::set_input_value(&self.key_change_new_passphrase, "", window, cx);
+        if self.keys_visible {
+            self.request_overlay_focus();
+        } else {
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn change_key_passphrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.key_change_path.clone() else {
+            self.key_change_message = self.tr("No key selected.");
+            cx.notify();
+            return;
+        };
+        let old_passphrase =
+            Zeroizing::new(self.key_change_old_passphrase.read(cx).text().to_string());
+        let new_passphrase =
+            Zeroizing::new(self.key_change_new_passphrase.read(cx).text().to_string());
+        Self::set_input_value(&self.key_change_old_passphrase, "", window, cx);
+        Self::set_input_value(&self.key_change_new_passphrase, "", window, cx);
+        self.key_change_message = self.tr("Changing passphrase...");
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    keygen::change_passphrase(
+                        &path,
+                        old_passphrase.as_str(),
+                        new_passphrase.as_str(),
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.key_change_visible = false;
+                        view.key_change_path = None;
+                        view.key_change_message.clear();
+                        view.refresh_existing_keys();
+                        view.request_overlay_focus();
+                        view.show_toast(view.tr("Passphrase updated."), Tone::Success, cx);
+                    }
+                    Err(error) => {
+                        view.key_change_message = format!("{error:#}");
+                        view.show_toast(view.tr("Passphrase update failed."), Tone::Danger, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn generate_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -8595,6 +8695,7 @@ impl AppView {
                 let public_key = key.public_key.clone();
                 let path_summary = private_path.display().to_string();
                 let use_tooltip = self.tr("Use for SSH");
+                let change_tooltip = self.tr("Change passphrase");
                 let copy_tooltip = self.tr("Copy public key");
                 let mut actions = div().flex().items_center().gap(px(ui_tokens::SPACE_1));
                 actions = actions.child(
@@ -8610,6 +8711,20 @@ impl AppView {
                         if let Some(key) = this.existing_keys.get(index).cloned() {
                             this.use_existing_key(&key, window, cx);
                         }
+                    })),
+                );
+                let key_for_change = key.clone();
+                actions = actions.child(
+                    components::icon_button(
+                        &tokens,
+                        ("existing-key-change-passphrase", index),
+                        IconName::Replace,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        change_tooltip,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_key_passphrase(&key_for_change, window, cx);
                     })),
                 );
                 if let Some(public_key) = public_key {
@@ -8795,6 +8910,107 @@ impl AppView {
                         ),
                     )
                     .child(body),
+            )
+            .into_any_element()
+    }
+
+    fn key_change_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let path = self
+            .key_change_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.tr("No key selected."));
+        let message = self.key_change_message.clone();
+        let mut body = div()
+            .id("key-change-body")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_3))
+            .p(px(ui_tokens::SPACE_4))
+            .child(components::help_text(
+                &tokens,
+                format!("{}: {path}", self.tr("Private key path")),
+            ))
+            .child(components::field(
+                &tokens,
+                self.tr("Current passphrase"),
+                &self.key_change_old_passphrase,
+                true,
+            ))
+            .child(components::field(
+                &tokens,
+                self.tr("New passphrase (optional)"),
+                &self.key_change_new_passphrase,
+                true,
+            ))
+            .child(components::help_text(
+                &tokens,
+                self.tr("Leave the new passphrase empty to remove encryption."),
+            ));
+        if !message.is_empty() {
+            body = body.child(components::help_text(&tokens, message));
+        }
+        components::modal_overlay(&tokens, "key-change-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_key_passphrase(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "key-change-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .child(
+                        components::modal_header(&tokens, self.tr("Change key passphrase")).child(
+                            components::icon_button(
+                                &tokens,
+                                "key-change-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close"),
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.close_key_passphrase(window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .child(body)
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "key-change-cancel",
+                                    self.tr("Cancel"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.close_key_passphrase(window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "key-change-save",
+                                    self.tr("Update passphrase"),
+                                    ButtonKind::Primary,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.change_key_passphrase(window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -11452,7 +11668,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.5 · native GPUI · Esc closes"),
+                        self.tr("dshell 0.1.6 · native GPUI · Esc closes"),
                     )),
             );
 
@@ -12396,6 +12612,9 @@ impl Render for AppView {
         }
         if self.keys_visible {
             root = root.child(self.keys_panel(cx));
+        }
+        if self.keys_visible && self.key_change_visible {
+            root = root.child(self.key_change_panel(cx));
         }
         if self.settings_visible {
             root = root.child(self.settings_panel(cx));

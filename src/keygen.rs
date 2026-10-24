@@ -3,6 +3,7 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -174,6 +175,141 @@ pub fn generate(
     })
 }
 
+/// Replace the passphrase on an existing OpenSSH private key.
+///
+/// The old passphrase is checked before any write. The new passphrase may be
+/// empty, which writes the key without encryption. The replacement is staged
+/// beside the original and then atomically swapped into place.
+pub fn change_passphrase(path: &Path, old_passphrase: &str, new_passphrase: &str) -> Result<()> {
+    let pem = Zeroizing::new(
+        fs::read_to_string(path)
+            .with_context(|| format!("Could not read private key {}", path.display()))?,
+    );
+    let parsed = PrivateKey::from_openssh(&*pem)
+        .with_context(|| format!("Could not parse private key {}", path.display()))?;
+    let decrypted = if parsed.is_encrypted() {
+        parsed
+            .decrypt(old_passphrase)
+            .with_context(|| format!("Could not decrypt private key {}", path.display()))?
+    } else {
+        if !old_passphrase.is_empty() {
+            bail!("The private key is not encrypted.");
+        }
+        parsed
+    };
+    let comment = decrypted.comment().to_string();
+
+    let mut rng = rng();
+    let mut updated = if new_passphrase.is_empty() {
+        decrypted
+    } else {
+        decrypted
+            .encrypt(&mut rng, new_passphrase)
+            .context("Could not encrypt private key")?
+    };
+    updated.set_comment(comment);
+    let encoded = updated
+        .to_openssh(LineEnding::LF)
+        .context("Could not encode private key")?;
+    let temporary = temporary_key_path(path);
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).with_context(|| {
+            format!(
+                "Could not create temporary private key {}",
+                temporary.display()
+            )
+        })?;
+        file.write_all(encoded.as_bytes()).with_context(|| {
+            format!(
+                "Could not write temporary private key {}",
+                temporary.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!(
+                "Could not flush temporary private key {}",
+                temporary.display()
+            )
+        })?;
+        drop(file);
+        replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn temporary_key_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("identity");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    parent.join(format!(".{name}.dshell-passphrase-{timestamp}.tmp"))
+}
+
+fn replace_file(temporary: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+
+        let temporary: Vec<u16> = temporary
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = unsafe {
+            MoveFileExW(
+                temporary.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "Could not replace private key {}",
+                    destination_name(destination.as_slice())
+                )
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, destination)
+            .with_context(|| format!("Could not replace private key {}", destination.display()))?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn destination_name(path: &[u16]) -> String {
+    String::from_utf16_lossy(path)
+        .trim_end_matches('\0')
+        .to_owned()
+}
+
 /// Discover likely OpenSSH private-key files in a user's `.ssh` directory.
 ///
 /// The function deliberately uses conservative filename rules and ignores
@@ -252,7 +388,7 @@ fn public_key_path(path: &Path) -> PathBuf {
 mod tests {
     use std::fs;
 
-    use super::{KeyAlgorithm, discover, generate};
+    use super::{KeyAlgorithm, change_passphrase, discover, generate};
     use russh::keys::PrivateKey;
 
     #[test]
@@ -299,6 +435,56 @@ mod tests {
         let key = PrivateKey::from_openssh(&pem).unwrap();
         assert!(!key.is_encrypted());
         assert!(!generated.public_key.ends_with(' '));
+    }
+
+    #[test]
+    fn changes_passphrase_without_touching_the_file_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("id_ed25519");
+        let generated = generate(
+            &path,
+            "old passphrase",
+            "operator@dshell",
+            KeyAlgorithm::Ed25519,
+        )
+        .unwrap();
+        let original = fs::read(&path).unwrap();
+
+        assert!(change_passphrase(&path, "wrong passphrase", "new passphrase").is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        change_passphrase(&path, "old passphrase", "new passphrase").unwrap();
+        let pem = fs::read_to_string(&path).unwrap();
+        let key = PrivateKey::from_openssh(&pem).unwrap();
+        assert!(key.is_encrypted());
+        assert!(key.decrypt("old passphrase").is_err());
+        let decrypted = key.decrypt("new passphrase").unwrap();
+        assert_eq!(
+            decrypted.public_key().to_openssh().unwrap(),
+            generated.public_key
+        );
+
+        change_passphrase(&path, "new passphrase", "").unwrap();
+        let pem = fs::read_to_string(&path).unwrap();
+        let key = PrivateKey::from_openssh(&pem).unwrap();
+        assert!(!key.is_encrypted());
+    }
+
+    #[test]
+    fn adds_passphrase_to_an_unencrypted_key_only_with_an_empty_old_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("id_ed25519");
+        generate(&path, "", "operator@dshell", KeyAlgorithm::Ed25519).unwrap();
+        let original = fs::read(&path).unwrap();
+
+        assert!(change_passphrase(&path, "unexpected", "new passphrase").is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        change_passphrase(&path, "", "new passphrase").unwrap();
+        let pem = fs::read_to_string(&path).unwrap();
+        let key = PrivateKey::from_openssh(&pem).unwrap();
+        assert!(key.is_encrypted());
+        assert!(key.decrypt("new passphrase").is_ok());
     }
 
     #[test]

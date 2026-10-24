@@ -252,6 +252,16 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         }
         "Copy public key" => "复制公钥",
         "Public key copied." => "公钥已复制。",
+        "Change passphrase" => "修改口令",
+        "Change key passphrase" => "修改密钥口令",
+        "Current passphrase" => "当前口令",
+        "New passphrase (optional)" => "新口令（可选）",
+        "Leave the new passphrase empty to remove encryption." => "新口令留空可移除加密。",
+        "Update passphrase" => "更新口令",
+        "No key selected." => "未选择密钥。",
+        "Changing passphrase..." => "正在修改口令……",
+        "Passphrase updated." => "密钥口令已更新。",
+        "Passphrase update failed." => "密钥口令更新失败。",
         "Created" => "已创建",
         "Generating" => "正在生成",
         "key pair generated" => "密钥对已生成",
@@ -310,7 +320,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Stop logging" => "停止记录",
         "Quick commands (Ctrl+Shift+S)" => "快捷命令 (Ctrl+Shift+S)",
         "Settings (Ctrl+Shift+O)" => "设置 (Ctrl+Shift+O)",
-        "dshell 0.1.5 · native GPUI · Esc closes" => "dshell 0.1.5 · 原生 GPUI · 按 Esc 关闭",
+        "dshell 0.1.6 · native GPUI · Esc closes" => "dshell 0.1.6 · 原生 GPUI · 按 Esc 关闭",
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",
@@ -368,6 +378,10 @@ mod tests {
         assert_eq!(translate(Language::SimplifiedChinese, "Settings"), "设置");
         assert_eq!(translate(Language::SimplifiedChinese, "Generate"), "生成");
         assert_eq!(translate(Language::SimplifiedChinese, "Triggers"), "触发器");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Change key passphrase"),
+            "修改密钥口令"
+        );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Trigger engine enabled."),
             "触发器引擎已启用。"
