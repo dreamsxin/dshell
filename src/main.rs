@@ -27,7 +27,7 @@ use std::{
 use forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec, ForwardRuleUiState};
 use gpui::{AnyElement, StatefulInteractiveElement as _, prelude::*, *};
 use gpui_component::{
-    PixelsExt, Root, StyledExt,
+    IconName, PixelsExt, Root, StyledExt,
     button::{Button, ButtonVariants},
     input::{InputState, TextInput},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
@@ -50,17 +50,42 @@ use terminal::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use ui::{
-    components::{self, ButtonKind, ButtonSize},
+    components::{self, ButtonKind, ButtonSize, Tone},
     theme::{ThemeTokens, UiTheme},
     tokens as ui_tokens,
 };
 use zeroize::Zeroizing;
 
-const HOSTS_SIDEBAR_WIDTH_PX: f32 = 228.0;
-const EXTRA_WORKSPACE_CHROME_PX: f32 = 172.0;
-const TERMINAL_PANEL_HEADER_PX: f32 = 28.0;
+const TERMINAL_PANEL_HEADER_PX: f32 = ui_tokens::PANEL_HEADER_HEIGHT;
+const TERMINAL_CARD_BORDER_PX: f32 = 2.0;
 const MAX_AUTH_PROMPTS: usize = 8;
 const MAX_LOG_REPLAY_BYTES: u64 = 16 * 1024 * 1024;
+
+fn sidebar_width(collapsed: bool) -> f32 {
+    if collapsed {
+        ui_tokens::SIDEBAR_COLLAPSED_WIDTH
+    } else {
+        ui_tokens::SIDEBAR_WIDTH
+    }
+}
+
+fn terminal_size_for_viewport(
+    width: f32,
+    height: f32,
+    settings: &AppSettings,
+    sidebar_collapsed: bool,
+) -> TerminalSize {
+    let width =
+        width - sidebar_width(sidebar_collapsed) - ui_tokens::SPACE_4 - TERMINAL_CARD_BORDER_PX;
+    let height = height
+        - ui_tokens::COMMAND_BAR_HEIGHT
+        - ui_tokens::TAB_BAR_HEIGHT
+        - ui_tokens::STATUS_BAR_HEIGHT
+        - ui_tokens::SPACE_4
+        - TERMINAL_PANEL_HEADER_PX
+        - TERMINAL_CARD_BORDER_PX;
+    TerminalSize::for_window_with(width, height, settings.cell_width(), settings.cell_height())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionState {
@@ -68,6 +93,23 @@ enum SessionState {
     Connecting,
     Connected,
     Disconnecting,
+}
+
+fn session_tone(state: SessionState) -> Tone {
+    match state {
+        SessionState::Connected => Tone::Success,
+        SessionState::Connecting | SessionState::Disconnecting => Tone::Warning,
+        SessionState::Disconnected => Tone::Neutral,
+    }
+}
+
+fn session_state_label(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Disconnected => "Disconnected",
+        SessionState::Connecting => "Connecting",
+        SessionState::Connected => "Connected",
+        SessionState::Disconnecting => "Disconnecting",
+    }
 }
 
 struct AuthPromptState {
@@ -148,7 +190,11 @@ fn split_panel_terminal_size(
                         (full_size.columns / 2).max(1)
                     }
                 },
-                |width| (width / cell_width).floor().clamp(1.0, 240.0) as u16,
+                |width| {
+                    ((width - TERMINAL_CARD_BORDER_PX).max(0.0) / cell_width)
+                        .floor()
+                        .clamp(1.0, 240.0) as u16
+                },
             );
             TerminalSize {
                 columns,
@@ -165,7 +211,8 @@ fn split_panel_terminal_size(
                     }
                 },
                 |height| {
-                    ((height - TERMINAL_PANEL_HEADER_PX).max(0.0) / cell_height)
+                    ((height - TERMINAL_PANEL_HEADER_PX - TERMINAL_CARD_BORDER_PX).max(0.0)
+                        / cell_height)
                         .floor()
                         .clamp(1.0, 120.0) as u16
                 },
@@ -469,9 +516,11 @@ mod session_tests {
         SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
         UiEvent, app_shortcut, apply_session_event, enqueue_session_request, mpsc,
         read_log_for_replay, remove_session, search_result_message,
-        session_terminal_size_for_split, split_panel_terminal_size, watch,
+        session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
+        watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
+    use crate::settings::AppSettings;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
 
@@ -641,6 +690,12 @@ mod session_tests {
             Some(AppShortcut::ToggleSettings)
         );
         assert_eq!(
+            app_shortcut(&defaults, "b", true, true, false),
+            Some(AppShortcut::ToggleSidebar)
+        );
+        assert_eq!(app_shortcut(&defaults, "c", true, true, false), None);
+        assert_eq!(app_shortcut(&defaults, "v", true, true, false), None);
+        assert_eq!(
             app_shortcut(&defaults, "d", true, true, false),
             Some(AppShortcut::Disconnect)
         );
@@ -726,6 +781,31 @@ mod session_tests {
     }
 
     #[test]
+    fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
+        let settings = AppSettings::default();
+        let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false);
+        assert!(
+            minimum.columns >= 80,
+            "1280x800 must keep at least 80 columns, got {}",
+            minimum.columns
+        );
+        assert!(minimum.rows >= 24);
+
+        let expanded = terminal_size_for_viewport(1920.0, 1080.0, &settings, false);
+        assert!(expanded.columns > minimum.columns);
+        assert!(expanded.rows > minimum.rows);
+    }
+
+    #[test]
+    fn collapsing_the_sidebar_widens_the_terminal() {
+        let settings = AppSettings::default();
+        let expanded = terminal_size_for_viewport(1280.0, 800.0, &settings, false);
+        let collapsed = terminal_size_for_viewport(1280.0, 800.0, &settings, true);
+        assert!(collapsed.columns > expanded.columns);
+        assert_eq!(collapsed.rows, expanded.rows);
+    }
+
+    #[test]
     fn split_resize_updates_the_axis_dimension_for_each_pane() {
         let full_size = TerminalSize {
             columns: 100,
@@ -751,14 +831,14 @@ mod session_tests {
         assert_eq!(
             left,
             TerminalSize {
-                columns: 50,
+                columns: 49,
                 rows: 40
             }
         );
         assert_eq!(
             right,
             TerminalSize {
-                columns: 40,
+                columns: 39,
                 rows: 40
             }
         );
@@ -783,14 +863,14 @@ mod session_tests {
             top,
             TerminalSize {
                 columns: 100,
-                rows: 10
+                rows: 9
             }
         );
         assert_eq!(
             bottom,
             TerminalSize {
                 columns: 100,
-                rows: 9
+                rows: 8
             }
         );
     }
@@ -846,6 +926,7 @@ mod session_tests {
 
 struct AppView {
     ui_theme: UiTheme,
+    sidebar_collapsed: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
     profile_group: Entity<InputState>,
@@ -959,6 +1040,7 @@ impl AppView {
             },
             Err(error) => (None, AppSettings::default(), error),
         };
+        ui::theme::install(cx, settings.ui_theme);
         let settings_font_family =
             cx.new(|cx| InputState::new(window, cx).default_value(settings.font_family.clone()));
         let settings_font_size =
@@ -1008,7 +1090,7 @@ impl AppView {
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("user"));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
         password.update(cx, |state, cx| state.set_masked(true, window, cx));
-        let terminal_size = Self::size_for_window(window, &settings);
+        let terminal_size = Self::size_for_window(window, &settings, settings.sidebar_collapsed);
         let (profile_store, data, profiles_ready, profile_message) = match ProfileStore::discover()
         {
             Ok(store) => match store.load() {
@@ -1037,7 +1119,8 @@ impl AppView {
         });
 
         Self {
-            ui_theme: UiTheme::DEFAULT,
+            ui_theme: settings.ui_theme,
+            sidebar_collapsed: settings.sidebar_collapsed,
             profile_name,
             profile_search,
             profile_group,
@@ -1133,18 +1216,22 @@ impl AppView {
         self.active_session_id.and_then(|id| self.session(id))
     }
 
-    fn size_for_window(window: &Window, settings: &AppSettings) -> TerminalSize {
+    fn size_for_window(
+        window: &Window,
+        settings: &AppSettings,
+        sidebar_collapsed: bool,
+    ) -> TerminalSize {
         let bounds = window.bounds();
-        TerminalSize::for_window_with(
-            bounds.size.width / px(1.0) - HOSTS_SIDEBAR_WIDTH_PX,
-            bounds.size.height / px(1.0) - EXTRA_WORKSPACE_CHROME_PX,
-            settings.cell_width(),
-            settings.cell_height(),
+        terminal_size_for_viewport(
+            bounds.size.width / px(1.0),
+            bounds.size.height / px(1.0),
+            settings,
+            sidebar_collapsed,
         )
     }
 
     fn resize_terminal(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.terminal_size = Self::size_for_window(window, &self.settings);
+        self.terminal_size = Self::size_for_window(window, &self.settings, self.sidebar_collapsed);
         self.resize_sessions(cx);
         cx.notify();
     }
@@ -2470,6 +2557,7 @@ impl AppView {
                 AppShortcut::ToggleFiles => self.toggle_sftp(session_id, cx),
                 AppShortcut::ToggleSnippets => self.toggle_snippets(cx),
                 AppShortcut::ToggleSettings => self.toggle_settings(cx),
+                AppShortcut::ToggleSidebar => self.toggle_sidebar(window, cx),
                 AppShortcut::Disconnect => self.disconnect_session(session_id, cx),
                 AppShortcut::ReplayLog => self.begin_log_replay(cx),
                 AppShortcut::Find => self.open_search(session_id, window, cx),
@@ -2804,24 +2892,13 @@ impl AppView {
     }
 
     fn terminal_panel(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let Some(session) = self.session(session_id) else {
             return div().flex_1().min_w_0().min_h_0().into_any_element();
         };
         let title = session.title.clone();
         let state = session.state;
         let focused = self.active_session_id == Some(session_id);
-        let state_label = match state {
-            SessionState::Disconnected => "Disconnected",
-            SessionState::Connecting => "Connecting",
-            SessionState::Connected => "Connected",
-            SessionState::Disconnecting => "Disconnecting",
-        };
-        let status_color = match state {
-            SessionState::Disconnected => rgb(0x7b858c),
-            SessionState::Connecting => rgb(0xc08b23),
-            SessionState::Connected => rgb(0x4eae7c),
-            SessionState::Disconnecting => rgb(0xc07a42),
-        };
         let surface = self.terminal_surface(session_id, cx);
         div()
             .id(("terminal-panel", session_id))
@@ -2832,11 +2909,13 @@ impl AppView {
             .min_h_0()
             .border_1()
             .border_color(if focused {
-                rgb(0x4a956f)
+                tokens.border_strong
             } else {
-                rgb(0x343c42)
+                tokens.border_subtle
             })
-            .bg(rgb(0x0b0f13))
+            .rounded(px(ui_tokens::RADIUS_PANEL))
+            .overflow_hidden()
+            .bg(tokens.surface_raised)
             .child(
                 div()
                     .flex()
@@ -2844,9 +2923,11 @@ impl AppView {
                     .justify_between()
                     .h(px(TERMINAL_PANEL_HEADER_PX))
                     .flex_shrink_0()
-                    .px(px(8.))
-                    .bg(rgb(0x171d22))
-                    .text_size(px(11.))
+                    .px(px(ui_tokens::SPACE_3))
+                    .border_b_1()
+                    .border_color(tokens.border_subtle)
+                    .bg(tokens.surface)
+                    .text_size(px(ui_tokens::FONT_CAPTION))
                     .on_any_mouse_down(cx.listener(move |this, _, window, cx| {
                         this.activate_session(session_id, window, cx);
                     }))
@@ -2855,15 +2936,14 @@ impl AppView {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .text_color(rgb(0xd4dade))
+                            .text_color(tokens.text_primary)
                             .child(title),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(status_color)
-                            .child(state_label),
-                    ),
+                    .child(components::pill(
+                        &tokens,
+                        session_state_label(state),
+                        session_tone(state),
+                    )),
             )
             .child(surface)
             .into_any_element()
@@ -5148,6 +5228,42 @@ impl AppView {
         cx.notify();
     }
 
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.persist_ui_preferences(cx);
+        self.resize_terminal(window, cx);
+        cx.notify();
+    }
+
+    fn focus_profile_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_collapsed {
+            self.sidebar_collapsed = false;
+            self.persist_ui_preferences(cx);
+            self.resize_terminal(window, cx);
+        }
+        self.profile_search
+            .update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    fn toggle_ui_theme(&mut self, cx: &mut Context<Self>) {
+        self.ui_theme = self.ui_theme.toggled();
+        ui::theme::install(cx, self.ui_theme);
+        self.persist_ui_preferences(cx);
+        cx.notify();
+    }
+
+    fn persist_ui_preferences(&mut self, cx: &mut Context<Self>) {
+        self.settings.ui_theme = self.ui_theme;
+        self.settings.sidebar_collapsed = self.sidebar_collapsed;
+        if let Some(store) = self.settings_store.as_ref()
+            && let Err(error) = store.save(&self.settings)
+        {
+            self.status = format!("Could not save UI preferences: {error}");
+        }
+        cx.notify();
+    }
+
     fn toggle_keys(&mut self, cx: &mut Context<Self>) {
         self.keys_visible = !self.keys_visible;
         if self.keys_visible {
@@ -5381,6 +5497,8 @@ impl AppView {
             theme: self.settings_theme,
             cursor_style: self.settings_cursor,
             shortcuts,
+            ui_theme: self.ui_theme,
+            sidebar_collapsed: self.sidebar_collapsed,
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -5434,7 +5552,8 @@ impl AppView {
     }
 
     fn reset_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let settings = AppSettings::default();
+        let mut settings = AppSettings::default();
+        settings.sidebar_collapsed = self.sidebar_collapsed;
         if let Some(store) = self.settings_store.as_ref()
             && let Err(error) = store.save(&settings)
         {
@@ -5445,6 +5564,8 @@ impl AppView {
         self.settings = settings;
         self.settings_theme = self.settings.theme;
         self.settings_cursor = self.settings.cursor_style;
+        self.ui_theme = self.settings.ui_theme;
+        ui::theme::install(cx, self.ui_theme);
         for session in &self.sessions {
             if session.command_tx.is_some() {
                 let _ = enqueue_session_request(
@@ -5879,6 +6000,748 @@ impl AppView {
         });
         self.send_terminal_request(session_id, request, "Terminal scroll", cx);
     }
+
+    fn sidebar(&self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        if self.sidebar_collapsed {
+            let mut rail = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .flex_shrink_0()
+                .w(px(ui_tokens::SIDEBAR_COLLAPSED_WIDTH))
+                .h_full()
+                .gap(px(ui_tokens::SPACE_2))
+                .py(px(ui_tokens::SPACE_2))
+                .bg(tokens.surface)
+                .border_r_1()
+                .border_color(tokens.border_subtle);
+            rail = rail.child(
+                components::icon_button(
+                    tokens,
+                    "expand-sidebar",
+                    IconName::PanelLeftOpen,
+                    ButtonKind::Ghost,
+                    ButtonSize::Regular,
+                    "Expand sidebar",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+            );
+            rail = rail.child(
+                components::icon_button(
+                    tokens,
+                    "new-host-rail",
+                    IconName::Plus,
+                    ButtonKind::Primary,
+                    ButtonSize::Regular,
+                    "New host",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
+            );
+            rail = rail.child(
+                components::icon_button(
+                    tokens,
+                    "import-config-rail",
+                    IconName::FolderOpen,
+                    ButtonKind::Ghost,
+                    ButtonSize::Regular,
+                    "Import OpenSSH config",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.begin_config_import(cx))),
+            );
+            return rail.into_any_element();
+        }
+
+        let search = self.profile_search.read(cx).value().trim().to_lowercase();
+        let mut profile_list = div()
+            .id("host-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .gap(px(ui_tokens::SPACE_1))
+            .px(px(ui_tokens::SPACE_2))
+            .overflow_y_scroll();
+        let mut matching_profiles = 0;
+        if search.is_empty() {
+            let favorite_indexes = self
+                .profiles
+                .iter()
+                .enumerate()
+                .filter_map(|(index, profile)| profile.favorite.then_some(index))
+                .collect::<Vec<_>>();
+            if !favorite_indexes.is_empty() {
+                profile_list = profile_list.child(components::section_header(tokens, "FAVORITES"));
+                for index in favorite_indexes {
+                    let profile = &self.profiles[index];
+                    profile_list = profile_list.child(self.saved_host_row(
+                        "favorite-host",
+                        index,
+                        profile,
+                        cx,
+                    ));
+                }
+                matching_profiles += 1;
+            }
+
+            let mut groups: BTreeMap<String, (String, Vec<usize>)> = BTreeMap::new();
+            for (index, profile) in self.profiles.iter().enumerate() {
+                let key = profile.group.to_lowercase();
+                let display = if profile.group.is_empty() {
+                    "UNGROUPED".to_owned()
+                } else {
+                    profile.group.clone()
+                };
+                groups
+                    .entry(key)
+                    .or_insert_with(|| (display, Vec::new()))
+                    .1
+                    .push(index);
+            }
+            for (_, (display, mut indexes)) in groups {
+                indexes.sort_by_key(|index| self.profiles[*index].name.to_lowercase());
+                profile_list = profile_list.child(components::section_header(tokens, display));
+                for index in indexes {
+                    let profile = &self.profiles[index];
+                    profile_list =
+                        profile_list.child(self.saved_host_row("group-host", index, profile, cx));
+                }
+                matching_profiles += 1;
+            }
+
+            if !self.recent.is_empty() {
+                profile_list = profile_list.child(components::section_header(tokens, "RECENT"));
+                for (index, entry) in self.recent.iter().enumerate() {
+                    profile_list = profile_list.child(self.recent_host_row(index, entry, cx));
+                }
+                matching_profiles += 1;
+            }
+        } else {
+            for (index, profile) in self.profiles.iter().enumerate() {
+                let search_text = format!(
+                    "{} {} {} {} {}",
+                    profile.name, profile.username, profile.host, profile.port, profile.group
+                )
+                .to_lowercase();
+                if !search_text.contains(&search) {
+                    continue;
+                }
+                matching_profiles += 1;
+                profile_list =
+                    profile_list.child(self.saved_host_row("search-host", index, profile, cx));
+            }
+        }
+        if matching_profiles == 0 {
+            let empty_message = if self.profiles.is_empty() {
+                "No saved hosts"
+            } else {
+                "No matching hosts"
+            };
+            profile_list = profile_list.child(
+                div()
+                    .p(px(ui_tokens::SPACE_2))
+                    .child(components::help_text(tokens, empty_message)),
+            );
+        }
+
+        div()
+            .w(px(ui_tokens::SIDEBAR_WIDTH))
+            .h_full()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .min_h_0()
+            .bg(tokens.surface)
+            .border_r_1()
+            .border_color(tokens.border_subtle)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(ui_tokens::SIDEBAR_HEADER_HEIGHT))
+                    .flex_shrink_0()
+                    .px(px(ui_tokens::SPACE_3))
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_TITLE))
+                            .font_semibold()
+                            .text_color(tokens.text_primary)
+                            .child("dshell"),
+                    )
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "collapse-sidebar",
+                            IconName::PanelLeftClose,
+                            ButtonKind::Ghost,
+                            ButtonSize::Regular,
+                            "Collapse sidebar (Ctrl+Shift+B)",
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(ui_tokens::SPACE_2))
+                    .pb(px(ui_tokens::SPACE_2))
+                    .child(
+                        TextInput::new(&self.profile_search)
+                            .h(px(ui_tokens::CONTROL_HEIGHT_SM))
+                            .w_full(),
+                    ),
+            )
+            .when(!self.profile_message.is_empty(), |sidebar| {
+                sidebar.child(
+                    div()
+                        .mx(px(ui_tokens::SPACE_2))
+                        .mb(px(ui_tokens::SPACE_2))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .bg(tokens.surface_overlay)
+                        .child(components::warning_text(
+                            tokens,
+                            self.profile_message.clone(),
+                        )),
+                )
+            })
+            .child(profile_list)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_2))
+                    .p(px(ui_tokens::SPACE_2))
+                    .border_t_1()
+                    .border_color(tokens.border_subtle)
+                    .child(
+                        components::button(
+                            tokens,
+                            "import-openssh-config",
+                            "Import",
+                            ButtonKind::Secondary,
+                            ButtonSize::Small,
+                        )
+                        .flex_1()
+                        .on_click(cx.listener(|this, _, _, cx| this.begin_config_import(cx))),
+                    )
+                    .child(
+                        components::button(
+                            tokens,
+                            "new-host-profile",
+                            "New",
+                            ButtonKind::Primary,
+                            ButtonSize::Small,
+                        )
+                        .flex_1()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_profile(window, cx);
+                        })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn session_tabs(&self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let mut tabs = div()
+            .id("session-tabs")
+            .flex()
+            .items_center()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_x_scroll();
+        for session in &self.sessions {
+            let id = session.id;
+            let selected = self.active_session_id == Some(id);
+            let in_split = self.split.is_some_and(|split| split.contains(id));
+            let mut tab = div()
+                .id(("session-tab", id))
+                .flex()
+                .items_center()
+                .gap(px(ui_tokens::SPACE_2))
+                .flex_shrink_0()
+                .h_full()
+                .pl(px(ui_tokens::SPACE_3))
+                .pr(px(ui_tokens::SPACE_1))
+                .border_t_2()
+                .border_color(if selected {
+                    tokens.accent
+                } else {
+                    tokens.surface
+                })
+                .bg(if selected {
+                    tokens.surface_raised
+                } else {
+                    tokens.surface
+                })
+                .text_color(if selected {
+                    tokens.text_primary
+                } else {
+                    tokens.text_secondary
+                })
+                .hover(|style| style.bg(tokens.surface_raised))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_session(id, window, cx);
+                }))
+                .child(components::status_dot(tokens, session_tone(session.state)))
+                .child(
+                    div()
+                        .max_w(px(180.0))
+                        .overflow_hidden()
+                        .text_size(px(ui_tokens::FONT_BODY))
+                        .child(session.title.clone()),
+                );
+            if in_split {
+                tab = tab.child(
+                    div()
+                        .text_size(px(ui_tokens::FONT_CAPTION))
+                        .text_color(tokens.text_secondary)
+                        .child("split"),
+                );
+            }
+            tab = tab.child(
+                components::icon_button(
+                    tokens,
+                    ("close-session", id),
+                    IconName::Close,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    "Close session",
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.close_session(id, window, cx);
+                })),
+            );
+            tabs = tabs.child(tab);
+        }
+        if self.sessions.is_empty() {
+            tabs = tabs.child(
+                div()
+                    .px(px(ui_tokens::SPACE_3))
+                    .child(components::help_text(tokens, "No active sessions")),
+            );
+        }
+
+        let mut right = div()
+            .flex()
+            .items_center()
+            .gap(px(ui_tokens::SPACE_1))
+            .px(px(ui_tokens::SPACE_2))
+            .flex_shrink_0()
+            .child(
+                components::icon_button(
+                    tokens,
+                    "new-session-tab",
+                    IconName::Plus,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    "New session",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
+            );
+        if let Some(split) = self.split {
+            let side_by_side = if split.orientation == SplitOrientation::SideBySide {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Ghost
+            };
+            let stacked = if split.orientation == SplitOrientation::Stacked {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Ghost
+            };
+            right = right
+                .child(
+                    components::icon_button(
+                        tokens,
+                        "split-side-by-side",
+                        IconName::PanelRight,
+                        side_by_side,
+                        ButtonSize::Small,
+                        "Side by side",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_split_orientation(SplitOrientation::SideBySide, window, cx);
+                    })),
+                )
+                .child(
+                    components::icon_button(
+                        tokens,
+                        "split-stacked",
+                        IconName::PanelBottom,
+                        stacked,
+                        ButtonSize::Small,
+                        "Stacked",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_split_orientation(SplitOrientation::Stacked, window, cx);
+                    })),
+                )
+                .child(
+                    components::icon_button(
+                        tokens,
+                        "close-split",
+                        IconName::Close,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        "Close split",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.close_split(window, cx))),
+                );
+        }
+
+        div()
+            .h(px(ui_tokens::TAB_BAR_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .bg(tokens.surface)
+            .border_b_1()
+            .border_color(tokens.border_subtle)
+            .child(tabs)
+            .child(right)
+            .into_any_element()
+    }
+
+    fn command_bar(&self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.active_session();
+        let title = active
+            .map(|session| session.title.clone())
+            .unwrap_or_else(|| "SSH workspace".to_owned());
+        let state = active.map(|session| session.state);
+
+        let mut left = div()
+            .flex()
+            .items_center()
+            .gap(px(ui_tokens::SPACE_1))
+            .flex_shrink_0()
+            .child(
+                components::button(
+                    tokens,
+                    "new-session",
+                    "New session",
+                    ButtonKind::Primary,
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
+                    "focus-session-search",
+                    IconName::Search,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    "Search saved hosts",
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.focus_profile_search(window, cx);
+                })),
+            );
+        if self.selected_profile.is_some() {
+            left = left.child(
+                components::button(
+                    tokens,
+                    "edit-session-profile",
+                    "Properties",
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.session_editor_section = SessionEditorSection::Connection;
+                    this.session_editor_open = true;
+                    cx.notify();
+                })),
+            );
+        }
+        if self.sessions.len() > 1 && self.active_session_id.is_some() {
+            left = left.child(
+                components::button(
+                    tokens,
+                    "split-active-session",
+                    "Split",
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let Some(active_id) = this.active_session_id else {
+                        return;
+                    };
+                    if let Some(other) = this
+                        .sessions
+                        .iter()
+                        .map(|session| session.id)
+                        .find(|id| *id != active_id)
+                    {
+                        this.set_split(other, SplitOrientation::SideBySide, window, cx);
+                    }
+                })),
+            );
+        }
+
+        let middle = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .justify_center()
+            .gap(px(ui_tokens::SPACE_2))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_size(px(ui_tokens::FONT_SUBTITLE))
+                    .font_semibold()
+                    .child(title),
+            )
+            .when_some(state, |middle, state| {
+                middle.child(components::pill(
+                    tokens,
+                    session_state_label(state),
+                    session_tone(state),
+                ))
+            });
+
+        let mut right = div()
+            .flex()
+            .items_center()
+            .gap(px(ui_tokens::SPACE_1))
+            .flex_shrink_0();
+        if let Some(session) = active {
+            let active_id = session.id;
+            let files_label = if session.sftp.visible {
+                "Close files"
+            } else {
+                "Files"
+            };
+            let tunnels_label = if session.forwards.visible {
+                "Close tunnels"
+            } else {
+                "Tunnels"
+            };
+            let log_label = if session.log_path.is_some() {
+                "Stop log"
+            } else {
+                "Log"
+            };
+            right = right
+                .child(
+                    components::button(
+                        tokens,
+                        "toggle-sftp",
+                        files_label,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_sftp(active_id, cx);
+                    })),
+                )
+                .child(
+                    components::button(
+                        tokens,
+                        "toggle-tunnels",
+                        tunnels_label,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_tunnels(active_id, cx);
+                    })),
+                )
+                .child(
+                    components::button(
+                        tokens,
+                        "toggle-log",
+                        log_label,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_log(active_id, cx);
+                    })),
+                )
+                .child(
+                    components::button(
+                        tokens,
+                        "replay-log",
+                        "Replay",
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.begin_log_replay(cx))),
+                )
+                .child(
+                    components::button(
+                        tokens,
+                        "find-terminal",
+                        "Find",
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_search(active_id, window, cx);
+                    })),
+                );
+            if matches!(
+                session.state,
+                SessionState::Connecting | SessionState::Connected
+            ) {
+                let label = if session.state == SessionState::Connecting {
+                    "Cancel"
+                } else {
+                    "Disconnect"
+                };
+                right = right.child(
+                    components::button(
+                        tokens,
+                        "disconnect-active",
+                        label,
+                        ButtonKind::Secondary,
+                        ButtonSize::Small,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.disconnect_session(active_id, cx);
+                    })),
+                );
+            }
+        }
+        right = right
+            .child(
+                components::button(
+                    tokens,
+                    "toggle-snippets",
+                    "Snippets",
+                    if self.snippets_visible {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_snippets(cx))),
+            )
+            .child(
+                components::button(
+                    tokens,
+                    "toggle-keys",
+                    "Keys",
+                    if self.keys_visible {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx))),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
+                    "toggle-ui-theme",
+                    IconName::Palette,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    format!("Switch to {} theme", self.ui_theme.toggled().label()),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_ui_theme(cx))),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
+                    "toggle-settings",
+                    IconName::Settings,
+                    if self.settings_visible {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    "Settings",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+            );
+
+        div()
+            .h(px(ui_tokens::COMMAND_BAR_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(ui_tokens::SPACE_2))
+            .px(px(ui_tokens::SPACE_3))
+            .bg(tokens.surface)
+            .border_b_1()
+            .border_color(tokens.border_subtle)
+            .child(left)
+            .child(middle)
+            .child(right)
+            .into_any_element()
+    }
+
+    fn status_bar(&self, tokens: &ThemeTokens) -> AnyElement {
+        let active = self.active_session();
+        let (tone, name, status) = match active {
+            Some(session) => (
+                session_tone(session.state),
+                session.title.clone(),
+                session.status.clone(),
+            ),
+            None => (Tone::Neutral, "dshell".to_owned(), self.status.clone()),
+        };
+        let identity = active
+            .map(|session| format!("{}@{}:{}", session.username, session.host, session.port))
+            .unwrap_or_default();
+        let dimensions = active
+            .map(|session| {
+                format!(
+                    "{} x {}",
+                    session.terminal_size.columns, session.terminal_size.rows
+                )
+            })
+            .unwrap_or_default();
+
+        div()
+            .h(px(ui_tokens::STATUS_BAR_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(ui_tokens::SPACE_3))
+            .px(px(ui_tokens::SPACE_3))
+            .bg(tokens.surface)
+            .border_t_1()
+            .border_color(tokens.border_subtle)
+            .text_size(px(ui_tokens::FONT_CAPTION))
+            .text_color(tokens.text_secondary)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_2))
+                    .min_w_0()
+                    .child(components::status_dot(tokens, tone))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(tokens.text_primary)
+                            .child(name),
+                    )
+                    .child(div().min_w_0().overflow_hidden().child(status)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_3))
+                    .flex_shrink_0()
+                    .when(!identity.is_empty(), |right| right.child(identity))
+                    .when(!dimensions.is_empty(), |right| right.child(dimensions)),
+            )
+            .into_any_element()
+    }
 }
 
 fn terminal_mouse_button(button: MouseButton) -> Option<TerminalMouseButton> {
@@ -5968,16 +6831,6 @@ fn render_terminal_run(run: &TerminalRun, settings: &AppSettings) -> impl IntoEl
     cell_run.child(run.text.clone())
 }
 
-fn sidebar_section_header(label: impl Into<SharedString>) -> impl IntoElement {
-    div()
-        .pt(px(8.))
-        .px(px(4.))
-        .text_size(px(10.))
-        .font_semibold()
-        .text_color(rgb(0x59636a))
-        .child(label.into())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppShortcut {
     NewSession,
@@ -5985,6 +6838,7 @@ enum AppShortcut {
     ToggleFiles,
     ToggleSnippets,
     ToggleSettings,
+    ToggleSidebar,
     Disconnect,
     ReplayLog,
     Find,
@@ -6036,6 +6890,7 @@ fn app_shortcut(
                 ShortcutAction::ToggleFiles => AppShortcut::ToggleFiles,
                 ShortcutAction::ToggleSnippets => AppShortcut::ToggleSnippets,
                 ShortcutAction::ToggleSettings => AppShortcut::ToggleSettings,
+                ShortcutAction::ToggleSidebar => AppShortcut::ToggleSidebar,
                 ShortcutAction::Disconnect => AppShortcut::Disconnect,
                 ShortcutAction::ReplayLog => AppShortcut::ReplayLog,
                 ShortcutAction::Find => AppShortcut::Find,
@@ -6087,176 +6942,19 @@ impl Render for AppView {
             self.clear_auth_prompt_inputs(window, cx);
             self.auth_prompt_needs_clear = false;
         }
-        let search = self.profile_search.read(cx).value().trim().to_lowercase();
-        let mut profile_list = div()
-            .id("host-list")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .gap(px(4.))
-            .overflow_y_scroll();
-        let mut matching_profiles = 0;
-        if search.is_empty() {
-            let favorite_indexes = self
-                .profiles
-                .iter()
-                .enumerate()
-                .filter_map(|(index, profile)| profile.favorite.then_some(index))
-                .collect::<Vec<_>>();
-            if !favorite_indexes.is_empty() {
-                profile_list = profile_list.child(sidebar_section_header("FAVORITES"));
-                for index in favorite_indexes {
-                    let profile = &self.profiles[index];
-                    profile_list = profile_list.child(self.saved_host_row(
-                        "favorite-host",
-                        index,
-                        profile,
-                        cx,
-                    ));
-                }
-                matching_profiles += 1;
-            }
+        let tokens = self.tokens();
+        let command_bar = self.command_bar(&tokens, cx);
+        let sidebar = self.sidebar(&tokens, cx);
+        let tab_bar = self.session_tabs(&tokens, cx);
+        let status_bar = self.status_bar(&tokens);
 
-            let mut groups: BTreeMap<String, (String, Vec<usize>)> = BTreeMap::new();
-            for (index, profile) in self.profiles.iter().enumerate() {
-                let key = profile.group.to_lowercase();
-                let display = if profile.group.is_empty() {
-                    "UNGROUPED".to_owned()
-                } else {
-                    profile.group.clone()
-                };
-                groups
-                    .entry(key)
-                    .or_insert_with(|| (display, Vec::new()))
-                    .1
-                    .push(index);
-            }
-            for (_, (display, mut indexes)) in groups {
-                indexes.sort_by_key(|index| self.profiles[*index].name.to_lowercase());
-                profile_list = profile_list.child(sidebar_section_header(display));
-                for index in indexes {
-                    let profile = &self.profiles[index];
-                    profile_list =
-                        profile_list.child(self.saved_host_row("group-host", index, profile, cx));
-                }
-                matching_profiles += 1;
-            }
-
-            if !self.recent.is_empty() {
-                profile_list = profile_list.child(sidebar_section_header("RECENT"));
-                for (index, entry) in self.recent.iter().enumerate() {
-                    profile_list = profile_list.child(self.recent_host_row(index, entry, cx));
-                }
-                matching_profiles += 1;
-            }
-        } else {
-            for (index, profile) in self.profiles.iter().enumerate() {
-                let search_text = format!(
-                    "{} {} {} {} {}",
-                    profile.name, profile.username, profile.host, profile.port, profile.group
-                )
-                .to_lowercase();
-                if !search_text.contains(&search) {
-                    continue;
-                }
-                matching_profiles += 1;
-                profile_list =
-                    profile_list.child(self.saved_host_row("search-host", index, profile, cx));
-            }
-        }
-        if matching_profiles == 0 {
-            let empty_message = if self.profiles.is_empty() {
-                "No saved hosts".to_owned()
-            } else {
-                "No matching hosts".to_owned()
-            };
-            profile_list = profile_list.child(
-                div()
-                    .p(px(8.))
-                    .text_size(px(12.))
-                    .text_color(rgb(0x667078))
-                    .child(empty_message),
-            );
-        }
-
-        let mut session_tabs = div()
-            .id("session-tabs")
+        let mut terminal_workspace = div()
             .flex()
             .flex_1()
             .min_w_0()
-            .items_center()
-            .gap(px(4.))
-            .overflow_x_scroll();
-        for session in &self.sessions {
-            let id = session.id;
-            let title = session.title.clone();
-            let selected = self.active_session_id == Some(id);
-            let tab = Button::new(("session-tab", id)).label(title);
-            let tab = if selected { tab.primary() } else { tab };
-            session_tabs =
-                session_tabs.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.))
-                        .child(tab.on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_session(id, window, cx);
-                        })))
-                        .when(self.active_session_id != Some(id), |tabs| {
-                            tabs.child(Button::new(("split-session", id)).label("Split").on_click(
-                                cx.listener(move |this, _, window, cx| {
-                                    this.set_split(id, SplitOrientation::SideBySide, window, cx);
-                                }),
-                            ))
-                        })
-                        .child(Button::new(("close-session", id)).label("x").on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.close_session(id, window, cx);
-                            }),
-                        )),
-                );
-        }
-        if self.sessions.is_empty() {
-            session_tabs = session_tabs.child(
-                div()
-                    .px(px(8.))
-                    .text_size(px(12.))
-                    .text_color(rgb(0x667078))
-                    .child("No active sessions"),
-            );
-        }
-
-        let mut split_controls = div().flex().items_center().gap(px(4.));
-        if let Some(split) = self.split {
-            let side_by_side = Button::new("split-side-by-side")
-                .label("Side by side")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_split_orientation(SplitOrientation::SideBySide, window, cx);
-                }));
-            let side_by_side = if split.orientation == SplitOrientation::SideBySide {
-                side_by_side.primary()
-            } else {
-                side_by_side
-            };
-            let stacked = Button::new("split-stacked")
-                .label("Stacked")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_split_orientation(SplitOrientation::Stacked, window, cx);
-                }));
-            let stacked = if split.orientation == SplitOrientation::Stacked {
-                stacked.primary()
-            } else {
-                stacked
-            };
-            split_controls = split_controls.child(side_by_side).child(stacked).child(
-                Button::new("close-split")
-                    .label("Close split")
-                    .on_click(cx.listener(|this, _, window, cx| this.close_split(window, cx))),
-            );
-        }
-
-        let mut terminal_workspace = div().flex().flex_1().min_h_0().bg(rgb(0x0b0f13)).p(px(8.));
+            .min_h_0()
+            .bg(tokens.bg_canvas)
+            .p(px(ui_tokens::SPACE_2));
         if let Some(split) = self.split {
             let first_panel = self.terminal_panel(split.first_session_id, cx);
             let second_panel = self.terminal_panel(split.second_session_id, cx);
@@ -6298,11 +6996,17 @@ impl Render for AppView {
                 div()
                     .flex()
                     .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(14.))
-                    .text_color(rgb(0x859099))
-                    .child("No active terminal"),
+                    .min_h_0()
+                    .border_1()
+                    .border_color(tokens.border_subtle)
+                    .rounded(px(ui_tokens::RADIUS_PANEL))
+                    .overflow_hidden()
+                    .bg(tokens.surface_raised)
+                    .child(components::empty_state(
+                        &tokens,
+                        "No active terminal",
+                        "Create a session or open a saved host from the sidebar.",
+                    )),
             );
         }
         if let Some(session_id) = self.active_session_id
@@ -6329,277 +7033,43 @@ impl Render for AppView {
             terminal_workspace = terminal_workspace.child(self.keys_panel(cx));
         }
 
-        let active_session = self.active_session();
-        let status_color = match active_session.map(|session| session.state) {
-            Some(SessionState::Disconnected) | None => rgb(0x5b646b),
-            Some(SessionState::Connecting) => rgb(0x986c12),
-            Some(SessionState::Connected) => rgb(0x28744d),
-            Some(SessionState::Disconnecting) => rgb(0x9a5a24),
-        };
-        let status_text = active_session
-            .map(|session| session.status.clone())
-            .unwrap_or_else(|| self.status.clone());
-        let identity = active_session
-            .map(|session| format!("{}@{}:{}", session.username, session.host, session.port))
-            .unwrap_or_default();
-        let terminal_dimensions = active_session
-            .map(|session| {
-                format!(
-                    "{} x {}",
-                    session.terminal_size.columns, session.terminal_size.rows
-                )
-            })
-            .unwrap_or_default();
-
-        let mut toolbar_actions = div().flex().items_center().gap(px(6.));
-        if self.selected_profile.is_some() {
-            toolbar_actions = toolbar_actions.child(
-                Button::new("edit-session-profile")
-                    .label("Properties")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.session_editor_section = SessionEditorSection::Connection;
-                        this.session_editor_open = true;
-                        cx.notify();
-                    })),
-            );
-        }
-        toolbar_actions = toolbar_actions.child(
-            Button::new("new-session")
-                .label("New session")
-                .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
-        );
-        toolbar_actions = toolbar_actions.child(
-            Button::new("toggle-snippets")
-                .label(if self.snippets_visible {
-                    "Hide snippets"
-                } else {
-                    "Snippets"
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_snippets(cx))),
-        );
-        toolbar_actions = toolbar_actions.child(
-            Button::new("toggle-settings")
-                .label(if self.settings_visible {
-                    "Hide settings"
-                } else {
-                    "Settings"
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
-        );
-        toolbar_actions = toolbar_actions.child(
-            Button::new("toggle-keys")
-                .label(if self.keys_visible {
-                    "Hide keys"
-                } else {
-                    "Keys"
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx))),
-        );
-        toolbar_actions = toolbar_actions.child(
-            Button::new("replay-log")
-                .label("Replay log")
-                .on_click(cx.listener(|this, _, _, cx| this.begin_log_replay(cx))),
-        );
-        toolbar_actions =
-            toolbar_actions.child(Button::new("find-terminal").label("Find").on_click(
-                cx.listener(|this, _, window, cx| {
-                    let session_id = this.active_session_id.unwrap_or(0);
-                    if this.active_session_id.is_some() || this.log_replay.is_some() {
-                        this.open_search(session_id, window, cx);
-                    }
-                }),
-            ));
-        if let Some(session) = active_session {
-            let active_id = session.id;
-            let label = if session.sftp.visible {
-                "Close files"
-            } else {
-                "Files"
-            };
-            toolbar_actions =
-                toolbar_actions.child(Button::new("toggle-sftp").label(label).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.toggle_sftp(active_id, cx);
-                    }),
-                ));
-            let tunnel_label = if session.forwards.visible {
-                "Close tunnels"
-            } else {
-                "Tunnels"
-            };
-            toolbar_actions =
-                toolbar_actions.child(Button::new("toggle-tunnels").label(tunnel_label).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.toggle_tunnels(active_id, cx);
-                    }),
-                ));
-            let log_label = if session.log_path.is_some() {
-                "Stop log"
-            } else {
-                "Log"
-            };
-            toolbar_actions =
-                toolbar_actions.child(Button::new("toggle-log").label(log_label).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.toggle_log(active_id, cx);
-                    }),
-                ));
-        }
-        if let Some(session) = active_session
-            && matches!(
-                session.state,
-                SessionState::Connecting | SessionState::Connected
-            )
-        {
-            let active_id = session.id;
-            let label = if session.state == SessionState::Connecting {
-                "Cancel"
-            } else {
-                "Disconnect"
-            };
-            toolbar_actions =
-                toolbar_actions.child(Button::new("disconnect-active").label(label).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.disconnect_session(active_id, cx);
-                    }),
-                ));
-        }
-        let workspace_title = self
-            .selected_profile
-            .clone()
-            .unwrap_or_else(|| "SSH workspace".to_owned());
-
-        let workspace = div()
+        let mut root = div()
+            .relative()
             .flex()
+            .flex_col()
             .size_full()
-            .bg(rgb(0xf3f5f6))
-            .text_color(rgb(0x20262b))
+            .bg(tokens.bg_canvas)
+            .text_color(tokens.text_primary)
+            .child(command_bar)
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .w(px(HOSTS_SIDEBAR_WIDTH_PX))
-                    .h_full()
-                    .gap(px(8.))
-                    .p(px(10.))
-                    .bg(rgb(0xe8ebed))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(32.))
-                            .child(div().text_size(px(16.)).child("dshell"))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .child(
-                                        Button::new("import-openssh-config")
-                                            .label("Import")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.begin_config_import(cx);
-                                            })),
-                                    )
-                                    .child(Button::new("new-host-profile").label("New").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.new_profile(window, cx);
-                                        }),
-                                    )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pt(px(4.))
-                            .text_size(px(11.))
-                            .text_color(rgb(0x59636a))
-                            .child("SAVED HOSTS"),
-                    )
-                    .child(TextInput::new(&self.profile_search))
-                    .when(!self.profile_message.is_empty(), |sidebar| {
-                        sidebar.child(
-                            div()
-                                .p(px(6.))
-                                .text_size(px(10.))
-                                .text_color(rgb(0x7a5a12))
-                                .bg(rgb(0xf4ead0))
-                                .rounded(px(3.))
-                                .child(self.profile_message.clone()),
-                        )
-                    })
-                    .child(profile_list),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
                     .flex_1()
-                    .min_w_0()
                     .min_h_0()
-                    .gap(px(0.))
+                    .min_w_0()
+                    .child(sidebar)
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(48.))
-                            .flex_shrink_0()
-                            .px(px(10.))
-                            .bg(rgb(0xf3f5f6))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(px(14.))
-                                    .font_semibold()
-                                    .child(workspace_title),
-                            )
-                            .child(toolbar_actions),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .h(px(38.))
-                            .gap(px(4.))
-                            .px(px(8.))
-                            .bg(rgb(0xe4e7e9))
-                            .child(session_tabs)
-                            .child(split_controls),
-                    )
-                    .child(terminal_workspace)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(26.))
-                            .px(px(10.))
-                            .bg(rgb(0xdfe3e5))
-                            .text_size(px(11.))
-                            .child(div().text_color(status_color).child(status_text))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .text_color(rgb(0x59636a))
-                                    .child(identity)
-                                    .child(terminal_dimensions),
-                            ),
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(tab_bar)
+                            .child(terminal_workspace),
                     ),
-            );
-        let mut workspace = workspace;
+            )
+            .child(status_bar);
         if self.session_editor_open {
-            workspace = workspace.child(self.session_editor(cx));
+            root = root.child(self.session_editor(cx));
         }
         if self.auth_prompt.is_some() {
-            workspace = workspace.child(self.auth_prompt_overlay(cx));
+            root = root.child(self.auth_prompt_overlay(cx));
         }
         if self.log_replay.is_some() {
-            workspace = workspace.child(self.log_replay_overlay(cx));
+            root = root.child(self.log_replay_overlay(cx));
         }
-        workspace
+        root
     }
 }
 

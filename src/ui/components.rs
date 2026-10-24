@@ -10,7 +10,7 @@
 
 use gpui::{Div, ElementId, Entity, ParentElement as _, SharedString, Styled, div, px};
 use gpui_component::{
-    StyledExt as _,
+    IconName, StyledExt as _,
     button::{Button, ButtonVariants as _},
     input::{InputState, TextInput},
 };
@@ -83,6 +83,29 @@ pub fn button(
         .child(div().text_size(px(tokens::FONT_BODY)).child(label.into()))
         .h(px(size.height()))
         .px(px(tokens::SPACE_3))
+        .rounded(px(tokens::RADIUS_CONTROL));
+    match kind {
+        ButtonKind::Primary => button.primary(),
+        ButtonKind::Secondary => button,
+        ButtonKind::Ghost => button.ghost(),
+        ButtonKind::Danger => button.danger(),
+    }
+}
+
+/// Square icon-only button used by the shell and toolbars.
+pub fn icon_button(
+    _tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    icon: IconName,
+    kind: ButtonKind,
+    size: ButtonSize,
+    tooltip: impl Into<SharedString>,
+) -> Button {
+    let button = Button::new(id)
+        .icon(icon)
+        .tooltip(tooltip)
+        .h(px(size.height()))
+        .w(px(size.height()))
         .rounded(px(tokens::RADIUS_CONTROL));
     match kind {
         ButtonKind::Primary => button.primary(),

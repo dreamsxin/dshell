@@ -20,6 +20,7 @@ pub const SPACE_6: f32 = 32.0;
 // Application shell (§5.3).
 pub const COMMAND_BAR_HEIGHT: f32 = 52.0;
 pub const SIDEBAR_WIDTH: f32 = 248.0;
+pub const SIDEBAR_COLLAPSED_WIDTH: f32 = 48.0;
 pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
 pub const SIDEBAR_MAX_WIDTH: f32 = 360.0;
 pub const INSPECTOR_WIDTH: f32 = 380.0;
@@ -38,6 +39,7 @@ pub const ICON_SIZE_TOOLBAR: f32 = 20.0;
 
 // Panel and modal chrome.
 pub const PANEL_HEADER_HEIGHT: f32 = 32.0;
+pub const SIDEBAR_HEADER_HEIGHT: f32 = 48.0;
 pub const MODAL_HEADER_HEIGHT: f32 = 48.0;
 pub const MODAL_FOOTER_HEIGHT: f32 = 60.0;
 pub const MODAL_WIDTH_SESSION: f32 = 720.0;

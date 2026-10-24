@@ -5,12 +5,14 @@
 
 use gpui::{App, Hsla, px, rgb, rgba};
 use gpui_component::{Theme, ThemeMode};
+use serde::{Deserialize, Serialize};
 
 use super::tokens;
 
 /// Which UI palette is active. Terminal palettes stay independent.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UiTheme {
     #[default]
     Dark,
@@ -29,6 +31,13 @@ impl UiTheme {
         match self {
             Self::Dark => "Dark",
             Self::Light => "Light",
+        }
+    }
+
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
         }
     }
 

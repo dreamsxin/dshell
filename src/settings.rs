@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     shortcuts::ShortcutSettings,
     terminal::{CursorStyle, TerminalTheme},
+    ui::theme::UiTheme,
 };
 
 const DOCUMENT_VERSION: u8 = 1;
@@ -26,6 +27,10 @@ pub struct AppSettings {
     pub cursor_style: CursorStyle,
     #[serde(default)]
     pub shortcuts: ShortcutSettings,
+    #[serde(default)]
+    pub ui_theme: UiTheme,
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
 }
 
 impl Default for AppSettings {
@@ -36,6 +41,8 @@ impl Default for AppSettings {
             theme: TerminalTheme::Default,
             cursor_style: CursorStyle::Block,
             shortcuts: ShortcutSettings::default(),
+            ui_theme: UiTheme::DEFAULT,
+            sidebar_collapsed: false,
         }
     }
 }
@@ -53,6 +60,8 @@ impl AppSettings {
             theme: self.theme,
             cursor_style: self.cursor_style,
             shortcuts: self.shortcuts.normalized(),
+            ui_theme: self.ui_theme,
+            sidebar_collapsed: self.sidebar_collapsed,
         }
     }
 
@@ -79,6 +88,10 @@ struct SettingsDocument {
     cursor_style: CursorStyle,
     #[serde(default)]
     shortcuts: ShortcutSettings,
+    #[serde(default)]
+    ui_theme: UiTheme,
+    #[serde(default)]
+    sidebar_collapsed: bool,
 }
 
 pub struct SettingsStore {
@@ -146,6 +159,8 @@ impl SettingsStore {
             theme: document.theme,
             cursor_style: document.cursor_style,
             shortcuts: document.shortcuts,
+            ui_theme: document.ui_theme,
+            sidebar_collapsed: document.sidebar_collapsed,
         }
         .normalized())
     }
@@ -169,6 +184,8 @@ impl SettingsStore {
             theme: settings.theme,
             cursor_style: settings.cursor_style,
             shortcuts: settings.shortcuts.clone(),
+            ui_theme: settings.ui_theme,
+            sidebar_collapsed: settings.sidebar_collapsed,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -212,6 +229,8 @@ mod tests {
             theme: TerminalTheme::SolarizedLight,
             cursor_style: CursorStyle::Bar,
             shortcuts,
+            ui_theme: UiTheme::Light,
+            sidebar_collapsed: true,
         };
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), settings);
@@ -223,11 +242,29 @@ mod tests {
                 theme: TerminalTheme::Default,
                 cursor_style: CursorStyle::Underline,
                 shortcuts: ShortcutSettings::default(),
+                ui_theme: UiTheme::Dark,
+                sidebar_collapsed: false,
             })
             .unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.font_size, MAX_FONT_SIZE);
         assert_eq!(loaded.font_family, DEFAULT_FONT_FAMILY);
+    }
+
+    #[test]
+    fn version_one_files_without_ui_preferences_use_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"font_size":14,"font_family":"monospace"}"#,
+        )
+        .unwrap();
+        let loaded = SettingsStore::at(path).load().unwrap();
+        assert_eq!(loaded.font_size, 14.0);
+        assert_eq!(loaded.ui_theme, UiTheme::Dark);
+        assert!(!loaded.sidebar_collapsed);
+        assert_eq!(loaded.shortcuts, ShortcutSettings::default());
     }
 
     #[test]
@@ -238,6 +275,8 @@ mod tests {
             theme: TerminalTheme::Default,
             cursor_style: CursorStyle::Block,
             shortcuts: ShortcutSettings::default(),
+            ui_theme: UiTheme::Dark,
+            sidebar_collapsed: false,
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);

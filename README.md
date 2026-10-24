@@ -118,9 +118,15 @@ rejected without saving.
 
 While a terminal has focus, the default workspace shortcuts are `Ctrl+Shift+T`
 for a new session, `Ctrl+Shift+W` close tab, `Ctrl+Shift+F` files,
-`Ctrl+Shift+S` snippets, `Ctrl+Shift+O` settings, `Ctrl+Shift+D` disconnect,
+`Ctrl+Shift+S` snippets, `Ctrl+Shift+O` settings, `Ctrl+Shift+B` toggle the
+saved-host sidebar, `Ctrl+Shift+D` disconnect,
 `Ctrl+Shift+R` replay log and `Ctrl+F` find. `Alt+1` through `Alt+9` always
 select a session tab. `Ctrl+Shift+C` and `Ctrl+Shift+V` remain copy and paste.
+
+The command bar switches between the dark and light UI palettes and remembers
+the choice, together with the collapsed/expanded sidebar state, in
+`%APPDATA%\dshell\settings.json`. Terminal colors stay controlled by the
+separate terminal theme setting.
 
 The find bar searches the active terminal and its scrollback, or the open log
 replay, using case-insensitive single-line matching. Enter moves forward,
