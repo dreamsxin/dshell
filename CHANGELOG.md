@@ -2,6 +2,24 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.2] - 2026-10-24
+
+Adds a Simplified Chinese application shell and a repeatable local SSH service
+for manual desktop testing.
+
+### Added
+
+- Add English / Simplified Chinese language selection persisted in the user settings file.
+- Translate the workspace shell, session editor, settings, sidebar and common tool panels while preserving terminal and remote command output.
+- Add `scripts\start-docker-ssh-manual.ps1`, which starts an SSH test container bound only to `127.0.0.1:2222` and prints its temporary credentials, fingerprint and reviewed `known_hosts` line.
+
+### Verification
+
+- `cargo fmt --all`, offline `cargo check --locked`, `scripts\verify-hard-constraints.ps1` and `git diff --check` passed.
+- Unit tests: 99 passed, 9 Docker-only tests skipped by the unit-test run.
+- `scripts\test-docker-ssh.ps1`: 9 integration tests passed.
+- Windows manual UI capture confirmed the Simplified Chinese shell and SSH session form; the local service is reachable on `127.0.0.1:2222`.
+
 ## [0.1.1] - 2026-10-24
 
 Maintenance release fixing missing command-bar and menu icons in fresh builds.

@@ -6,6 +6,7 @@ use crate::{
     shortcuts::ShortcutSettings,
     terminal::{CursorStyle, TerminalTheme},
     ui::{
+        i18n::Language,
         theme::UiTheme,
         tokens::{
             INSPECTOR_MAX_WIDTH, INSPECTOR_MIN_WIDTH, INSPECTOR_WIDTH, SIDEBAR_MAX_WIDTH,
@@ -36,6 +37,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub ui_theme: UiTheme,
     #[serde(default)]
+    pub language: Language,
+    #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
@@ -52,6 +55,7 @@ impl Default for AppSettings {
             cursor_style: CursorStyle::Block,
             shortcuts: ShortcutSettings::default(),
             ui_theme: UiTheme::DEFAULT,
+            language: Language::default(),
             sidebar_collapsed: false,
             sidebar_width: SIDEBAR_WIDTH,
             inspector_width: INSPECTOR_WIDTH,
@@ -73,6 +77,7 @@ impl AppSettings {
             cursor_style: self.cursor_style,
             shortcuts: self.shortcuts.normalized(),
             ui_theme: self.ui_theme,
+            language: self.language,
             sidebar_collapsed: self.sidebar_collapsed,
             sidebar_width: normalize_width(
                 self.sidebar_width,
@@ -114,6 +119,8 @@ struct SettingsDocument {
     shortcuts: ShortcutSettings,
     #[serde(default)]
     ui_theme: UiTheme,
+    #[serde(default)]
+    language: Language,
     #[serde(default)]
     sidebar_collapsed: bool,
     #[serde(default = "default_sidebar_width")]
@@ -188,6 +195,7 @@ impl SettingsStore {
             cursor_style: document.cursor_style,
             shortcuts: document.shortcuts,
             ui_theme: document.ui_theme,
+            language: document.language,
             sidebar_collapsed: document.sidebar_collapsed,
             sidebar_width: document.sidebar_width,
             inspector_width: document.inspector_width,
@@ -215,6 +223,7 @@ impl SettingsStore {
             cursor_style: settings.cursor_style,
             shortcuts: settings.shortcuts.clone(),
             ui_theme: settings.ui_theme,
+            language: settings.language,
             sidebar_collapsed: settings.sidebar_collapsed,
             sidebar_width: settings.sidebar_width,
             inspector_width: settings.inspector_width,
@@ -278,6 +287,7 @@ mod tests {
             cursor_style: CursorStyle::Bar,
             shortcuts,
             ui_theme: UiTheme::Light,
+            language: Language::SimplifiedChinese,
             sidebar_collapsed: true,
             sidebar_width: 312.0,
             inspector_width: 460.0,
@@ -293,6 +303,7 @@ mod tests {
                 cursor_style: CursorStyle::Underline,
                 shortcuts: ShortcutSettings::default(),
                 ui_theme: UiTheme::Dark,
+                language: Language::English,
                 sidebar_collapsed: false,
                 sidebar_width: 10.0,
                 inspector_width: 10_000.0,
@@ -317,6 +328,7 @@ mod tests {
         let loaded = SettingsStore::at(path).load().unwrap();
         assert_eq!(loaded.font_size, 14.0);
         assert_eq!(loaded.ui_theme, UiTheme::Dark);
+        assert_eq!(loaded.language, Language::English);
         assert!(!loaded.sidebar_collapsed);
         assert_eq!(loaded.sidebar_width, SIDEBAR_WIDTH);
         assert_eq!(loaded.inspector_width, INSPECTOR_WIDTH);
@@ -332,6 +344,7 @@ mod tests {
             cursor_style: CursorStyle::Block,
             shortcuts: ShortcutSettings::default(),
             ui_theme: UiTheme::Dark,
+            language: Language::English,
             sidebar_collapsed: false,
             sidebar_width: SIDEBAR_WIDTH,
             inspector_width: INSPECTOR_WIDTH,

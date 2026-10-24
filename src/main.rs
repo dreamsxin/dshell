@@ -53,6 +53,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use ui::{
     assets::AppAssets,
     components::{self, ButtonKind, ButtonSize, Tone},
+    i18n::{self, Language},
     theme::{ThemeTokens, UiTheme},
     tokens as ui_tokens,
 };
@@ -555,8 +556,8 @@ fn layout_preset_item(
     tokens: &ThemeTokens,
     id: impl Into<ElementId>,
     icon: IconName,
-    title: &'static str,
-    description: &'static str,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
     selected: bool,
     enabled: bool,
 ) -> Button {
@@ -604,13 +605,13 @@ fn layout_preset_item(
                                 .text_size(px(ui_tokens::FONT_BODY))
                                 .font_semibold()
                                 .text_color(tokens.text_primary)
-                                .child(title),
+                                .child(title.into()),
                         )
                         .child(
                             div()
                                 .text_size(px(ui_tokens::FONT_CAPTION))
                                 .text_color(tokens.text_secondary)
-                                .child(description),
+                                .child(description.into()),
                         ),
                 ),
         )
@@ -1579,6 +1580,7 @@ struct AppView {
     settings_font_size: Entity<InputState>,
     settings_theme: TerminalTheme,
     settings_cursor: CursorStyle,
+    settings_language: Language,
     shortcut_inputs: Vec<Entity<InputState>>,
     settings_message: String,
     settings_visible: bool,
@@ -1614,6 +1616,10 @@ struct AppView {
 }
 
 impl AppView {
+    fn tr(&self, key: &str) -> String {
+        i18n::translate(self.settings.language, key).into_owned()
+    }
+
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let profile_name = cx.new(|cx| InputState::new(window, cx).placeholder("Production"));
         let profile_search =
@@ -1745,7 +1751,7 @@ impl AppView {
                 Err(error) => (None, Vec::new(), error),
             };
 
-        Self {
+        let mut view = Self {
             ui_theme: settings.ui_theme,
             sidebar_collapsed: settings.sidebar_collapsed,
             inspector_visible: false,
@@ -1819,6 +1825,7 @@ impl AppView {
             keywords_visible: false,
             settings_theme: settings.theme,
             settings_cursor: settings.cursor_style,
+            settings_language: settings.language,
             shortcut_inputs,
             settings,
             settings_store,
@@ -1855,11 +1862,41 @@ impl AppView {
             _bounds_subscription: bounds_subscription,
             _side_by_side_subscription: side_by_side_subscription,
             _stacked_subscription: stacked_subscription,
-        }
+        };
+        view.set_language_placeholders(window, cx);
+        view
     }
 
     fn tokens(&self) -> ThemeTokens {
         self.ui_theme.tokens()
+    }
+
+    fn set_language_placeholders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholders = [
+            (&self.profile_search, "Search saved hosts"),
+            (&self.profile_group, "Ungrouped"),
+            (&self.key_passphrase, "Key passphrase"),
+            (&self.jump_profile, "Saved jump host name"),
+            (&self.jump_password, "Jump host password"),
+            (&self.jump_passphrase, "Jump key passphrase"),
+            (&self.snippet_name, "Snippet name"),
+            (&self.keyword_input, "ERROR or timeout"),
+            (&self.search_input, "Search terminal"),
+            (&self.key_path, "Path for the new private key"),
+            (&self.new_key_passphrase, "Optional passphrase"),
+            (&self.host, "server.example.com"),
+            (&self.username, "user"),
+            (&self.password, "Password"),
+            (&self.auth_profile_name, "Template name"),
+        ];
+        for (input, placeholder) in placeholders {
+            let localized = self.tr(placeholder);
+            input.update(cx, |state, cx| state.set_placeholder(localized, window, cx));
+        }
+        let compose_placeholder = self.tr("Compose a multi-line command, then press Ctrl+Enter");
+        self.compose_input.update(cx, |state, cx| {
+            state.set_placeholder(compose_placeholder, window, cx)
+        });
     }
 
     fn request_overlay_focus(&mut self) {
@@ -4440,7 +4477,7 @@ impl AppView {
                     )
                     .child(components::pill(
                         &tokens,
-                        session_state_label(state),
+                        self.tr(session_state_label(state)),
                         session_tone(state),
                     )),
             )
@@ -4585,7 +4622,7 @@ impl AppView {
             let button = components::button(
                 &tokens,
                 ("session-editor-section", index),
-                section.label(),
+                self.tr(section.label()),
                 kind,
                 ButtonSize::Regular,
             );
@@ -4606,7 +4643,7 @@ impl AppView {
         let jump_summary = jump_profile.as_ref().map_or_else(
             || {
                 if jump_name.is_empty() {
-                    "Leave empty for a direct connection.".to_owned()
+                    self.tr("Leave empty for a direct connection.")
                 } else {
                     format!("{jump_name} is not a saved host.")
                 }
@@ -4629,7 +4666,7 @@ impl AppView {
                 .gap(px(ui_tokens::SPACE_3))
                 .child(components::field(
                     &tokens,
-                    "Session name",
+                    self.tr("Session name"),
                     &self.profile_name,
                     false,
                 ))
@@ -4640,7 +4677,7 @@ impl AppView {
                         .child(
                             div().flex_1().child(components::field(
                                 &tokens,
-                                "Host",
+                                self.tr("Host"),
                                 &self.host,
                                 false,
                             )),
@@ -4650,7 +4687,7 @@ impl AppView {
                                 .w(px(ui_tokens::PORT_FIELD_WIDTH))
                                 .child(components::field(
                                     &tokens,
-                                    "Port",
+                                    self.tr("Port"),
                                     &self.port,
                                     false,
                                 )),
@@ -4664,7 +4701,7 @@ impl AppView {
                         .child(
                             div().flex_1().child(components::field(
                                 &tokens,
-                                "Group",
+                                self.tr("Group"),
                                 &self.profile_group,
                                 false,
                             )),
@@ -4673,9 +4710,9 @@ impl AppView {
                             &tokens,
                             "toggle-profile-favorite",
                             if self.profile_favorite {
-                                "Favorite"
+                                self.tr("Favorite")
                             } else {
-                                "Not favorite"
+                                self.tr("Not favorite")
                             },
                             ButtonKind::Secondary,
                             ButtonSize::Regular,
@@ -4687,11 +4724,11 @@ impl AppView {
                 )
                 .child(components::help_text(
                     &tokens,
-                    "Hosts with the same group are listed under one folder in the sidebar.",
+                    self.tr("Hosts with the same group are listed under one folder in the sidebar."),
                 ))
                 .child(components::field(
                     &tokens,
-                    "Jump host",
+                    self.tr("Jump host"),
                     &self.jump_profile,
                     false,
                 ))
@@ -4702,7 +4739,7 @@ impl AppView {
                 })
                 .child(components::field(
                     &tokens,
-                    "Keep-alive (seconds, 0 = off)",
+                    self.tr("Keep-alive (seconds, 0 = off)"),
                     &self.keepalive_seconds,
                     false,
                 ))
@@ -4711,7 +4748,7 @@ impl AppView {
                         .flex()
                         .flex_col()
                         .gap(px(ui_tokens::SPACE_1))
-                        .child(components::label_text(&tokens, "Protocol"))
+                        .child(components::label_text(&tokens, self.tr("Protocol")))
                         .child(
                             div()
                                 .flex()
@@ -4738,7 +4775,7 @@ impl AppView {
                     let button = components::button(
                         &tokens,
                         ("auth-method", index),
-                        method.label(),
+                        self.tr(method.label()),
                         kind,
                         ButtonSize::Regular,
                     );
@@ -4780,12 +4817,12 @@ impl AppView {
                     .gap(px(ui_tokens::SPACE_2))
                     .child(components::section_label(
                         &tokens,
-                        "Authentication templates",
+                        self.tr("Authentication templates"),
                     ))
                     .when(self.auth_profiles.is_empty(), |panel| {
                         panel.child(components::help_text(
                             &tokens,
-                            "No saved templates. Save the current method as a reusable template.",
+                            self.tr("No saved templates. Save the current method as a reusable template."),
                         ))
                     })
                     .when(!self.auth_profiles.is_empty(), |panel| {
@@ -4793,7 +4830,7 @@ impl AppView {
                     })
                     .child(components::field(
                         &tokens,
-                        "Template name",
+                        self.tr("Template name"),
                         &self.auth_profile_name,
                         false,
                     ))
@@ -4806,7 +4843,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "save-auth-template",
-                                    "Save template",
+                                    self.tr("Save template"),
                                     ButtonKind::Secondary,
                                     ButtonSize::Small,
                                 )
@@ -4818,7 +4855,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "delete-auth-template",
-                                    "Delete",
+                                    self.tr("Delete"),
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
                                 )
@@ -4829,7 +4866,7 @@ impl AppView {
                     )
                     .child(components::help_text(
                         &tokens,
-                        "Templates store the method, identity file path, jump-host reference and keep-alive only. Passwords, passphrases and key material are never saved; applying a template clears secret inputs.",
+                        self.tr("Templates store the method, identity file path, jump-host reference and keep-alive only. Passwords, passphrases and key material are never saved; applying a template clears secret inputs."),
                     ))
                     .when(!self.auth_profile_message.is_empty(), |panel| {
                         panel.child(components::help_text(
@@ -4844,7 +4881,7 @@ impl AppView {
                     .child(templates)
                     .child(components::field(
                         &tokens,
-                        "Username",
+                        self.tr("Username"),
                         &self.username,
                         false,
                     ))
@@ -4855,7 +4892,7 @@ impl AppView {
                             .gap(px(ui_tokens::SPACE_1))
                             .child(components::label_text(
                                 &tokens,
-                                "Authentication method",
+                                self.tr("Authentication method"),
                             ))
                             .child(methods),
                     )
@@ -4863,7 +4900,7 @@ impl AppView {
                         panel
                             .child(components::field(
                                 &tokens,
-                                "Password",
+                                self.tr("Password"),
                                 &self.password,
                                 true,
                             ))
@@ -4880,19 +4917,19 @@ impl AppView {
                         panel
                             .child(components::field(
                                 &tokens,
-                                "Identity file",
+                                self.tr("Identity file"),
                                 &self.identity_file,
                                 false,
                             ))
                             .child(components::field(
                                 &tokens,
-                                "Key passphrase",
+                                self.tr("Key passphrase"),
                                 &self.key_passphrase,
                                 true,
                             ))
                             .child(components::help_text(
                                 &tokens,
-                                "The identity file path is saved with the host. Passphrases and key material are never saved.",
+                                self.tr("The identity file path is saved with the host. Passphrases and key material are never saved."),
                             ))
                     })
                     .when(self.auth_method == AuthMethod::Agent, |panel| {
@@ -4903,12 +4940,12 @@ impl AppView {
                     })
                     .when(!jump_name.is_empty(), |panel| {
                         panel
-                            .child(components::subheading(&tokens, "Jump host"))
+                            .child(components::subheading(&tokens, self.tr("Jump host")))
                             .child(components::help_text(&tokens, jump_summary))
                             .when(jump_method == Some(AuthMethod::Password), |panel| {
                                 panel.child(components::field(
                                     &tokens,
-                                    "Jump password",
+                                    self.tr("Jump password"),
                                     &self.jump_password,
                                     true,
                                 ))
@@ -4916,14 +4953,14 @@ impl AppView {
                             .when(jump_method == Some(AuthMethod::PublicKey), |panel| {
                                 panel.child(components::field(
                                     &tokens,
-                                    "Jump key passphrase",
+                                    self.tr("Jump key passphrase"),
                                     &self.jump_passphrase,
                                     true,
                                 ))
                             })
                             .child(components::help_text(
                                 &tokens,
-                                "Jump credentials are used only for the jump host and are never saved.",
+                                self.tr("Jump credentials are used only for the jump host and are never saved."),
                             ))
                     })
             }
@@ -4931,15 +4968,15 @@ impl AppView {
                 .flex()
                 .flex_col()
                 .gap(px(ui_tokens::SPACE_3))
-                .child(components::subheading(&tokens, "Server identity"))
+                .child(components::subheading(&tokens, self.tr("Server identity")))
                 .child(components::help_text(
                     &tokens,
-                    "Host keys must already match an entry in the user's OpenSSH known_hosts file. Unknown and changed keys are rejected. When a jump host is used, both the jump host and the target are verified independently.",
+                    self.tr("Host keys must already match an entry in the user's OpenSSH known_hosts file. Unknown and changed keys are rejected. When a jump host is used, both the jump host and the target are verified independently."),
                 ))
-                .child(components::subheading(&tokens, "Credential handling"))
+                .child(components::subheading(&tokens, self.tr("Credential handling")))
                 .child(components::help_text(
                     &tokens,
-                    "Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles contain connection details, an optional identity file path, and a jump host reference, never passwords, passphrases, or key material.",
+                    self.tr("Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles contain connection details, an optional identity file path, and a jump host reference, never passwords, passphrases, or key material."),
                 )),
         };
 
@@ -4987,9 +5024,9 @@ impl AppView {
         }
 
         let title = if self.selected_profile.is_some() {
-            "Session Properties"
+            self.tr("Session Properties")
         } else {
-            "New SSH Session"
+            self.tr("New SSH Session")
         };
         components::modal_overlay(&tokens, "session-editor-overlay")
             .track_focus(&self.overlay_focus)
@@ -5045,7 +5082,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "close-session-editor",
-                                    "Close",
+                                    self.tr("Close"),
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
                                 )
@@ -5070,7 +5107,7 @@ impl AppView {
                                     div()
                                         .text_size(px(ui_tokens::FONT_TITLE))
                                         .font_semibold()
-                                        .child(self.session_editor_section.label()),
+                                        .child(self.tr(self.session_editor_section.label())),
                                 )
                                 .child(section_content),
                         ),
@@ -5094,7 +5131,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "cancel-session-editor",
-                                    "Cancel",
+                                    self.tr("Cancel"),
                                     ButtonKind::Ghost,
                                     ButtonSize::Regular,
                                 )
@@ -5108,7 +5145,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "save-profile",
-                                    "Save",
+                                    self.tr("Save"),
                                     ButtonKind::Secondary,
                                     ButtonSize::Regular,
                                 )
@@ -5118,7 +5155,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "connect",
-                                    "Connect",
+                                    self.tr("Connect"),
                                     ButtonKind::Primary,
                                     ButtonSize::Large,
                                 )
@@ -7888,6 +7925,7 @@ impl AppView {
             cursor_style: self.settings_cursor,
             shortcuts,
             ui_theme: self.ui_theme,
+            language: self.settings_language,
             sidebar_collapsed: self.sidebar_collapsed,
             sidebar_width: self.settings.sidebar_width,
             inspector_width: self.settings.inspector_width,
@@ -7904,6 +7942,7 @@ impl AppView {
             return;
         }
         self.settings = settings;
+        self.set_language_placeholders(window, cx);
         for session in &self.sessions {
             if session.command_tx.is_some() {
                 let _ = enqueue_session_request(
@@ -7940,7 +7979,7 @@ impl AppView {
         }
         self.settings_message = "Appearance and shortcuts applied.".to_owned();
         self.resize_terminal(window, cx);
-        self.show_toast(self.settings_message.clone(), Tone::Success, cx);
+        self.show_toast(self.tr(&self.settings_message), Tone::Success, cx);
     }
 
     fn reset_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -7956,6 +7995,8 @@ impl AppView {
         self.settings = settings;
         self.settings_theme = self.settings.theme;
         self.settings_cursor = self.settings.cursor_style;
+        self.settings_language = self.settings.language;
+        self.set_language_placeholders(window, cx);
         self.ui_theme = self.settings.ui_theme;
         ui::theme::install(cx, self.ui_theme);
         for session in &self.sessions {
@@ -7989,7 +8030,7 @@ impl AppView {
         }
         self.settings_message = "Appearance and shortcuts reset to defaults.".to_owned();
         self.resize_terminal(window, cx);
-        self.show_toast(self.settings_message.clone(), Tone::Success, cx);
+        self.show_toast(self.tr(&self.settings_message), Tone::Success, cx);
     }
 
     fn begin_auth_prompt(
@@ -8185,7 +8226,7 @@ impl AppView {
             let button = components::button(
                 &tokens,
                 ("settings-theme", index),
-                theme.label(),
+                self.tr(theme.label()),
                 kind,
                 ButtonSize::Small,
             );
@@ -8206,7 +8247,7 @@ impl AppView {
             let button = components::button(
                 &tokens,
                 ("settings-cursor", index),
-                style.label(),
+                self.tr(style.label()),
                 kind,
                 ButtonSize::Small,
             );
@@ -8217,11 +8258,32 @@ impl AppView {
                 })));
         }
 
+        let mut language_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
+        for (index, language) in Language::ALL.into_iter().enumerate() {
+            let kind = if self.settings_language == language {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Secondary
+            };
+            let button = components::button(
+                &tokens,
+                ("settings-language", index),
+                language.label(),
+                kind,
+                ButtonSize::Small,
+            );
+            language_selector =
+                language_selector.child(button.on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings_language = language;
+                    cx.notify();
+                })));
+        }
+
         let mut shortcut_fields = div().flex().flex_col().gap(px(ui_tokens::SPACE_3));
         for (index, action) in ShortcutAction::ALL.iter().enumerate() {
             shortcut_fields = shortcut_fields.child(components::field(
                 &tokens,
-                action.label(),
+                self.tr(action.label()),
                 &self.shortcut_inputs[index],
                 false,
             ));
@@ -8242,11 +8304,11 @@ impl AppView {
                     .h_full()
                     .max_h(px(ui_tokens::MODAL_HEIGHT_SETTINGS))
                     .child(
-                        components::modal_header(&tokens, "Settings").child(
+                        components::modal_header(&tokens, self.tr("Settings")).child(
                             components::button(
                                 &tokens,
                                 "settings-close",
-                                "Close",
+                                self.tr("Close"),
                                 ButtonKind::Ghost,
                                 ButtonSize::Small,
                             )
@@ -8267,13 +8329,13 @@ impl AppView {
                     .p(px(ui_tokens::SPACE_4))
                     .child(components::field(
                         &tokens,
-                        "Font family",
+                        self.tr("Font family"),
                         &self.settings_font_family,
                         false,
                     ))
                     .child(components::field(
                         &tokens,
-                        "Font size",
+                        self.tr("Font size"),
                         &self.settings_font_size,
                         false,
                     ))
@@ -8282,7 +8344,7 @@ impl AppView {
                             .flex()
                             .flex_col()
                             .gap(px(ui_tokens::SPACE_2))
-                            .child(components::section_label(&tokens, "Terminal theme"))
+                            .child(components::section_label(&tokens, self.tr("Terminal theme")))
                             .child(theme_selector),
                     )
                     .child(
@@ -8290,7 +8352,7 @@ impl AppView {
                             .flex()
                             .flex_col()
                             .gap(px(ui_tokens::SPACE_2))
-                            .child(components::section_label(&tokens, "Cursor style"))
+                            .child(components::section_label(&tokens, self.tr("Cursor style")))
                             .child(cursor_selector),
                     )
                     .child(
@@ -8298,20 +8360,33 @@ impl AppView {
                             .flex()
                             .flex_col()
                             .gap(px(ui_tokens::SPACE_2))
-                            .child(components::section_label(&tokens, "Workspace shortcuts"))
+                            .child(components::section_label(
+                                &tokens,
+                                self.tr("Workspace shortcuts"),
+                            ))
                             .child(shortcut_fields),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(components::section_label(&tokens, self.tr("Language")))
+                            .child(language_selector),
                     )
                     .child(components::help_text(
                         &tokens,
-                        "Format: ctrl+shift+t, alt+F12 or cmd+space. Alt+1..9 always switches tabs.",
+                        self.tr(
+                            "Format: ctrl+shift+t, alt+F12 or cmd+space. Alt+1..9 always switches tabs.",
+                        ),
                     ))
                     .child(components::help_text(
                         &tokens,
-                        format!(
+                        self.tr(&format!(
                             "Allowed range: {MIN_FONT_SIZE:.0}-{MAX_FONT_SIZE:.0} px. Cell size and PTY dimensions follow the font size."
-                        ),
+                        )),
                     ))
-                    .child(components::help_text(&tokens, message)),
+                    .child(components::help_text(&tokens, self.tr(&message))),
             )
             .child(
                 components::modal_footer(&tokens)
@@ -8319,7 +8394,7 @@ impl AppView {
                         components::button(
                             &tokens,
                             "settings-reset",
-                            "Reset",
+                            self.tr("Reset"),
                             ButtonKind::Secondary,
                             ButtonSize::Regular,
                         )
@@ -8331,7 +8406,7 @@ impl AppView {
                         components::button(
                             &tokens,
                             "settings-apply",
-                            "Apply",
+                            self.tr("Apply"),
                             ButtonKind::Primary,
                             ButtonSize::Regular,
                         )
@@ -8407,7 +8482,7 @@ impl AppView {
                     IconName::PanelLeftOpen,
                     ButtonKind::Ghost,
                     ButtonSize::Regular,
-                    "Expand sidebar",
+                    self.tr("Expand sidebar"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             );
@@ -8418,7 +8493,7 @@ impl AppView {
                     IconName::Plus,
                     ButtonKind::Primary,
                     ButtonSize::Regular,
-                    "New host",
+                    self.tr("New host"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
             );
@@ -8429,7 +8504,7 @@ impl AppView {
                     IconName::FolderOpen,
                     ButtonKind::Ghost,
                     ButtonSize::Regular,
-                    "Import OpenSSH config",
+                    self.tr("Import OpenSSH config"),
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.begin_config_import(cx))),
             );
@@ -8455,7 +8530,8 @@ impl AppView {
                 .filter_map(|(index, profile)| profile.favorite.then_some(index))
                 .collect::<Vec<_>>();
             if !favorite_indexes.is_empty() {
-                profile_list = profile_list.child(components::section_header(tokens, "FAVORITES"));
+                profile_list =
+                    profile_list.child(components::section_header(tokens, self.tr("FAVORITES")));
                 for index in favorite_indexes {
                     let profile = &self.profiles[index];
                     profile_list = profile_list.child(self.saved_host_row(
@@ -8473,7 +8549,7 @@ impl AppView {
             for (index, profile) in self.profiles.iter().enumerate() {
                 let key = profile.group.to_lowercase();
                 let display = if profile.group.is_empty() {
-                    "UNGROUPED".to_owned()
+                    self.tr("UNGROUPED")
                 } else {
                     profile.group.clone()
                 };
@@ -8486,7 +8562,7 @@ impl AppView {
             if !self.profiles.is_empty() {
                 groups
                     .entry(String::new())
-                    .or_insert_with(|| ("UNGROUPED".to_owned(), Vec::new()));
+                    .or_insert_with(|| (self.tr("UNGROUPED"), Vec::new()));
             }
             for (key, (display, mut indexes)) in groups {
                 indexes.sort_by_key(|index| self.profiles[*index].name.to_lowercase());
@@ -8511,7 +8587,8 @@ impl AppView {
             }
 
             if !self.recent.is_empty() {
-                profile_list = profile_list.child(components::section_header(tokens, "RECENT"));
+                profile_list =
+                    profile_list.child(components::section_header(tokens, self.tr("RECENT")));
                 for (index, entry) in self.recent.iter().enumerate() {
                     profile_list =
                         profile_list.child(self.recent_host_row(tokens, index, entry, cx));
@@ -8543,14 +8620,14 @@ impl AppView {
                 profile_list = profile_list.child(
                     components::empty_state(
                         tokens,
-                        "No saved hosts",
-                        "Import an OpenSSH config or create a host to get started.",
+                        self.tr("No saved hosts"),
+                        self.tr("Import an OpenSSH config or create a host to get started."),
                     )
                     .child(
                         components::button(
                             tokens,
                             "empty-new-host",
-                            "New host",
+                            self.tr("New host"),
                             ButtonKind::Primary,
                             ButtonSize::Small,
                         )
@@ -8563,14 +8640,14 @@ impl AppView {
                 profile_list = profile_list.child(
                     components::empty_state(
                         tokens,
-                        "No matching hosts",
-                        "Try a different name, group, user or port.",
+                        self.tr("No matching hosts"),
+                        self.tr("Try a different name, group, user or port."),
                     )
                     .child(
                         components::button(
                             tokens,
                             "clear-host-search",
-                            "Clear search",
+                            self.tr("Clear search"),
                             ButtonKind::Secondary,
                             ButtonSize::Small,
                         )
@@ -8615,7 +8692,7 @@ impl AppView {
                             IconName::PanelLeftClose,
                             ButtonKind::Ghost,
                             ButtonSize::Regular,
-                            "Collapse sidebar (Ctrl+Shift+B)",
+                            self.tr("Collapse sidebar (Ctrl+Shift+B)"),
                         )
                         .on_click(
                             cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
@@ -8659,7 +8736,7 @@ impl AppView {
                         components::button(
                             tokens,
                             "import-openssh-config",
-                            "Import",
+                            self.tr("Import"),
                             ButtonKind::Secondary,
                             ButtonSize::Small,
                         )
@@ -8670,7 +8747,7 @@ impl AppView {
                         components::button(
                             tokens,
                             "new-host-profile",
-                            "New",
+                            self.tr("New"),
                             ButtonKind::Primary,
                             ButtonSize::Small,
                         )
@@ -8787,7 +8864,7 @@ impl AppView {
             tabs = tabs.child(
                 div()
                     .px(px(ui_tokens::SPACE_3))
-                    .child(components::help_text(tokens, "No active sessions")),
+                    .child(components::help_text(tokens, self.tr("No active sessions"))),
             );
         }
 
@@ -8896,7 +8973,7 @@ impl AppView {
         let active = self.active_session();
         let title = active
             .map(|session| session.title.clone())
-            .unwrap_or_else(|| "SSH workspace".to_owned());
+            .unwrap_or_else(|| self.tr("SSH workspace"));
         let state = active.map(|session| session.state);
 
         let mut left = div()
@@ -8911,7 +8988,7 @@ impl AppView {
                     IconName::Plus,
                     ButtonKind::Primary,
                     ButtonSize::Small,
-                    "New session (Ctrl+Shift+T)",
+                    self.tr("New session (Ctrl+Shift+T)"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
             )
@@ -8922,7 +8999,7 @@ impl AppView {
                     IconName::Search,
                     ButtonKind::Ghost,
                     ButtonSize::Small,
-                    "Search saved hosts",
+                    self.tr("Search saved hosts"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.focus_profile_search(window, cx);
@@ -8936,7 +9013,7 @@ impl AppView {
                     IconName::Settings2,
                     ButtonKind::Secondary,
                     ButtonSize::Small,
-                    "Session properties",
+                    self.tr("Session properties"),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.session_editor_section = SessionEditorSection::Connection;
@@ -8954,7 +9031,7 @@ impl AppView {
                     IconName::PanelRight,
                     ButtonKind::Secondary,
                     ButtonSize::Small,
-                    "Split with another session",
+                    self.tr("Split with another session"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     let Some(active_id) = this.active_session_id else {
@@ -8990,7 +9067,7 @@ impl AppView {
             .when_some(state, |middle, state| {
                 middle.child(components::pill(
                     tokens,
-                    session_state_label(state),
+                    self.tr(session_state_label(state)),
                     session_tone(state),
                 ))
             });
@@ -9012,7 +9089,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Workspace layout",
+                    self.tr("Workspace layout"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_layout_menu(window, cx);
@@ -9030,9 +9107,9 @@ impl AppView {
                     ButtonKind::Ghost,
                     ButtonSize::Small,
                     if self.sidebar_collapsed {
-                        "Show sidebar"
+                        self.tr("Show sidebar")
                     } else {
-                        "Hide sidebar"
+                        self.tr("Hide sidebar")
                     },
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -9053,7 +9130,7 @@ impl AppView {
                             ButtonKind::Ghost
                         },
                         ButtonSize::Small,
-                        "Files (Ctrl+Shift+F)",
+                        self.tr("Files (Ctrl+Shift+F)"),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_sftp(active_id, cx);
@@ -9070,7 +9147,7 @@ impl AppView {
                             ButtonKind::Ghost
                         },
                         ButtonSize::Small,
-                        "Tunnels",
+                        self.tr("Tunnels"),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_tunnels(active_id, cx);
@@ -9092,9 +9169,9 @@ impl AppView {
                         },
                         ButtonSize::Small,
                         if session.log_path.is_some() {
-                            "Stop logging"
+                            self.tr("Stop logging")
                         } else {
-                            "Start logging"
+                            self.tr("Start logging")
                         },
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -9108,7 +9185,7 @@ impl AppView {
                         IconName::BookOpen,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
-                        "Replay log (Ctrl+Shift+R)",
+                        self.tr("Replay log (Ctrl+Shift+R)"),
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.begin_log_replay(cx))),
                 )
@@ -9119,7 +9196,7 @@ impl AppView {
                         IconName::Search,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
-                        "Find (Ctrl+F)",
+                        self.tr("Find (Ctrl+F)"),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_search(active_id, window, cx);
@@ -9137,7 +9214,11 @@ impl AppView {
                         IconName::CircleX,
                         ButtonKind::Secondary,
                         ButtonSize::Small,
-                        if connecting { "Cancel" } else { "Disconnect" },
+                        if connecting {
+                            self.tr("Cancel")
+                        } else {
+                            self.tr("Disconnect")
+                        },
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.disconnect_session(active_id, cx);
@@ -9157,7 +9238,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Keyword highlights",
+                    self.tr("Keyword highlights"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_keywords(window, cx);
@@ -9174,7 +9255,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Quick commands (Ctrl+Shift+S)",
+                    self.tr("Quick commands (Ctrl+Shift+S)"),
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_snippets(cx))),
             )
@@ -9189,7 +9270,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Keys",
+                    self.tr("Keys"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_keys(window, cx))),
             )
@@ -9204,7 +9285,11 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    format!("Synchronized input ({} target)", self.sync_target_count()),
+                    format!(
+                        "{} ({} target)",
+                        self.tr("Synchronized input"),
+                        self.sync_target_count()
+                    ),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_sync_modal(window, cx))),
             )
@@ -9215,7 +9300,10 @@ impl AppView {
                     IconName::Palette,
                     ButtonKind::Ghost,
                     ButtonSize::Small,
-                    format!("Switch to {} theme", self.ui_theme.toggled().label()),
+                    self.tr(&format!(
+                        "Switch to {} theme",
+                        self.ui_theme.toggled().label()
+                    )),
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_ui_theme(cx))),
             )
@@ -9230,7 +9318,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Settings (Ctrl+Shift+O)",
+                    self.tr("Settings (Ctrl+Shift+O)"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx))),
             )
@@ -9274,7 +9362,7 @@ impl AppView {
                 session.title.clone(),
                 session.status.clone(),
             ),
-            None => (Tone::Neutral, "dshell".to_owned(), self.status.clone()),
+            None => (Tone::Neutral, "dshell".to_owned(), self.tr(&self.status)),
         };
         let identity = active
             .map(|session| format!("{}@{}:{}", session.username, session.host, session.port))
@@ -9716,14 +9804,14 @@ impl AppView {
             .text_color(tokens.text_primary);
         menu = menu
             .child(
-                components::panel_header(tokens, "Workspace layout").child(
+                components::panel_header(tokens, self.tr("Workspace layout")).child(
                     components::icon_button(
                         tokens,
                         "layout-menu-close",
                         IconName::Close,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
-                        "Close layout menu",
+                        self.tr("Close"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_layout_menu(window, cx);
@@ -9732,7 +9820,7 @@ impl AppView {
             )
             .child(components::help_text(
                 tokens,
-                "Choose a workspace preset. Divider sizes remain adjustable.",
+                self.tr("Choose a workspace preset. Divider sizes remain adjustable."),
             ))
             .child(
                 div()
@@ -9744,8 +9832,8 @@ impl AppView {
                             tokens,
                             "layout-preset-focus",
                             IconName::PanelLeftClose,
-                            "Focus",
-                            "Hide the sidebar and inspector",
+                            self.tr("Focus"),
+                            self.tr("Focus workspace"),
                             focus_selected,
                             true,
                         )
@@ -9758,8 +9846,8 @@ impl AppView {
                             tokens,
                             "layout-preset-standard",
                             IconName::LayoutDashboard,
-                            "Standard",
-                            "Sidebar with a full-width terminal",
+                            self.tr("Standard"),
+                            self.tr("Standard workspace"),
                             standard_selected,
                             true,
                         )
@@ -9772,8 +9860,8 @@ impl AppView {
                             tokens,
                             "layout-preset-inspector",
                             IconName::Inspector,
-                            "Inspector",
-                            "Keep connection details visible",
+                            self.tr("Inspector"),
+                            self.tr("Workspace with inspector"),
                             inspector_selected,
                             true,
                         )
@@ -9786,8 +9874,8 @@ impl AppView {
                             tokens,
                             "layout-preset-split",
                             IconName::PanelRight,
-                            "Split",
-                            "Show two sessions side by side",
+                            self.tr("Split"),
+                            self.tr("Split active session"),
                             split_selected,
                             has_other_session,
                         )
@@ -9796,7 +9884,10 @@ impl AppView {
                         })),
                     ),
             )
-            .child(components::section_label(tokens, "SPLIT ORIENTATION"))
+            .child(components::section_label(
+                tokens,
+                self.tr("SPLIT ORIENTATION"),
+            ))
             .child(
                 div()
                     .flex()
@@ -9814,7 +9905,7 @@ impl AppView {
                                 ButtonKind::Ghost
                             },
                             ButtonSize::Small,
-                            "Split side by side",
+                            self.tr("Split side by side"),
                         )
                         .disabled(!has_other_session)
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -9835,7 +9926,7 @@ impl AppView {
                                 ButtonKind::Ghost
                             },
                             ButtonSize::Small,
-                            "Split stacked",
+                            self.tr("Split stacked"),
                         )
                         .disabled(!has_other_session)
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -9849,7 +9940,7 @@ impl AppView {
                             IconName::Close,
                             ButtonKind::Ghost,
                             ButtonSize::Small,
-                            "Close split",
+                            self.tr("Close"),
                         )
                         .disabled(self.split.is_none())
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -9860,7 +9951,7 @@ impl AppView {
             )
             .child(components::help_text(
                 tokens,
-                "Use the divider handles to fine-tune widths after choosing a preset.",
+                self.tr("Use the divider handles to fine-tune widths after choosing a preset."),
             ));
 
         div()
@@ -9946,7 +10037,7 @@ impl AppView {
                             IconName::Plus,
                             ButtonKind::Primary,
                             ButtonSize::Small,
-                            "New session",
+                            self.tr("New session"),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.menu_visible = false;
@@ -9961,7 +10052,7 @@ impl AppView {
                             IconName::Search,
                             ButtonKind::Ghost,
                             ButtonSize::Small,
-                            "Search saved hosts",
+                            self.tr("Search saved hosts"),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.menu_visible = false;
@@ -9979,7 +10070,7 @@ impl AppView {
                                 ButtonKind::Ghost
                             },
                             ButtonSize::Small,
-                            "Workspace layout",
+                            self.tr("Workspace layout"),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.menu_visible = false;
@@ -9993,7 +10084,7 @@ impl AppView {
                             IconName::Settings,
                             ButtonKind::Ghost,
                             ButtonSize::Small,
-                            "Settings",
+                            self.tr("Settings"),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.menu_visible = false;
@@ -10005,16 +10096,16 @@ impl AppView {
                         div()
                             .text_size(px(ui_tokens::FONT_CAPTION))
                             .text_color(tokens.text_secondary)
-                            .child("Quick actions"),
+                            .child(self.tr("Quick actions")),
                     ),
             )
-            .child(components::section_label(tokens, "SESSION"))
+            .child(components::section_label(tokens, self.tr("SESSION")))
             .child(
                 menu_item(
                     tokens,
                     "menu-new-session",
                     IconName::Plus,
-                    "New session",
+                    self.tr("New session"),
                     "Ctrl+Shift+T",
                     false,
                     true,
@@ -10030,7 +10121,7 @@ impl AppView {
                     tokens,
                     "menu-session-properties",
                     IconName::Settings2,
-                    "Session properties",
+                    self.tr("Session properties"),
                     "",
                     false,
                     active_id.is_some(),
@@ -10048,7 +10139,7 @@ impl AppView {
                     tokens,
                     "menu-import-config",
                     IconName::FolderOpen,
-                    "Import OpenSSH config",
+                    self.tr("Import OpenSSH config"),
                     "",
                     false,
                     true,
@@ -10064,7 +10155,7 @@ impl AppView {
                     tokens,
                     "menu-close-tab",
                     IconName::Close,
-                    "Close tab",
+                    self.tr("Close tab"),
                     "Ctrl+Shift+W",
                     false,
                     active_id.is_some(),
@@ -10081,7 +10172,7 @@ impl AppView {
                     tokens,
                     "menu-disconnect",
                     IconName::CircleX,
-                    "Disconnect",
+                    self.tr("Disconnect"),
                     "Ctrl+Shift+D",
                     false,
                     active_connected,
@@ -10099,7 +10190,7 @@ impl AppView {
                     tokens,
                     "menu-split-side",
                     IconName::PanelRight,
-                    "Split side by side",
+                    self.tr("Split side by side"),
                     "",
                     false,
                     other_session.is_some(),
@@ -10122,7 +10213,7 @@ impl AppView {
                     tokens,
                     "menu-split-stack",
                     IconName::PanelBottom,
-                    "Split stacked",
+                    self.tr("Split stacked"),
                     "",
                     false,
                     other_session.is_some(),
@@ -10140,13 +10231,13 @@ impl AppView {
                     }
                 })),
             )
-            .child(components::section_label(tokens, "VIEW"))
+            .child(components::section_label(tokens, self.tr("VIEW")))
             .child(
                 menu_item(
                     tokens,
                     "menu-layout",
                     IconName::LayoutDashboard,
-                    "Workspace layout",
+                    self.tr("Workspace layout"),
                     "",
                     self.layout_menu_visible,
                     true,
@@ -10162,9 +10253,9 @@ impl AppView {
                     "menu-sidebar",
                     IconName::PanelLeft,
                     if self.sidebar_collapsed {
-                        "Show sidebar"
+                        self.tr("Show sidebar")
                     } else {
-                        "Hide sidebar"
+                        self.tr("Hide sidebar")
                     },
                     "Ctrl+Shift+B",
                     !self.sidebar_collapsed,
@@ -10180,7 +10271,7 @@ impl AppView {
                     tokens,
                     "menu-inspector",
                     IconName::Inspector,
-                    "Toggle inspector",
+                    self.tr("Toggle inspector"),
                     "",
                     self.inspector_visible,
                     true,
@@ -10195,7 +10286,7 @@ impl AppView {
                     tokens,
                     "menu-compose",
                     IconName::PanelBottom,
-                    "Toggle compose",
+                    self.tr("Toggle compose"),
                     "Ctrl+Shift+M",
                     self.compose_visible,
                     true,
@@ -10210,7 +10301,7 @@ impl AppView {
                     tokens,
                     "menu-sync",
                     IconName::ChevronsUpDown,
-                    "Synchronized input",
+                    self.tr("Synchronized input"),
                     "",
                     self.sync_visible || self.sync_target_count() > 0,
                     true,
@@ -10225,7 +10316,10 @@ impl AppView {
                     tokens,
                     "menu-theme",
                     IconName::Palette,
-                    format!("Switch to {} theme", self.ui_theme.toggled().label()),
+                    self.tr(&format!(
+                        "Switch to {} theme",
+                        self.ui_theme.toggled().label()
+                    )),
                     "",
                     false,
                     true,
@@ -10235,13 +10329,13 @@ impl AppView {
                     this.toggle_ui_theme(cx);
                 })),
             )
-            .child(components::section_label(tokens, "TOOLS"))
+            .child(components::section_label(tokens, self.tr("TOOLS")))
             .child(
                 menu_item(
                     tokens,
                     "menu-files",
                     IconName::Folder,
-                    "Files",
+                    self.tr("Files"),
                     "Ctrl+Shift+F",
                     false,
                     active_id.is_some(),
@@ -10259,7 +10353,7 @@ impl AppView {
                     tokens,
                     "menu-tunnels",
                     IconName::Globe,
-                    "Tunnels",
+                    self.tr("Tunnels"),
                     "",
                     false,
                     active_id.is_some(),
@@ -10282,9 +10376,9 @@ impl AppView {
                         IconName::Dash
                     },
                     if log_active {
-                        "Stop logging"
+                        self.tr("Stop logging")
                     } else {
-                        "Start logging"
+                        self.tr("Start logging")
                     },
                     "",
                     log_active,
@@ -10303,7 +10397,7 @@ impl AppView {
                     tokens,
                     "menu-replay",
                     IconName::BookOpen,
-                    "Replay log",
+                    self.tr("Replay log"),
                     "Ctrl+Shift+R",
                     false,
                     true,
@@ -10319,7 +10413,7 @@ impl AppView {
                     tokens,
                     "menu-find",
                     IconName::Search,
-                    "Find",
+                    self.tr("Find"),
                     "Ctrl+F",
                     false,
                     active_id.is_some(),
@@ -10336,7 +10430,7 @@ impl AppView {
                     tokens,
                     "menu-keywords",
                     IconName::CaseSensitive,
-                    "Keyword highlights",
+                    self.tr("Keyword highlights"),
                     "",
                     self.keywords_visible || self.keyword_highlighting_enabled,
                     true,
@@ -10351,7 +10445,7 @@ impl AppView {
                     tokens,
                     "menu-snippets",
                     IconName::Asterisk,
-                    "Quick commands",
+                    self.tr("Quick commands"),
                     "Ctrl+Shift+S",
                     self.snippets_visible,
                     true,
@@ -10366,7 +10460,7 @@ impl AppView {
                     tokens,
                     "menu-keys",
                     IconName::User,
-                    "Keys",
+                    self.tr("Keys"),
                     "",
                     self.keys_visible,
                     true,
@@ -10381,7 +10475,7 @@ impl AppView {
                     tokens,
                     "menu-settings",
                     IconName::Settings,
-                    "Settings",
+                    self.tr("Settings"),
                     "Ctrl+Shift+O",
                     self.settings_visible,
                     true,
@@ -10397,7 +10491,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        "dshell 0.1.0 · native GPUI · Esc closes",
+                        self.tr("dshell 0.1.0 · native GPUI · Esc closes"),
                     )),
             );
 
@@ -10787,7 +10881,7 @@ impl AppView {
                 .child(components::info_row(
                     tokens,
                     "State",
-                    session_state_label(state),
+                    self.tr(session_state_label(state)),
                 ))
                 .child(components::info_row(
                     tokens,
@@ -11210,8 +11304,8 @@ impl Render for AppView {
                     .bg(tokens.surface_raised)
                     .child(components::empty_state(
                         &tokens,
-                        "No active terminal",
-                        "Create a session or open a saved host from the sidebar.",
+                        self.tr("No active terminal"),
+                        self.tr("Create a session or open a saved host from the sidebar."),
                     )),
             );
         }

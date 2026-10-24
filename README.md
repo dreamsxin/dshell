@@ -2,8 +2,13 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current maintenance release
-is `v0.1.1`. See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.2`.
+See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
+
+The application shell supports English and Simplified Chinese. Open `Settings`,
+choose a language, and press `Apply`; the choice is saved in
+`%APPDATA%\dshell\settings.json` on Windows. Terminal content and remote
+command output remain unchanged.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;
@@ -235,6 +240,13 @@ their icons render in a fresh `cargo run` build. Windows UI evidence:
 
 ![Grouped More menu](artifacts/dshell-v0.1.1-more-menu.png)
 
+The v0.1.2 Simplified Chinese shell and connection form were captured from the
+freshly built Windows binary:
+
+![Simplified Chinese shell](artifacts/dshell-v0.1.2-chinese-shell.png)
+
+![Simplified Chinese SSH connection form](artifacts/dshell-v0.1.2-chinese-connection-form.png)
+
 Use the `Keyword highlights` button to keep up to 32 literal keywords in memory.
 Highlighting is disabled by default, case-insensitive, applies to live terminals
 and log replay, and can be enabled or disabled with the eye icon. Rules never
@@ -278,6 +290,24 @@ Vim, tmux, and htop. Docker reuses the package-install layer on later runs, so
 uses a random temporary password and isolated `known_hosts` file, then removes
 the container and temporary host-key file. The SSH/PTY round trip exercises
 Vim's full-screen buffer and Unicode input/save/readback.
+
+For a service that stays available while you manually exercise the desktop UI,
+run:
+
+```powershell
+.\scripts\start-docker-ssh-manual.ps1
+```
+
+The script binds OpenSSH only to `127.0.0.1:2222`, prints a temporary
+`dshelltest` password, and prints the server fingerprint plus the exact
+`known_hosts` line. Verify the fingerprint out of band, then add that line to
+your OpenSSH `known_hosts` manually before connecting from dshell. The script
+never edits `known_hosts` and never writes the password to disk. Stop the
+container after testing with:
+
+```powershell
+docker rm --force dshell-ssh-manual
+```
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current
 implementation boundary and next-session handoff. [ROADMAP.md](ROADMAP.md)

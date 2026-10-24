@@ -6,5 +6,6 @@
 
 pub mod assets;
 pub mod components;
+pub mod i18n;
 pub mod theme;
 pub mod tokens;
