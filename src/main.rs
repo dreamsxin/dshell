@@ -21,7 +21,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec, ForwardRuleUiState};
@@ -41,7 +41,7 @@ use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, S
 use sftp::{RemoteEntry, SftpCommand, SftpEvent, TransferKind, parent_remote_path, remote_join};
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
-use ssh::{AuthPromptInfo, Authentication, ConnectionSpec, JumpSpec, UiEvent};
+use ssh::{AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, UiEvent};
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
     TerminalKeyInput, TerminalMouseButton, TerminalMouseEvent, TerminalMouseModifiers,
@@ -378,6 +378,14 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn format_rate(bytes_per_second: f64) -> String {
+    if !bytes_per_second.is_finite() || bytes_per_second <= 0.5 {
+        "0 B/s".to_owned()
+    } else {
+        format!("{}/s", format_size(bytes_per_second.round() as u64))
+    }
+}
+
 struct SshSession {
     id: u64,
     title: String,
@@ -400,6 +408,7 @@ struct SshSession {
     profile_name: Option<String>,
     pending_forwards: Vec<ForwardRuleSpec>,
     log_path: Option<PathBuf>,
+    connection_info: Option<ConnectionInfo>,
     state: SessionState,
 }
 
@@ -409,6 +418,9 @@ struct TransferProgressUi {
     name: String,
     transferred: u64,
     total: u64,
+    last_transferred: u64,
+    last_sample: Instant,
+    rate_bytes_per_second: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -435,7 +447,18 @@ struct SftpViewState {
 struct ForwardViewState {
     visible: bool,
     rules: Vec<(u64, ForwardRuleUiState)>,
+    stopped: Vec<ForwardRuleSpec>,
     message: String,
+}
+
+fn remember_stopped_forward(state: &mut ForwardViewState, spec: ForwardRuleSpec) {
+    if !state.stopped.contains(&spec) {
+        state.stopped.push(spec);
+    }
+}
+
+fn forget_stopped_forward(state: &mut ForwardViewState, spec: &ForwardRuleSpec) {
+    state.stopped.retain(|stopped| stopped != spec);
 }
 
 impl SshSession {
@@ -467,6 +490,9 @@ impl SshSession {
             UiEvent::LogState(path) => {
                 self.log_path = path;
             }
+            UiEvent::ConnectionInfo(info) => {
+                self.connection_info = Some(info);
+            }
             UiEvent::Screen(frame) => {
                 self.frame = Some(frame);
                 self.terminal_message.clear();
@@ -485,7 +511,9 @@ impl SshSession {
                 self.sftp.overwrite = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
+                self.forwards.stopped.clear();
                 self.log_path = None;
+                self.connection_info = None;
                 self.state = SessionState::Disconnected;
             }
             UiEvent::Disconnected => {
@@ -501,7 +529,9 @@ impl SshSession {
                 self.sftp.overwrite = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
+                self.forwards.stopped.clear();
                 self.log_path = None;
+                self.connection_info = None;
                 self.state = SessionState::Disconnected;
             }
             UiEvent::AuthPrompt { .. } => {}
@@ -562,10 +592,10 @@ mod session_tests {
         AppShortcut, ForwardViewState, LayoutDragTarget, MouseTrackingMode, SessionEditorEscape,
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
-        dragged_panel_width, enqueue_session_request, mpsc, read_log_for_replay, remove_session,
-        search_result_message, session_editor_escape, session_editor_key,
-        session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
-        watch,
+        dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_rate, mpsc,
+        read_log_for_replay, remember_stopped_forward, remove_session, search_result_message,
+        session_editor_escape, session_editor_key, session_terminal_size_for_split,
+        split_panel_terminal_size, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::settings::AppSettings;
@@ -608,6 +638,7 @@ mod session_tests {
                 profile_name: None,
                 pending_forwards: Vec::new(),
                 log_path: None,
+                connection_info: None,
                 state: SessionState::Connected,
             },
             command_rx,
@@ -912,6 +943,30 @@ mod session_tests {
         let narrow = terminal_size_for_viewport(1280.0, 800.0, &settings, false, true);
         assert!(narrow.columns < default_size.columns);
         assert_eq!(narrow.rows, default_size.rows);
+    }
+
+    #[test]
+    fn stopped_forward_rules_stay_available_for_restart() {
+        let spec = ForwardRuleSpec {
+            kind: ForwardKind::Local,
+            listen_host: "127.0.0.1".to_owned(),
+            listen_port: 0,
+            target_host: "db.internal".to_owned(),
+            target_port: 5432,
+        };
+        let mut state = ForwardViewState::default();
+        remember_stopped_forward(&mut state, spec.clone());
+        remember_stopped_forward(&mut state, spec.clone());
+        assert_eq!(state.stopped.len(), 1);
+        forget_stopped_forward(&mut state, &spec);
+        assert!(state.stopped.is_empty());
+    }
+
+    #[test]
+    fn transfer_rates_are_formatted_for_the_inspector() {
+        assert_eq!(format_rate(0.0), "0 B/s");
+        assert_eq!(format_rate(f64::NAN), "0 B/s");
+        assert!(format_rate(1536.0).ends_with("/s"));
     }
 
     #[test]
@@ -2642,6 +2697,7 @@ impl AppView {
                     profile_name: saved_profile_name.clone(),
                     pending_forwards: saved_forwards.clone(),
                     log_path: None,
+                    connection_info: None,
                     state: SessionState::Connecting,
                 });
                 self.split = None;
@@ -4042,6 +4098,9 @@ impl AppView {
                     name: name.clone(),
                     transferred: 0,
                     total,
+                    last_transferred: 0,
+                    last_sample: Instant::now(),
+                    rate_bytes_per_second: 0.0,
                 });
                 session.sftp.message = format!("{} started: {name}", kind.label());
             }
@@ -4051,11 +4110,26 @@ impl AppView {
                 transferred,
                 total,
             } => {
+                let (rate, last_sample) = session.sftp.transfer.as_ref().map_or_else(
+                    || (0.0, Instant::now()),
+                    |current| {
+                        let elapsed = current.last_sample.elapsed().as_secs_f64();
+                        let rate = if elapsed > 0.0 {
+                            transferred.saturating_sub(current.last_transferred) as f64 / elapsed
+                        } else {
+                            current.rate_bytes_per_second
+                        };
+                        (rate, Instant::now())
+                    },
+                );
                 session.sftp.transfer = Some(TransferProgressUi {
                     kind,
                     name,
                     transferred,
                     total,
+                    last_transferred: transferred,
+                    last_sample,
+                    rate_bytes_per_second: rate,
                 });
             }
             SftpEvent::TransferFinished { kind, name } => {
@@ -4824,6 +4898,7 @@ impl AppView {
                     .forwards
                     .rules
                     .retain(|(existing, _)| *existing != rule_id);
+                forget_stopped_forward(&mut session.forwards, &spec);
                 session.forwards.rules.push((
                     rule_id,
                     ForwardRuleUiState {
@@ -4861,8 +4936,11 @@ impl AppView {
                     .forwards
                     .rules
                     .retain(|(existing, _)| *existing != rule_id);
+                if let Some(removed) = removed {
+                    remember_stopped_forward(&mut session.forwards, removed.clone());
+                    persist_remove = profile_name.clone().zip(Some(removed));
+                }
                 session.forwards.message = "Forwarding rule stopped.".to_owned();
-                persist_remove = profile_name.clone().zip(removed);
             }
             ForwardEvent::Error { id: rule_id, error } => {
                 session.forwards.message = match rule_id {
@@ -4993,6 +5071,15 @@ impl AppView {
 
     fn remove_forward_rule(&mut self, session_id: u64, rule_id: u64, cx: &mut Context<Self>) {
         self.send_forward_command(session_id, ForwardCommand::Remove(rule_id), cx);
+    }
+
+    fn restart_forward_rule(&mut self, session_id: u64, index: usize, cx: &mut Context<Self>) {
+        let spec = self.session_mut(session_id).and_then(|session| {
+            (index < session.forwards.stopped.len()).then(|| session.forwards.stopped.remove(index))
+        });
+        if let Some(spec) = spec {
+            self.send_forward_command(session_id, ForwardCommand::Add(spec), cx);
+        }
     }
 
     fn set_forward_message(
@@ -7336,6 +7423,7 @@ impl AppView {
         let transfer_message = session.sftp.message.clone();
         let sftp_visible = session.sftp.visible;
         let rules = session.forwards.rules.clone();
+        let stopped_rules = session.forwards.stopped.clone();
         let forward_message = session.forwards.message.clone();
         let forwards_visible = session.forwards.visible;
         let username = session.username.clone();
@@ -7344,6 +7432,7 @@ impl AppView {
         let state = session.state;
         let terminal_size = session.terminal_size;
         let log_active = session.log_path.is_some();
+        let connection_info = session.connection_info.clone();
         let profile = session
             .profile_name
             .as_ref()
@@ -7420,11 +7509,24 @@ impl AppView {
                             .text_size(px(ui_tokens::FONT_CAPTION))
                             .text_color(tokens.text_secondary)
                             .child(format!(
-                                "{} / {}",
+                                "{} / {} · {}",
                                 format_size(transfer.transferred),
-                                format_size(transfer.total)
+                                format_size(transfer.total),
+                                format_rate(transfer.rate_bytes_per_second)
                             ))
                             .child(format!("{:.0}%", ratio * 100.0)),
+                    )
+                    .child(
+                        components::button(
+                            tokens,
+                            ("inspector-cancel-transfer", session_id),
+                            "Cancel transfer",
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.cancel_transfer(session_id, cx);
+                        })),
                     );
             } else {
                 group = group.child(components::help_text(
@@ -7475,7 +7577,7 @@ impl AppView {
                 .p(px(ui_tokens::SPACE_3))
                 .border_b_1()
                 .border_color(tokens.border_subtle);
-            if rules.is_empty() {
+            if rules.is_empty() && stopped_rules.is_empty() {
                 group = group.child(components::help_text(tokens, "No forwarding rules."));
             } else {
                 for (rule_id, rule) in rules {
@@ -7536,6 +7638,72 @@ impl AppView {
                                     .text_color(tokens.text_secondary)
                                     .child(target)
                                     .child(format!("{} active", rule.connections)),
+                            ),
+                    );
+                }
+                for (index, spec) in stopped_rules.iter().enumerate() {
+                    let target = if spec.kind.needs_target() {
+                        format!("{}:{}", spec.target_host, spec.target_port)
+                    } else {
+                        "SOCKS5".to_owned()
+                    };
+                    let listen_port = if spec.listen_port == 0 {
+                        "auto".to_owned()
+                    } else {
+                        spec.listen_port.to_string()
+                    };
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_disabled)
+                                            .child(format!(
+                                                "{} {}:{}",
+                                                spec.kind.label(),
+                                                spec.listen_host,
+                                                listen_port
+                                            )),
+                                    )
+                                    .child(
+                                        components::icon_button(
+                                            tokens,
+                                            ("inspector-start-forward", index),
+                                            IconName::ArrowRight,
+                                            ButtonKind::Ghost,
+                                            ButtonSize::Small,
+                                            "Start rule",
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.restart_forward_rule(session_id, index, cx);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(target)
+                                    .child("Stopped"),
                             ),
                     );
                 }
@@ -7607,6 +7775,22 @@ impl AppView {
                     format!("{} x {}", terminal_size.columns, terminal_size.rows),
                 ))
                 .child(components::info_row(tokens, "Auth", auth))
+                .child(components::info_row(
+                    tokens,
+                    "Host key",
+                    connection_info
+                        .as_ref()
+                        .map(|info| info.host_key_algorithm.clone())
+                        .unwrap_or_else(|| "Pending".to_owned()),
+                ))
+                .child(components::info_row(
+                    tokens,
+                    "Fingerprint",
+                    connection_info
+                        .as_ref()
+                        .map(|info| info.host_key_fingerprint.clone())
+                        .unwrap_or_else(|| "Not reported".to_owned()),
+                ))
                 .child(components::info_row(tokens, "Profile", profile_name))
                 .child(components::info_row(tokens, "Jump host", jump))
                 .child(components::info_row(

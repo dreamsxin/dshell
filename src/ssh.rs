@@ -12,7 +12,7 @@ use russh::{
     ChannelMsg, Disconnect,
     client::{self, AuthResult, Handler, KeyboardInteractiveAuthResponse, Prompt},
     keys::{
-        PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, check_known_hosts_path,
+        HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, check_known_hosts_path,
         load_secret_key,
     },
 };
@@ -82,12 +82,26 @@ pub struct AuthPromptInfo {
     pub echo: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionInfo {
+    pub host_key_algorithm: String,
+    pub host_key_fingerprint: String,
+}
+
+fn connection_info_for_key(key: &PublicKey) -> ConnectionInfo {
+    ConnectionInfo {
+        host_key_algorithm: key.algorithm().as_str().to_owned(),
+        host_key_fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+    }
+}
+
 pub enum UiEvent {
     Status(String),
     Screen(TerminalFrame),
     Failed(String),
     Disconnected,
     LogState(Option<PathBuf>),
+    ConnectionInfo(ConnectionInfo),
     AuthPrompt {
         name: String,
         instructions: String,
@@ -103,6 +117,7 @@ struct KnownHostsHandler {
     path: PathBuf,
     remote_forwards: RemoteTargetMap,
     forward_events: Option<mpsc::UnboundedSender<ForwardEvent>>,
+    events: Option<mpsc::Sender<UiEvent>>,
 }
 
 impl Handler for KnownHostsHandler {
@@ -114,7 +129,12 @@ impl Handler for KnownHostsHandler {
     ) -> Result<bool, Self::Error> {
         let key = server_public_key.public_key();
         match is_known_host_key(&self.host, self.port, &key, &self.path)? {
-            true => Ok(true),
+            true => {
+                if let Some(events) = &self.events {
+                    let _ = events.try_send(UiEvent::ConnectionInfo(connection_info_for_key(&key)));
+                }
+                Ok(true)
+            }
             false => Err(anyhow!(
                 "Server key for {}:{} is not present in {}",
                 self.host,
@@ -332,6 +352,7 @@ async fn run_connection_with_known_hosts(
                 path: known_hosts_path.clone(),
                 remote_forwards: Arc::new(Mutex::new(HashMap::new())),
                 forward_events: None,
+                events: None,
             };
             let mut jump_handle = client::connect(
                 Arc::clone(&config),
@@ -358,6 +379,7 @@ async fn run_connection_with_known_hosts(
                 path: known_hosts_path.clone(),
                 remote_forwards: Arc::clone(&remote_targets),
                 forward_events: Some(forward_events.clone()),
+                events: Some(events.clone()),
             };
             session =
                 client::connect_stream(Arc::clone(&config), channel.into_stream(), target_handler)
@@ -371,6 +393,7 @@ async fn run_connection_with_known_hosts(
                 path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
                 forward_events: Some(forward_events.clone()),
+                events: Some(events.clone()),
             };
             session = client::connect(config, (host.as_str(), port), handler)
                 .await
@@ -1053,7 +1076,7 @@ async fn flush_log(file: &mut Option<tokio::fs::File>, buffer: &mut Vec<u8>) -> 
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, UiEvent, can_answer_with_password,
-        is_known_host_key, run_connection_with_known_hosts,
+        connection_info_for_key, is_known_host_key, run_connection_with_known_hosts,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -1112,6 +1135,19 @@ mod tests {
         let key = PublicKey::from_openssh(KEY_A).unwrap();
 
         assert!(is_known_host_key("localhost", 13265, &key, &path).unwrap());
+    }
+
+    #[test]
+    fn connection_info_reports_the_algorithm_and_fingerprint() {
+        let key = PublicKey::from_openssh(KEY_A).unwrap();
+        let info = connection_info_for_key(&key);
+        assert_eq!(info.host_key_algorithm, "ssh-ed25519");
+        assert!(
+            info.host_key_fingerprint.starts_with("SHA256:"),
+            "{}",
+            info.host_key_fingerprint
+        );
+        assert!(!info.host_key_fingerprint.contains(KEY_A));
     }
 
     #[test]
@@ -1316,6 +1352,7 @@ mod tests {
 
                 let exercise = async {
                     let mut events = event_rx;
+                    let mut connection_info = None;
                     loop {
                         match timeout(Duration::from_secs(20), events.recv())
                             .await
@@ -1323,11 +1360,20 @@ mod tests {
                             .context("SSH event stream closed during connection")?
                         {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::ConnectionInfo(info) => connection_info = Some(info),
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
                             UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
                         }
                     }
+                    let info = connection_info
+                        .context("the SSH session did not report its host key information")?;
+                    assert!(!info.host_key_algorithm.is_empty());
+                    assert!(
+                        info.host_key_fingerprint.starts_with("SHA256:"),
+                        "{}",
+                        info.host_key_fingerprint
+                    );
 
                     command_tx
                         .send(TerminalRequest::Resize(TerminalSize {
@@ -1422,6 +1468,7 @@ mod tests {
                             UiEvent::Status(_)
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
+                            | UiEvent::ConnectionInfo(_)
                             | UiEvent::AuthPrompt { .. } => {}
                         }
                     }
@@ -1606,7 +1653,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -1699,7 +1746,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -1716,7 +1764,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -1811,7 +1860,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -1831,7 +1881,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -1861,7 +1912,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     let logged = std::fs::read_to_string(&log_path)
@@ -1884,7 +1936,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -1982,7 +2035,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -2011,7 +2065,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2107,7 +2162,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -2124,7 +2180,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2301,7 +2358,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -2318,7 +2376,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
-                            | UiEvent::SearchResult(_) => {}
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2431,7 +2490,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -2792,7 +2851,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2885,7 +2944,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
 
@@ -3000,7 +3059,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -3140,7 +3199,8 @@ mod tests {
                 UiEvent::Status(_)
                 | UiEvent::LogState(_)
                 | UiEvent::AuthPrompt { .. }
-                | UiEvent::SearchResult(_) => {}
+                | UiEvent::SearchResult(_)
+                | UiEvent::ConnectionInfo(_) => {}
             }
         }
     }
