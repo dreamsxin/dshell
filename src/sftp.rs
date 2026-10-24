@@ -48,7 +48,7 @@ pub struct RemoteEntry {
     pub size: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum SftpCommand {
     List(String),
     Upload {

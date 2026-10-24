@@ -2,6 +2,25 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.3] - 2026-10-24
+
+Improves the SFTP workflow for repeated server administration tasks.
+
+### Added
+
+- Allow selecting multiple local files for upload.
+- Add a per-session FIFO transfer queue shared by file and directory transfers.
+- Keep overwrite confirmation tied to the active transfer so queued jobs wait safely.
+- Automatically start the next queued transfer after success, failure or cancellation.
+- Add a visible queued-transfer count and a clear-queue action in the SFTP panel.
+- Localize the new queue and SFTP panel labels in Simplified Chinese.
+
+### Verification
+
+- `cargo fmt --all`, offline `cargo check --locked` and `scripts\verify-hard-constraints.ps1` passed.
+- Unit tests: 101 passed, 9 Docker-only tests skipped by the unit-test run.
+- `scripts\test-docker-ssh.ps1`: 9 integration tests passed.
+
 ## [0.1.2] - 2026-10-24
 
 Adds a Simplified Chinese application shell and a repeatable local SSH service

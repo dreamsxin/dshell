@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.2`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.3`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -80,7 +80,9 @@ can upload or download single files and entire nested directories with the
 native file picker. Existing remote or local targets offer Overwrite, Resume or
 Keep existing; Resume continues from the current target size when it is smaller
 than the source and restarts from zero when it is larger. Transfers show
-progress and can be cancelled; cancellation uses a best-effort cleanup of
+progress and can be cancelled. Multiple selected uploads and repeated file or
+directory actions are serialized in a per-session FIFO queue; the panel shows
+the queued count and can clear waiting transfers. Cancellation uses a best-effort cleanup of
 entries created by that transfer while preserving partially resumed files. The
 panel can also create directories, rename entries, and delete files or empty
 directories; deletion requires a second confirmation. Symbolic links are

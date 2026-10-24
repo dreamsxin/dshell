@@ -14,7 +14,7 @@ mod ui;
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -681,6 +681,8 @@ struct SftpViewState {
     entries: Vec<RemoteEntry>,
     message: String,
     transfer: Option<TransferProgressUi>,
+    active_transfer: Option<SftpCommand>,
+    transfer_queue: VecDeque<SftpCommand>,
     overwrite: Option<OverwritePrompt>,
     rename_from: Option<String>,
     pending_delete: Option<(String, bool)>,
@@ -751,6 +753,8 @@ impl SshSession {
                 self.sftp_tx = None;
                 self.sftp_cancel = None;
                 self.sftp.transfer = None;
+                self.sftp.active_transfer = None;
+                self.sftp.transfer_queue.clear();
                 self.sftp.overwrite = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
@@ -769,6 +773,8 @@ impl SshSession {
                 self.sftp_tx = None;
                 self.sftp_cancel = None;
                 self.sftp.transfer = None;
+                self.sftp.active_transfer = None;
+                self.sftp.transfer_queue.clear();
                 self.sftp.overwrite = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
@@ -844,20 +850,21 @@ mod session_tests {
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
         dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_log_time,
-        format_rate, keyword_matches, move_profile_to_group, mpsc, recall_compose_history,
-        remember_compose_history, remember_stopped_forward, remove_session, reorder_session_ids,
-        search_result_message, session_editor_escape, session_editor_key,
+        format_rate, is_sftp_transfer_command, keyword_matches, move_profile_to_group, mpsc,
+        recall_compose_history, remember_compose_history, remember_stopped_forward, remove_session,
+        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
-        terminal_size_for_viewport, watch,
+        take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
     use crate::profiles::{AuthMethod, HostProfile};
     use crate::settings::AppSettings;
+    use crate::sftp::SftpCommand;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
     use crate::ui::tokens as ui_tokens;
-    use std::collections::HashSet;
+    use std::collections::{HashSet, VecDeque};
 
     fn test_session(
         id: u64,
@@ -1246,6 +1253,47 @@ mod session_tests {
         assert_eq!(format_rate(0.0), "0 B/s");
         assert_eq!(format_rate(f64::NAN), "0 B/s");
         assert!(format_rate(1536.0).ends_with("/s"));
+    }
+
+    #[test]
+    fn sftp_transfer_queue_ignores_non_transfer_commands() {
+        let upload = SftpCommand::Upload {
+            local: "local.txt".into(),
+            remote: "/tmp/local.txt".to_owned(),
+            overwrite: false,
+            resume: false,
+        };
+        let list = SftpCommand::List("/tmp".to_owned());
+        assert!(is_sftp_transfer_command(&upload));
+        assert!(!is_sftp_transfer_command(&list));
+    }
+
+    #[test]
+    fn sftp_transfer_queue_is_fifo_and_pauses_for_active_work() {
+        let first = SftpCommand::Upload {
+            local: "first.txt".into(),
+            remote: "/tmp/first.txt".to_owned(),
+            overwrite: false,
+            resume: false,
+        };
+        let second = SftpCommand::Download {
+            remote: "/tmp/second.txt".to_owned(),
+            local: "second.txt".into(),
+            overwrite: false,
+            resume: false,
+        };
+        let mut queue = VecDeque::from([first, second]);
+        assert!(take_next_sftp_transfer(true, false, &mut queue).is_none());
+        assert!(take_next_sftp_transfer(false, true, &mut queue).is_none());
+        assert!(matches!(
+            take_next_sftp_transfer(false, false, &mut queue),
+            Some(SftpCommand::Upload { .. })
+        ));
+        assert!(matches!(
+            take_next_sftp_transfer(false, false, &mut queue),
+            Some(SftpCommand::Download { .. })
+        ));
+        assert!(queue.is_empty());
     }
 
     #[test]
@@ -3526,7 +3574,7 @@ impl AppView {
                 cx.spawn(async move |this, cx| {
                     while let Some(event) = sftp_events.recv().await {
                         let result = this.update(cx, |view, cx| {
-                            if view.apply_sftp_event(id, event) {
+                            if view.apply_sftp_event(id, event, cx) {
                                 cx.notify();
                             }
                         });
@@ -5287,118 +5335,197 @@ impl AppView {
         .into_any_element()
     }
 
-    fn apply_sftp_event(&mut self, id: u64, event: SftpEvent) -> bool {
-        let Some(session) = self.session_mut(id) else {
-            return false;
-        };
-        match event {
-            SftpEvent::Ready { path } => {
-                if session.sftp.path.is_empty() {
-                    session.sftp.path = path;
-                }
-                session.sftp.message.clear();
-                let target = session.sftp.path.clone();
-                if let Some(sftp_tx) = &session.sftp_tx {
-                    let _ = sftp_tx.try_send(SftpCommand::List(target));
-                }
-            }
-            SftpEvent::Entries { path, entries } => {
-                session.sftp.path = path;
-                session.sftp.entries = entries;
-                session.sftp.message.clear();
-            }
-            SftpEvent::Error(error) => {
-                session.sftp.message = error;
-            }
-            SftpEvent::NeedsOverwrite {
-                kind,
-                local,
-                remote,
-                is_directory,
-            } => {
-                session.sftp.message = format!(
-                    "{} target {} already exists.",
-                    kind.label(),
-                    if kind == TransferKind::Upload {
-                        remote.clone()
-                    } else {
-                        local.display().to_string()
+    fn apply_sftp_event(&mut self, id: u64, event: SftpEvent, cx: &mut Context<Self>) -> bool {
+        let mut dispatch_next = false;
+        {
+            let Some(session) = self.session_mut(id) else {
+                return false;
+            };
+            match event {
+                SftpEvent::Ready { path } => {
+                    if session.sftp.path.is_empty() {
+                        session.sftp.path = path;
                     }
-                );
-                session.sftp.overwrite = Some(OverwritePrompt {
+                    session.sftp.message.clear();
+                    let target = session.sftp.path.clone();
+                    if let Some(sftp_tx) = &session.sftp_tx {
+                        let _ = sftp_tx.try_send(SftpCommand::List(target));
+                    }
+                }
+                SftpEvent::Entries { path, entries } => {
+                    session.sftp.path = path;
+                    session.sftp.entries = entries;
+                    session.sftp.message.clear();
+                }
+                SftpEvent::Error(error) => {
+                    session.sftp.message = error;
+                }
+                SftpEvent::NeedsOverwrite {
                     kind,
                     local,
                     remote,
                     is_directory,
-                });
-            }
-            SftpEvent::TransferStarted { kind, name, total } => {
-                session.sftp.transfer = Some(TransferProgressUi {
-                    kind,
-                    name: name.clone(),
-                    transferred: 0,
-                    total,
-                    last_transferred: 0,
-                    last_sample: Instant::now(),
-                    rate_bytes_per_second: 0.0,
-                });
-                session.sftp.message = format!("{} started: {name}", kind.label());
-            }
-            SftpEvent::TransferProgress {
-                kind,
-                name,
-                transferred,
-                total,
-            } => {
-                let (rate, last_sample) = session.sftp.transfer.as_ref().map_or_else(
-                    || (0.0, Instant::now()),
-                    |current| {
-                        let elapsed = current.last_sample.elapsed().as_secs_f64();
-                        let rate = if elapsed > 0.0 {
-                            transferred.saturating_sub(current.last_transferred) as f64 / elapsed
+                } => {
+                    session.sftp.message = format!(
+                        "{} target {} already exists.",
+                        kind.label(),
+                        if kind == TransferKind::Upload {
+                            remote.clone()
                         } else {
-                            current.rate_bytes_per_second
-                        };
-                        (rate, Instant::now())
-                    },
-                );
-                session.sftp.transfer = Some(TransferProgressUi {
+                            local.display().to_string()
+                        }
+                    );
+                    session.sftp.overwrite = Some(OverwritePrompt {
+                        kind,
+                        local,
+                        remote,
+                        is_directory,
+                    });
+                }
+                SftpEvent::TransferStarted { kind, name, total } => {
+                    session.sftp.transfer = Some(TransferProgressUi {
+                        kind,
+                        name: name.clone(),
+                        transferred: 0,
+                        total,
+                        last_transferred: 0,
+                        last_sample: Instant::now(),
+                        rate_bytes_per_second: 0.0,
+                    });
+                    session.sftp.message = format!("{} started: {name}", kind.label());
+                }
+                SftpEvent::TransferProgress {
                     kind,
                     name,
                     transferred,
                     total,
-                    last_transferred: transferred,
-                    last_sample,
-                    rate_bytes_per_second: rate,
-                });
-            }
-            SftpEvent::TransferFinished { kind, name } => {
-                session.sftp.transfer = None;
-                session.sftp.message = format!("{} finished: {name}", kind.label());
-                if kind == TransferKind::Upload {
+                } => {
+                    let (rate, last_sample) = session.sftp.transfer.as_ref().map_or_else(
+                        || (0.0, Instant::now()),
+                        |current| {
+                            let elapsed = current.last_sample.elapsed().as_secs_f64();
+                            let rate = if elapsed > 0.0 {
+                                transferred.saturating_sub(current.last_transferred) as f64
+                                    / elapsed
+                            } else {
+                                current.rate_bytes_per_second
+                            };
+                            (rate, Instant::now())
+                        },
+                    );
+                    session.sftp.transfer = Some(TransferProgressUi {
+                        kind,
+                        name,
+                        transferred,
+                        total,
+                        last_transferred: transferred,
+                        last_sample,
+                        rate_bytes_per_second: rate,
+                    });
+                }
+                SftpEvent::TransferFinished { kind, name } => {
+                    session.sftp.transfer = None;
+                    session.sftp.active_transfer = None;
+                    session.sftp.message = format!("{} finished: {name}", kind.label());
+                    if kind == TransferKind::Upload {
+                        let path = session.sftp.path.clone();
+                        if let Some(sftp_tx) = &session.sftp_tx {
+                            let _ = sftp_tx.try_send(SftpCommand::List(path));
+                        }
+                    }
+                    dispatch_next = true;
+                }
+                SftpEvent::TransferFailed { kind, name, error } => {
+                    session.sftp.transfer = None;
+                    session.sftp.active_transfer = None;
+                    session.sftp.message = format!("{} failed for {name}: {error}", kind.label());
+                    dispatch_next = true;
+                }
+                SftpEvent::TransferCancelled { kind, name } => {
+                    session.sftp.transfer = None;
+                    session.sftp.active_transfer = None;
+                    session.sftp.message = format!("{} cancelled: {name}", kind.label());
+                    dispatch_next = true;
+                }
+                SftpEvent::OperationFinished { action } => {
+                    session.sftp.message = action;
                     let path = session.sftp.path.clone();
                     if let Some(sftp_tx) = &session.sftp_tx {
                         let _ = sftp_tx.try_send(SftpCommand::List(path));
                     }
                 }
             }
-            SftpEvent::TransferFailed { kind, name, error } => {
-                session.sftp.transfer = None;
-                session.sftp.message = format!("{} failed for {name}: {error}", kind.label());
-            }
-            SftpEvent::TransferCancelled { kind, name } => {
-                session.sftp.transfer = None;
-                session.sftp.message = format!("{} cancelled: {name}", kind.label());
-            }
-            SftpEvent::OperationFinished { action } => {
-                session.sftp.message = action;
-                let path = session.sftp.path.clone();
-                if let Some(sftp_tx) = &session.sftp_tx {
-                    let _ = sftp_tx.try_send(SftpCommand::List(path));
-                }
-            }
+        }
+        if dispatch_next {
+            self.dispatch_next_sftp_transfer(id, cx);
         }
         true
+    }
+
+    fn enqueue_sftp_transfer(
+        &mut self,
+        session_id: u64,
+        command: SftpCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        debug_assert!(is_sftp_transfer_command(&command));
+        session.sftp.transfer_queue.push_back(command);
+        self.dispatch_next_sftp_transfer(session_id, cx);
+        cx.notify();
+    }
+
+    fn dispatch_next_sftp_transfer(&mut self, session_id: u64, _cx: &mut Context<Self>) {
+        let (sftp_tx, command) = {
+            let Some(session) = self.session_mut(session_id) else {
+                return;
+            };
+            if session.sftp.active_transfer.is_some() || session.sftp.overwrite.is_some() {
+                return;
+            }
+            let Some(command) = take_next_sftp_transfer(
+                session.sftp.active_transfer.is_some(),
+                session.sftp.overwrite.is_some(),
+                &mut session.sftp.transfer_queue,
+            ) else {
+                return;
+            };
+            let Some(sftp_tx) = session.sftp_tx.clone() else {
+                session.sftp.message = "SFTP is not available for this session.".to_owned();
+                return;
+            };
+            session.sftp.active_transfer = Some(command.clone());
+            (sftp_tx, command)
+        };
+        let error = match sftp_tx.try_send(command) {
+            Ok(()) => return,
+            Err(error) => error,
+        };
+        let error_message = format!("SFTP request queue is unavailable: {error:?}");
+        let command = match error {
+            mpsc::error::TrySendError::Full(command)
+            | mpsc::error::TrySendError::Closed(command) => command,
+        };
+        if let Some(session) = self.session_mut(session_id) {
+            session.sftp.active_transfer = None;
+            session.sftp.transfer_queue.push_front(command);
+            session.sftp.message = error_message;
+        }
+    }
+
+    fn clear_sftp_transfer_queue(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if let Some(session) = self.session_mut(session_id) {
+            let cleared = session.sftp.transfer_queue.len();
+            session.sftp.transfer_queue.clear();
+            session.sftp.message = if cleared == 0 {
+                "No queued transfers.".to_owned()
+            } else {
+                format!("Cleared {cleared} queued transfer(s).")
+            };
+        }
+        cx.notify();
     }
 
     fn send_sftp_command(&mut self, session_id: u64, command: SftpCommand, cx: &mut Context<Self>) {
@@ -5473,14 +5600,16 @@ impl AppView {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: Some("Upload file".into()),
         });
         cx.spawn(async move |this, cx| match receiver.await {
-            Ok(Ok(Some(mut paths))) => {
-                if let Some(local) = paths.pop() {
-                    let _ = this.update(cx, |view, cx| view.queue_upload(session_id, local, cx));
-                }
+            Ok(Ok(Some(paths))) => {
+                let _ = this.update(cx, |view, cx| {
+                    for local in paths {
+                        view.queue_upload(session_id, local, cx);
+                    }
+                });
             }
             Ok(Err(error)) => {
                 let _ = this.update(cx, |view, cx| {
@@ -5513,7 +5642,7 @@ impl AppView {
             return;
         };
         let remote = remote_join(&base, &name);
-        self.send_sftp_command(
+        self.enqueue_sftp_transfer(
             session_id,
             SftpCommand::Upload {
                 local,
@@ -5555,7 +5684,7 @@ impl AppView {
                 if let Some(directory) = paths.pop() {
                     let local = directory.join(&local_name);
                     let _ = this.update(cx, |view, cx| {
-                        view.send_sftp_command(
+                        view.enqueue_sftp_transfer(
                             session_id,
                             SftpCommand::Download {
                                 remote,
@@ -5625,7 +5754,7 @@ impl AppView {
             return;
         };
         let remote = remote_join(&base, &name);
-        self.send_sftp_command(
+        self.enqueue_sftp_transfer(
             session_id,
             SftpCommand::UploadDirectory {
                 local,
@@ -5663,7 +5792,7 @@ impl AppView {
                 if let Some(directory) = paths.pop() {
                     let local = directory.join(&local_name);
                     let _ = this.update(cx, |view, cx| {
-                        view.send_sftp_command(
+                        view.enqueue_sftp_transfer(
                             session_id,
                             SftpCommand::DownloadDirectory {
                                 remote,
@@ -5725,8 +5854,10 @@ impl AppView {
     fn dismiss_sftp_overwrite(&mut self, session_id: u64, cx: &mut Context<Self>) {
         if let Some(session) = self.session_mut(session_id) {
             session.sftp.overwrite = None;
+            session.sftp.active_transfer = None;
             session.sftp.message = "Transfer cancelled.".to_owned();
         }
+        self.dispatch_next_sftp_transfer(session_id, cx);
         cx.notify();
     }
 
@@ -5739,6 +5870,7 @@ impl AppView {
         let entries = session.sftp.entries.clone();
         let message = session.sftp.message.clone();
         let transfer = session.sftp.transfer.clone();
+        let queued_transfers = session.sftp.transfer_queue.len();
         let overwrite = session.sftp.overwrite.clone();
         let rename_from = session.sftp.rename_from.clone();
         let pending_delete = session.sftp.pending_delete.clone();
@@ -5757,7 +5889,7 @@ impl AppView {
                     .p(px(8.))
                     .text_size(px(11.))
                     .text_color(tokens.text_disabled)
-                    .child("No entries"),
+                    .child(self.tr("No entries")),
             );
         }
         for (index, entry) in entries.into_iter().enumerate() {
@@ -5786,7 +5918,7 @@ impl AppView {
                     )
                     .child(
                         Button::new(("sftp-download-dir", index))
-                            .label("Download")
+                            .label(self.tr("Download"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.begin_download_directory(
                                     session_id,
@@ -5815,7 +5947,7 @@ impl AppView {
                     )
                     .child(
                         Button::new(("sftp-download", index))
-                            .label("Download")
+                            .label(self.tr("Download"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.begin_download(
                                     session_id,
@@ -5829,7 +5961,7 @@ impl AppView {
             row = row
                 .child(
                     Button::new(("sftp-rename", index))
-                        .label("Rename")
+                        .label(self.tr("Rename"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.begin_sftp_rename(
                                 session_id,
@@ -5842,7 +5974,7 @@ impl AppView {
                 )
                 .child(
                     Button::new(("sftp-delete", index))
-                        .label("Delete")
+                        .label(self.tr("Delete"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.request_sftp_delete(session_id, delete_path.clone(), is_dir, cx);
                         })),
@@ -5854,29 +5986,29 @@ impl AppView {
         controls = controls
             .child(
                 Button::new("sftp-up")
-                    .label("Up")
+                    .label(self.tr("Up"))
                     .on_click(cx.listener(move |this, _, _, cx| this.sftp_go_up(session_id, cx))),
             )
             .child(
                 Button::new("sftp-refresh")
-                    .label("Refresh")
+                    .label(self.tr("Refresh"))
                     .on_click(cx.listener(move |this, _, _, cx| this.refresh_sftp(session_id, cx))),
             )
             .child(
                 Button::new("sftp-upload")
-                    .label("Upload")
+                    .label(self.tr("Upload"))
                     .on_click(cx.listener(move |this, _, _, cx| this.begin_upload(session_id, cx))),
             )
             .child(
                 Button::new("sftp-upload-dir")
-                    .label("Folder")
+                    .label(self.tr("Folder"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.begin_upload_directory(session_id, cx);
                     })),
             )
             .child(
                 Button::new("sftp-close")
-                    .label("Close")
+                    .label(self.tr("Close"))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_sftp(session_id, cx))),
             );
 
@@ -5912,7 +6044,7 @@ impl AppView {
                     .text_color(tokens.text_secondary)
                     .overflow_hidden()
                     .child(if path.is_empty() {
-                        "Waiting for the SFTP subsystem...".to_owned()
+                        self.tr("Waiting for the SFTP subsystem...")
                     } else {
                         path
                     }),
@@ -5925,31 +6057,34 @@ impl AppView {
             .py(px(4.))
             .child(div().flex_1().child(components::field(
                 &tokens,
-                "Remote name",
+                self.tr("Remote name"),
                 &self.sftp_name,
                 false,
             )));
         if rename_from.is_some() {
-            operations =
-                operations
-                    .child(
-                        Button::new("sftp-rename-apply")
-                            .label("Rename")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.apply_sftp_rename(session_id, window, cx);
-                            })),
-                    )
-                    .child(Button::new("sftp-rename-cancel").label("Cancel").on_click(
-                        cx.listener(move |this, _, _, cx| {
+            operations = operations
+                .child(
+                    Button::new("sftp-rename-apply")
+                        .label(self.tr("Rename"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.apply_sftp_rename(session_id, window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("sftp-rename-cancel")
+                        .label(self.tr("Cancel"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
                             this.cancel_sftp_rename(session_id, cx);
-                        }),
-                    ));
+                        })),
+                );
         } else {
-            operations = operations.child(Button::new("sftp-mkdir").label("New folder").on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.create_sftp_directory(session_id, cx);
-                }),
-            ));
+            operations = operations.child(
+                Button::new("sftp-mkdir")
+                    .label(self.tr("New folder"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.create_sftp_directory(session_id, cx);
+                    })),
+            );
         }
         panel = panel.child(operations).child(list);
 
@@ -5965,7 +6100,11 @@ impl AppView {
                     .text_size(px(11.))
                     .child(format!(
                         "Delete {} {delete_path}?",
-                        if is_dir { "directory" } else { "file" }
+                        if is_dir {
+                            self.tr("directory")
+                        } else {
+                            self.tr("file")
+                        }
                     ))
                     .child(
                         div()
@@ -5976,7 +6115,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "sftp-delete-cancel",
-                                    "Cancel",
+                                    self.tr("Cancel"),
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
                                 )
@@ -5990,7 +6129,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "sftp-delete-confirm",
-                                    "Delete",
+                                    self.tr("Delete"),
                                     ButtonKind::Danger,
                                     ButtonSize::Small,
                                 )
@@ -6028,9 +6167,34 @@ impl AppView {
                     ))
                     .child(
                         Button::new("sftp-cancel-transfer")
-                            .label("Cancel transfer")
+                            .label(self.tr("Cancel transfer"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.cancel_transfer(session_id, cx);
+                            })),
+                    ),
+            );
+        }
+
+        if queued_transfers > 0 {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(4.))
+                    .p(px(8.))
+                    .border_t_1()
+                    .border_color(tokens.border_subtle)
+                    .text_size(px(10.))
+                    .child(format!(
+                        "{}: {queued_transfers}",
+                        self.tr("Queued transfers")
+                    ))
+                    .child(
+                        Button::new("sftp-clear-queue")
+                            .label(self.tr("Clear queue"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.clear_sftp_transfer_queue(session_id, cx);
                             })),
                     ),
             );
@@ -6064,7 +6228,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "sftp-keep",
-                                    "Keep existing",
+                                    self.tr("Keep existing"),
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
                                 )
@@ -6078,7 +6242,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "sftp-resume",
-                                    "Resume",
+                                    self.tr("Resume"),
                                     ButtonKind::Secondary,
                                     ButtonSize::Small,
                                 )
@@ -6092,7 +6256,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "sftp-overwrite",
-                                    "Overwrite",
+                                    self.tr("Overwrite"),
                                     ButtonKind::Danger,
                                     ButtonSize::Small,
                                 )
@@ -11202,6 +11366,27 @@ fn app_shortcut(
         }
     }
     None
+}
+
+fn is_sftp_transfer_command(command: &SftpCommand) -> bool {
+    matches!(
+        command,
+        SftpCommand::Upload { .. }
+            | SftpCommand::Download { .. }
+            | SftpCommand::UploadDirectory { .. }
+            | SftpCommand::DownloadDirectory { .. }
+    )
+}
+
+fn take_next_sftp_transfer(
+    active: bool,
+    waiting_for_overwrite: bool,
+    queue: &mut VecDeque<SftpCommand>,
+) -> Option<SftpCommand> {
+    if active || waiting_for_overwrite {
+        return None;
+    }
+    queue.pop_front()
 }
 
 fn sftp_transfer_command(prompt: OverwritePrompt, overwrite: bool, resume: bool) -> SftpCommand {
