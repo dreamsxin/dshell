@@ -51,6 +51,7 @@ use terminal::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use ui::{
+    assets::AppAssets,
     components::{self, ButtonKind, ButtonSize, Tone},
     theme::{ThemeTokens, UiTheme},
     tokens as ui_tokens,
@@ -575,7 +576,6 @@ fn layout_preset_item(
         } else {
             tokens.surface
         })
-        .hover(|style| style.bg(tokens.surface_overlay))
         .disabled(!enabled)
         .child(
             div()
@@ -11338,7 +11338,7 @@ impl Render for AppView {
 }
 
 fn main() {
-    Application::new().run(|cx| {
+    Application::new().with_assets(AppAssets).run(|cx| {
         gpui_component::init(cx);
         ui::theme::install(cx, UiTheme::DEFAULT);
         cx.open_window(WindowOptions::default(), |window, cx| {

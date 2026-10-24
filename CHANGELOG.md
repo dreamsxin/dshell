@@ -2,6 +2,21 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.1] - 2026-10-24
+
+Maintenance release fixing missing command-bar and menu icons in fresh builds.
+
+### Fixed
+
+- Provide the SVG asset source required by gpui-component icons, including the toolbar, More menu and workspace layout presets.
+- Remove duplicate hover styling from layout preset buttons that could panic when a preset was activated.
+
+### Verification
+
+- `scripts\verify-hard-constraints.ps1` passed: all-target type checking and 106 tests (97 passed, 9 Docker-only tests skipped by the unit-test run).
+- Docker integration tests were not rerun because this release changes only UI assets and layout-menu styling; the previous SSH integration run is documented under `v0.1.0`.
+- UI evidence: `artifacts/dshell-v0.1.1-layout-menu.png` and `artifacts/dshell-v0.1.1-more-menu.png`.
+
 ## [0.1.0] - 2026-10-24
 
 First public release of the native Rust + GPUI SSH desktop client.

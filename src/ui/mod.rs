@@ -4,6 +4,7 @@
 //! and the small component helpers in [`components`] instead of writing bare
 //! colors, spacing or corner radii.
 
+pub mod assets;
 pub mod components;
 pub mod theme;
 pub mod tokens;

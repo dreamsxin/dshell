@@ -2,8 +2,8 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; see [CHANGELOG.md](CHANGELOG.md)
-for the release scope and verification record.
+runtime. The first public release is `v0.1.0`; the current maintenance release
+is `v0.1.1`. See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;
@@ -227,6 +227,13 @@ orientation and a close-split action. Divider handles remain available for fine
 tuning. The session-tab ellipsis button or a tab right-click opens icon actions
 for properties, split, disconnect, close, close other tabs and close tabs to the
 right.
+
+The layout preset and More menus use application-provided SVG icon assets, so
+their icons render in a fresh `cargo run` build. Windows UI evidence:
+
+![Workspace layout presets](artifacts/dshell-v0.1.1-layout-menu.png)
+
+![Grouped More menu](artifacts/dshell-v0.1.1-more-menu.png)
 
 Use the `Keyword highlights` button to keep up to 32 literal keywords in memory.
 Highlighting is disabled by default, case-insensitive, applies to live terminals

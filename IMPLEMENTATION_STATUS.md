@@ -6,6 +6,7 @@
 
 ## 已落实
 
+- GPUI 图标资源已修复：应用内置 SVG 图标源，支持工具栏、More 菜单和布局预设的图标在全新构建中显示；布局预设按钮移除会导致激活时断言失败的重复 hover 样式。Windows UI 截图已保存到 `artifacts/dshell-v0.1.1-layout-menu.png` 和 `artifacts/dshell-v0.1.1-more-menu.png`。
 - 命令条改为扁平图标工具栏：新建、搜索、属性、分屏以及 Files/Tunnels/Log/Replay/Find/Quick commands/Keys/Sync/主题/设置均使用 28px 图标按钮和 tooltip，激活状态使用语义色表面。右侧新增 More 图标菜单，按 Session/View/Tools 分组列出新建会话、会话属性、导入配置、关闭标签、断开、水平/垂直分屏、侧栏、检查器、组合输入、同步输入、主题、文件、转发、日志、回放、查找、快速命令、密钥和设置；每行包含图标、名称和快捷键提示，`Esc` 或点击菜单外关闭。菜单只复用现有动作，不新增绕过确认的发送路径。
 - 工作区布局菜单已落地：命令条 Layout 图标和 More 菜单共用独立弹层，提供 Focus、Standard、Inspector、Split 四个扁平预设；Split 在没有第二个会话时禁用，预设切换后保留可拖拽分隔条，`Esc` 或点击菜单外关闭并把焦点还给终端。
 - 标签页操作菜单已落地：标签栏省略号按钮和标签右键打开扁平图标菜单，支持会话属性、横向/纵向分屏、断开、关闭当前标签、关闭其他标签和关闭右侧标签；菜单使用共享焦点遮罩，`Esc` 或点击外部关闭。
@@ -85,6 +86,8 @@
 - scripts/test-docker-ssh.ps1 构建本地可缓存 Ubuntu 24.04 SSH 测试镜像，包含 OpenSSH、Vim、tmux、htop；固定软件包索引和安装留在 Docker build layer，重复运行可复用。容器仍临时创建，以随机密码、实际 Ed25519 公钥和隔离的临时 known_hosts 执行 SSH/PTY 集成测试，结束后清理容器和临时密钥文件。
 
 ## 验证记录
+
+2026-10-24，Windows/MSVC：`v0.1.1` 修复 gpui-component 图标在全新构建中缺少 SVG 资源导致不可见的问题，并修复布局预设按钮激活时的重复 hover 样式断言。`cargo fmt --all`、离线 `cargo check` 和 `scripts\verify-hard-constraints.ps1` 全部通过；全目标类型检查成功，106 项测试中 97 项通过、9 项 Docker 专用测试跳过。变更不涉及 SSH/认证/SFTP/转发/日志/PTY 路径，未重复运行 Docker 集成脚本。Windows UI 截图确认 More 与布局菜单图标可见；真实 DPI、IME 和字形像素对齐仍需隔离交互环境人工检查。下一段继续受限触发器评估。
 
 2026-10-24，Windows/MSVC：首个公开版本 `v0.1.0` 发布基线完成。新增 `CHANGELOG.md`，并在 `AGENTS.md` 固化版本、验证、标签和推送规则；`Cargo.toml` 版本保持 `0.1.0`。`./scripts/verify-hard-constraints.ps1` 通过，格式检查、锁定依赖全目标类型检查和 105 项测试（96 项通过，9 项 Docker 专用测试跳过）均通过；`./scripts/test-docker-ssh.ps1` 9 项 SSH/认证/SFTP/转发/日志/PTY 集成测试全部通过。真实 Windows DPI、中文 IME、字形对齐和 GUI 交互仍需隔离桌面人工烟测，未在发布说明中宣称已验证。
 
@@ -168,7 +171,7 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 - 同步输入目标只保存在当前进程，不跨重启；同步范围是键盘、粘贴和组合输入，不包含鼠标、滚动、resize 或片段广播。多会话广播尚无“全选/按分组选择”。关键字高亮已交付但规则只保存在当前进程，最多 32 条且仅支持字面量、不区分大小写匹配；触发器、本地 Shell 和脚本自动化尚未实现。快速命令网格已交付，Xshell 对照能力矩阵与阶段 9 顺序见 ROADMAP。
 - 侧栏分组是单层字符串，已支持拖拽主机到现有分组或 UNGROUPED；尚不支持拖拽创建/重排分组、嵌套目录或分组折叠状态持久化；最近连接记录在连接启动时写入，不区分认证失败和成功握手。
 
-首个公开版本 `v0.1.0` 的发布范围和验证记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前发布版 `v0.1.1` 和首个公开版本 `v0.1.0` 的发布范围及验证记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 下一段接力
 
