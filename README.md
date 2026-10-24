@@ -208,6 +208,13 @@ resize stay per-session. The status bar shows `Sync N`, and closing a session
 removes it from the target set. Snippet broadcast remains a separate, explicit
 action.
 
+The command bar uses flat icon actions with tooltips instead of text buttons.
+The ellipsis opens a grouped menu with icon, label and shortcut hints:
+`Session` (new session, properties, import config, close tab, disconnect,
+splits), `View` (sidebar, inspector, compose, synchronized input, theme) and
+`Tools` (files, tunnels, logging, replay, find, snippets, keys, settings). The
+menu closes with `Escape` or a click outside it.
+
 dshell targets the daily Xshell-style workflow as an open-source, native
 application: session management with groups and recents, tabbed and split
 terminals, an inspector for transfers/tunnels/connection/logging, SFTP with
