@@ -114,12 +114,18 @@ struct TabDragData {
     title: SharedString,
 }
 
-struct TabDragPreview {
+#[derive(Clone, Debug)]
+struct HostDragData {
+    name: String,
+    title: SharedString,
+}
+
+struct DragPreview {
     title: SharedString,
     tokens: ThemeTokens,
 }
 
-impl Render for TabDragPreview {
+impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .px(px(ui_tokens::SPACE_3))
@@ -333,6 +339,21 @@ fn session_terminal_size_for_split(
         Some((split, _, second)) if session_id == split.second_session_id => second,
         _ => full_size,
     }
+}
+
+fn move_profile_to_group(profiles: &mut [HostProfile], name: &str, group: &str) -> bool {
+    let Some(profile) = profiles
+        .iter_mut()
+        .find(|profile| profile.name.eq_ignore_ascii_case(name))
+    else {
+        return false;
+    };
+    if profile.group == group {
+        return false;
+    }
+    profile.group = group.to_owned();
+    sort_profiles(profiles);
+    true
 }
 
 fn sort_profiles(profiles: &mut [HostProfile]) {
@@ -656,13 +677,14 @@ mod session_tests {
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
         dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_log_time,
-        format_rate, mpsc, remember_stopped_forward, remove_session, reorder_session_ids,
-        search_result_message, session_editor_escape, session_editor_key,
+        format_rate, move_profile_to_group, mpsc, remember_stopped_forward, remove_session,
+        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
         session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
         watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
+    use crate::profiles::{AuthMethod, HostProfile};
     use crate::settings::AppSettings;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
@@ -1061,6 +1083,47 @@ mod session_tests {
         assert_eq!(format_log_time(0), "00:00.000");
         assert_eq!(format_log_time(61_234), "01:01.234");
         assert_eq!(format_log_time(3_661_005), "1:01:01.005");
+    }
+
+    #[test]
+    fn dragging_a_host_moves_it_between_groups() {
+        fn profile(name: &str, group: &str) -> HostProfile {
+            HostProfile {
+                name: name.to_owned(),
+                host: "example.com".to_owned(),
+                port: 22,
+                username: "ops".to_owned(),
+                group: group.to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Password,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+            }
+        }
+
+        let mut profiles = vec![profile("web", ""), profile("db", "Prod")];
+        assert!(move_profile_to_group(&mut profiles, "web", "Prod"));
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|profile| profile.name == "web")
+                .unwrap()
+                .group,
+            "Prod"
+        );
+        assert!(!move_profile_to_group(&mut profiles, "web", "Prod"));
+        assert!(move_profile_to_group(&mut profiles, "db", ""));
+        assert!(
+            profiles
+                .iter()
+                .find(|profile| profile.name == "db")
+                .unwrap()
+                .group
+                .is_empty()
+        );
+        assert!(!move_profile_to_group(&mut profiles, "missing", "Prod"));
     }
 
     #[test]
@@ -2509,6 +2572,47 @@ impl AppView {
             Err(error) => self.profile_message = error,
         }
         cx.notify();
+    }
+
+    fn move_host_to_group(&mut self, name: &str, group: &str, cx: &mut Context<Self>) {
+        let mut profiles = self.profiles.clone();
+        if !move_profile_to_group(&mut profiles, name, group) {
+            return;
+        }
+        match self.save_workspace(profiles.clone(), self.recent.clone()) {
+            Ok(()) => {
+                self.profiles = profiles;
+                self.profile_message = if group.is_empty() {
+                    format!("Moved {name} to Ungrouped.")
+                } else {
+                    format!("Moved {name} to {group}.")
+                };
+                self.show_toast(self.profile_message.clone(), Tone::Success, cx);
+            }
+            Err(error) => {
+                self.profile_message = error;
+                self.show_toast("Could not move the host.", Tone::Danger, cx);
+            }
+        }
+    }
+
+    fn group_drop_header(
+        &self,
+        tokens: &ThemeTokens,
+        label: impl Into<SharedString>,
+        group: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let drop_id: SharedString = format!("host-group-drop-{group}").into();
+        div()
+            .id(drop_id)
+            .rounded(px(ui_tokens::RADIUS_CONTROL))
+            .on_drop(cx.listener(move |this, data: &HostDragData, _, cx| {
+                this.move_host_to_group(&data.name, &group, cx);
+            }))
+            .hover(|style| style.bg(tokens.surface_overlay))
+            .child(components::section_header(tokens, label))
+            .into_any_element()
     }
 
     fn save_workspace(
@@ -4189,6 +4293,9 @@ impl AppView {
     ) -> AnyElement {
         let is_selected = self.selected_profile.as_deref() == Some(&profile.name);
         let favorite = profile.favorite;
+        let preview_tokens = *tokens;
+        let drag_name = profile.name.clone();
+        let drag_title: SharedString = profile.name.clone().into();
         let favorite_name = profile.name.clone();
         let selected_profile = profile.clone();
         let edit_profile = profile.clone();
@@ -4244,6 +4351,19 @@ impl AppView {
         .on_click(cx.listener(move |this, _, window, cx| {
             this.load_profile(&selected_profile, window, cx);
         }))
+        .on_drag(
+            HostDragData {
+                name: drag_name,
+                title: drag_title,
+            },
+            move |data: &HostDragData, _, _, cx| {
+                let title = data.title.clone();
+                cx.new(|_| DragPreview {
+                    title: title.clone(),
+                    tokens: preview_tokens,
+                })
+            },
+        )
         .into_any_element()
     }
 
@@ -7001,9 +7121,20 @@ impl AppView {
                     .1
                     .push(index);
             }
-            for (_, (display, mut indexes)) in groups {
+            if !self.profiles.is_empty() {
+                groups
+                    .entry(String::new())
+                    .or_insert_with(|| ("UNGROUPED".to_owned(), Vec::new()));
+            }
+            for (key, (display, mut indexes)) in groups {
                 indexes.sort_by_key(|index| self.profiles[*index].name.to_lowercase());
-                profile_list = profile_list.child(components::section_header(tokens, display));
+                let group_value = if key.is_empty() {
+                    String::new()
+                } else {
+                    display.clone()
+                };
+                profile_list =
+                    profile_list.child(self.group_drop_header(tokens, display, group_value, cx));
                 for index in indexes {
                     let profile = &self.profiles[index];
                     profile_list = profile_list.child(self.saved_host_row(
@@ -7240,7 +7371,7 @@ impl AppView {
                     },
                     move |data: &TabDragData, _, _, cx| {
                         let title = data.title.clone();
-                        cx.new(|_| TabDragPreview {
+                        cx.new(|_| DragPreview {
                             title: title.clone(),
                             tokens: preview_tokens,
                         })
