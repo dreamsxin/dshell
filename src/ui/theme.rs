@@ -71,6 +71,11 @@ pub struct ThemeTokens {
     pub success: Hsla,
     pub warning: Hsla,
     pub danger: Hsla,
+    /// Higher-contrast variants for colored text on tinted backgrounds.
+    pub accent_text: Hsla,
+    pub success_text: Hsla,
+    pub warning_text: Hsla,
+    pub danger_text: Hsla,
     pub focus_ring: Hsla,
     /// Text drawn on top of `accent`, `danger` and `success` fills.
     pub on_accent: Hsla,
@@ -97,6 +102,10 @@ impl ThemeTokens {
                 success: rgb(0x22C55E).into(),
                 warning: rgb(0xF59E0B).into(),
                 danger: rgb(0xEF4444).into(),
+                accent_text: rgb(0x60A5FA).into(),
+                success_text: rgb(0x4ADE80).into(),
+                warning_text: rgb(0xFBBF24).into(),
+                danger_text: rgb(0xF87171).into(),
                 focus_ring: rgb(0x60A5FA).into(),
                 on_accent: rgb(0xFFFFFF).into(),
                 scrim: rgba(0x0000008C).into(),
@@ -117,6 +126,10 @@ impl ThemeTokens {
                 success: rgb(0x16A34A).into(),
                 warning: rgb(0xD97706).into(),
                 danger: rgb(0xDC2626).into(),
+                accent_text: rgb(0x1D4ED8).into(),
+                success_text: rgb(0x166534).into(),
+                warning_text: rgb(0x92400E).into(),
+                danger_text: rgb(0x991B1B).into(),
                 focus_ring: rgb(0x2563EB).into(),
                 on_accent: rgb(0xFFFFFF).into(),
                 scrim: rgba(0x10182852).into(),
@@ -218,6 +231,19 @@ mod tests {
         (lighter + 0.05) / (darker + 0.05)
     }
 
+    fn composite(overlay: Hsla, base: Hsla) -> Hsla {
+        let overlay: Rgba = overlay.into();
+        let base: Rgba = base.into();
+        let alpha = overlay.a;
+        Rgba {
+            r: overlay.r * alpha + base.r * (1.0 - alpha),
+            g: overlay.g * alpha + base.g * (1.0 - alpha),
+            b: overlay.b * alpha + base.b * (1.0 - alpha),
+            a: 1.0,
+        }
+        .into()
+    }
+
     #[test]
     fn body_text_meets_wcag_aa_on_every_surface() {
         for theme in [UiTheme::Dark, UiTheme::Light] {
@@ -237,6 +263,48 @@ mod tests {
                     "{theme:?} secondary text contrast is too low"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn component_and_status_colors_meet_contrast_targets() {
+        for theme in [UiTheme::Dark, UiTheme::Light] {
+            let tokens = theme.tokens();
+            for surface in [
+                tokens.bg_canvas,
+                tokens.surface,
+                tokens.surface_raised,
+                tokens.surface_overlay,
+            ] {
+                assert!(
+                    contrast_ratio(tokens.focus_ring, surface) >= 3.0,
+                    "{theme:?} focus ring contrast is too low"
+                );
+                assert!(
+                    contrast_ratio(tokens.accent, surface) >= 3.0,
+                    "{theme:?} accent contrast is too low"
+                );
+            }
+            for (tone, text) in [
+                (tokens.accent, tokens.accent_text),
+                (tokens.success, tokens.success_text),
+                (tokens.warning, tokens.warning_text),
+                (tokens.danger, tokens.danger_text),
+            ] {
+                for surface in [
+                    tokens.surface,
+                    tokens.surface_raised,
+                    tokens.surface_overlay,
+                ] {
+                    let tinted = composite(tone.opacity(0.14), surface);
+                    assert!(
+                        contrast_ratio(text, tinted) >= 4.5,
+                        "{theme:?} pill text contrast is too low"
+                    );
+                }
+            }
+            assert!(contrast_ratio(tokens.on_accent, tokens.accent) >= 3.0);
+            assert!(contrast_ratio(tokens.on_accent, tokens.danger) >= 3.0);
         }
     }
 

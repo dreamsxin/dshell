@@ -45,8 +45,8 @@ use ssh::{AuthPromptInfo, Authentication, ConnectionSpec, JumpSpec, UiEvent};
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
     TerminalKeyInput, TerminalMouseButton, TerminalMouseEvent, TerminalMouseModifiers,
-    TerminalPosition, TerminalRequest, TerminalRun, TerminalSearchResult, TerminalSize,
-    TerminalTheme,
+    TerminalPalette, TerminalPosition, TerminalRequest, TerminalRun, TerminalSearchResult,
+    TerminalSize, TerminalTheme,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use ui::{
@@ -823,6 +823,30 @@ mod session_tests {
             session_editor_escape(false),
             SessionEditorEscape::CloseEditor
         );
+    }
+
+    #[test]
+    fn terminal_layout_stays_usable_across_dpi_and_font_scales() {
+        let mut settings = AppSettings::default();
+        let mut previous_columns = u16::MAX;
+        for font_size in [9.0, 13.0, 24.0, 32.0] {
+            settings.font_size = font_size;
+            let size = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
+            assert!(size.columns > 0 && size.rows > 0, "font size {font_size}");
+            assert!(
+                size.columns < previous_columns,
+                "larger fonts must reduce the column count"
+            );
+            previous_columns = size.columns;
+        }
+
+        // The same physical display at 100%, 150% and 200% DPI maps to smaller
+        // logical viewports; the layout must stay positive at every step.
+        settings.font_size = 13.0;
+        for (width, height) in [(1920.0, 1080.0), (1280.0, 720.0), (960.0, 540.0)] {
+            let size = terminal_size_for_viewport(width, height, &settings, false, false);
+            assert!(size.columns > 0 && size.rows > 0, "{width}x{height}");
+        }
     }
 
     #[test]
@@ -1853,7 +1877,7 @@ impl AppView {
                             .on_scroll_wheel(cx.listener(|this, event, _, cx| {
                                 this.scroll_log_replay(event, cx);
                             }))
-                            .child(render_terminal_grid(&frame, &self.settings)),
+                            .child(render_terminal_grid(&frame, &self.settings, palette)),
                     )
                     .child(
                         div()
@@ -3060,7 +3084,8 @@ impl AppView {
             .session(session_id)
             .and_then(|session| session.frame.as_ref())
         {
-            terminal_view = terminal_view.child(render_terminal_grid(frame, &self.settings));
+            terminal_view =
+                terminal_view.child(render_terminal_grid(frame, &self.settings, palette));
         } else {
             let message = self
                 .session(session_id)
@@ -4282,7 +4307,7 @@ impl AppView {
                 div()
                     .p(px(8.))
                     .text_size(px(11.))
-                    .text_color(rgb(0x667078))
+                    .text_color(tokens.text_disabled)
                     .child("No entries"),
             );
         }
@@ -4336,7 +4361,7 @@ impl AppView {
                         div()
                             .flex_shrink_0()
                             .text_size(px(10.))
-                            .text_color(rgb(0x667078))
+                            .text_color(tokens.text_disabled)
                             .child(size),
                     )
                     .child(
@@ -4415,9 +4440,9 @@ impl AppView {
             .min_h_0()
             .ml(px(6.))
             .border_1()
-            .border_color(rgb(0x343c42))
-            .bg(rgb(0x11161b))
-            .text_color(rgb(0xd4dade))
+            .border_color(tokens.border_strong)
+            .bg(tokens.surface_raised)
+            .text_color(tokens.text_primary)
             .child(
                 div()
                     .flex()
@@ -4426,7 +4451,7 @@ impl AppView {
                     .h(px(TERMINAL_PANEL_HEADER_PX))
                     .flex_shrink_0()
                     .px(px(8.))
-                    .bg(rgb(0x171d22))
+                    .bg(tokens.surface)
                     .child(div().text_size(px(11.)).child("SFTP"))
                     .child(controls),
             )
@@ -4435,7 +4460,7 @@ impl AppView {
                     .px(px(8.))
                     .py(px(4.))
                     .text_size(px(10.))
-                    .text_color(rgb(0x8a949b))
+                    .text_color(tokens.text_secondary)
                     .overflow_hidden()
                     .child(if path.is_empty() {
                         "Waiting for the SFTP subsystem...".to_owned()
@@ -4487,7 +4512,7 @@ impl AppView {
                     .gap(px(4.))
                     .p(px(8.))
                     .border_t_1()
-                    .border_color(rgb(0x2a3238))
+                    .border_color(tokens.border_subtle)
                     .text_size(px(11.))
                     .child(format!(
                         "Delete {} {delete_path}?",
@@ -4543,7 +4568,7 @@ impl AppView {
                     .gap(px(3.))
                     .p(px(8.))
                     .border_t_1()
-                    .border_color(rgb(0x2a3238))
+                    .border_color(tokens.border_subtle)
                     .text_size(px(10.))
                     .child(format!(
                         "{} {} · {percent}% · {} / {}",
@@ -4575,7 +4600,7 @@ impl AppView {
                     .gap(px(4.))
                     .p(px(8.))
                     .border_t_1()
-                    .border_color(rgb(0x2a3238))
+                    .border_color(tokens.border_subtle)
                     .text_size(px(11.))
                     .child(format!(
                         "{} target already exists: {target}",
@@ -4637,9 +4662,9 @@ impl AppView {
                 div()
                     .p(px(8.))
                     .border_t_1()
-                    .border_color(rgb(0x2a3238))
+                    .border_color(tokens.border_subtle)
                     .text_size(px(10.))
-                    .text_color(rgb(0x9aa4ab))
+                    .text_color(tokens.text_secondary)
                     .child(message),
             );
         }
@@ -4907,7 +4932,7 @@ impl AppView {
             form = form.child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(0x8a949b))
+                    .text_color(tokens.text_secondary)
                     .child("SOCKS5 clients choose the target host and port."),
             );
         }
@@ -4932,7 +4957,7 @@ impl AppView {
                 div()
                     .p(px(8.))
                     .text_size(px(11.))
-                    .text_color(rgb(0x667078))
+                    .text_color(tokens.text_disabled)
                     .child("No forwarding rules"),
             );
         }
@@ -4984,9 +5009,9 @@ impl AppView {
             .min_h_0()
             .ml(px(6.))
             .border_1()
-            .border_color(rgb(0x343c42))
-            .bg(rgb(0x11161b))
-            .text_color(rgb(0xd4dade))
+            .border_color(tokens.border_strong)
+            .bg(tokens.surface_raised)
+            .text_color(tokens.text_primary)
             .child(
                 div()
                     .flex()
@@ -4995,7 +5020,7 @@ impl AppView {
                     .h(px(TERMINAL_PANEL_HEADER_PX))
                     .flex_shrink_0()
                     .px(px(8.))
-                    .bg(rgb(0x171d22))
+                    .bg(tokens.surface)
                     .child(div().text_size(px(11.)).child("Tunnels"))
                     .child(Button::new("forward-close").label("Close").on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_tunnels(session_id, cx)),
@@ -5006,7 +5031,7 @@ impl AppView {
                 div()
                     .px(px(8.))
                     .text_size(px(11.))
-                    .text_color(rgb(0x9aa4ab))
+                    .text_color(tokens.text_secondary)
                     .child(message),
             )
             .child(rule_list)
@@ -5296,7 +5321,7 @@ impl AppView {
                 div()
                     .p(px(8.))
                     .text_size(px(11.))
-                    .text_color(rgb(0x667078))
+                    .text_color(tokens.text_disabled)
                     .child("No command snippets"),
             );
         }
@@ -5333,7 +5358,7 @@ impl AppView {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_size(px(10.))
-                                .text_color(rgb(0x7b858c))
+                                .text_color(tokens.text_disabled)
                                 .child(snippet.command),
                         ),
                 );
@@ -5350,7 +5375,7 @@ impl AppView {
             target_list = target_list.child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(0x667078))
+                    .text_color(tokens.text_disabled)
                     .child("No connected sessions"),
             );
         }
@@ -5372,9 +5397,9 @@ impl AppView {
             .min_h_0()
             .ml(px(6.))
             .border_1()
-            .border_color(rgb(0x343c42))
-            .bg(rgb(0x11161b))
-            .text_color(rgb(0xd4dade))
+            .border_color(tokens.border_strong)
+            .bg(tokens.surface_raised)
+            .text_color(tokens.text_primary)
             .child(
                 div()
                     .flex()
@@ -5383,7 +5408,7 @@ impl AppView {
                     .h(px(TERMINAL_PANEL_HEADER_PX))
                     .flex_shrink_0()
                     .px(px(8.))
-                    .bg(rgb(0x171d22))
+                    .bg(tokens.surface)
                     .child(div().text_size(px(11.)).child("Snippets"))
                     .child(
                         div()
@@ -5446,7 +5471,7 @@ impl AppView {
                 div()
                     .px(px(8.))
                     .text_size(px(11.))
-                    .text_color(rgb(0x9aa4ab))
+                    .text_color(tokens.text_secondary)
                     .child(message),
             )
             .child(list)
@@ -5457,7 +5482,7 @@ impl AppView {
                     .gap(px(4.))
                     .p(px(8.))
                     .border_t_1()
-                    .border_color(rgb(0x2a3238))
+                    .border_color(tokens.border_subtle)
                     .child(div().text_size(px(10.)).child("Send to selected sessions"))
                     .child(target_list)
                     .child(
@@ -7504,7 +7529,11 @@ impl Focusable for AppView {
     }
 }
 
-fn render_terminal_grid(frame: &TerminalFrame, settings: &AppSettings) -> AnyElement {
+fn render_terminal_grid(
+    frame: &TerminalFrame,
+    settings: &AppSettings,
+    palette: TerminalPalette,
+) -> AnyElement {
     let mut grid = div().flex().flex_col().flex_1().min_h_0();
     for (row_index, row) in frame.rows.iter().enumerate() {
         let mut rendered_row = div()
@@ -7513,7 +7542,7 @@ fn render_terminal_grid(frame: &TerminalFrame, settings: &AppSettings) -> AnyEle
             .h(px(settings.cell_height()))
             .flex_shrink_0();
         for run in row {
-            rendered_row = rendered_row.child(render_terminal_run(run, settings));
+            rendered_row = rendered_row.child(render_terminal_run(run, settings, palette));
         }
         if let Some(cursor) = frame.cursor
             && cursor.row as usize == row_index
@@ -7544,7 +7573,11 @@ fn render_terminal_grid(frame: &TerminalFrame, settings: &AppSettings) -> AnyEle
     grid.into_any_element()
 }
 
-fn render_terminal_run(run: &TerminalRun, settings: &AppSettings) -> impl IntoElement {
+fn render_terminal_run(
+    run: &TerminalRun,
+    settings: &AppSettings,
+    palette: TerminalPalette,
+) -> impl IntoElement {
     let mut cell_run = div()
         .flex_shrink_0()
         .w(px(settings.cell_width() * run.width_cells as f32))
@@ -7554,7 +7587,9 @@ fn render_terminal_run(run: &TerminalRun, settings: &AppSettings) -> impl IntoEl
         .text_color(rgb(run.foreground))
         .bg(rgb(run.background));
     if run.selected {
-        cell_run = cell_run.text_color(rgb(0xf4f6f8)).bg(rgb(0x315b80));
+        cell_run = cell_run
+            .text_color(rgb(palette.selection_foreground))
+            .bg(rgb(palette.selection_background));
     }
     if run.bold {
         cell_run = cell_run.font_weight(FontWeight::BOLD);

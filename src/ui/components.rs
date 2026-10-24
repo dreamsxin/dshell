@@ -41,6 +41,17 @@ impl Tone {
             Self::Danger => tokens.danger,
         }
     }
+
+    /// Higher-contrast variant for colored text on a tinted surface.
+    pub fn text_color(self, tokens: &ThemeTokens) -> gpui::Hsla {
+        match self {
+            Self::Neutral => tokens.text_secondary,
+            Self::Accent => tokens.accent_text,
+            Self::Success => tokens.success_text,
+            Self::Warning => tokens.warning_text,
+            Self::Danger => tokens.danger_text,
+        }
+    }
 }
 
 /// Button emphasis, mapped onto the gpui-component variants so hover, active,
@@ -430,7 +441,7 @@ pub fn pill(tokens: &ThemeTokens, label: impl Into<SharedString>, tone: Tone) ->
         .rounded(px(tokens::RADIUS_PILL))
         .bg(color.opacity(0.14))
         .text_size(px(tokens::FONT_CAPTION))
-        .text_color(color)
+        .text_color(tone.text_color(tokens))
         .child(label.into())
 }
 

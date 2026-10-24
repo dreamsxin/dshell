@@ -140,6 +140,16 @@ the choice, together with the collapsed/expanded sidebar state, in
 `%APPDATA%\dshell\settings.json`. Terminal colors stay controlled by the
 separate terminal theme setting.
 
+Both UI palettes use the same semantic tokens for every panel, including the
+SFTP, forwarding and snippet panels, and automated tests check WCAG AA body-text
+contrast on every surface plus status-pill text contrast. Terminal selection
+foreground and background come from the active terminal theme. Window geometry
+is expressed in logical pixels, so the 100%/150%/200% DPI scaling and 9-32 px
+font sizes all drive the same column/row calculation; tests cover the full font
+range and the logical viewports produced by common DPI scales. Text entry uses
+the native `InputState` control so Windows IME composition is handled by the
+platform rather than a custom text editor.
+
 The find bar searches the active terminal and its scrollback, or the open log
 replay, using case-insensitive single-line matching. Enter moves forward,
 Shift+Enter moves backward, and Prev/Next wrap around; Escape closes the bar.

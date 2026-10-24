@@ -36,6 +36,8 @@ impl TerminalTheme {
                 foreground: 0xe1e5e9,
                 dim_foreground: 0x9da4aa,
                 background: 0x0b0f13,
+                selection_background: 0x315b80,
+                selection_foreground: 0xf4f6f8,
                 ansi: [
                     0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
                     0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
@@ -45,6 +47,8 @@ impl TerminalTheme {
                 foreground: 0x839496,
                 dim_foreground: 0x657b83,
                 background: 0x002b36,
+                selection_background: 0x0f4b6e,
+                selection_foreground: 0xfdf6e3,
                 ansi: [
                     0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
                     0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
@@ -54,6 +58,8 @@ impl TerminalTheme {
                 foreground: 0x657b83,
                 dim_foreground: 0x93a1a1,
                 background: 0xfdf6e3,
+                selection_background: 0x93a1a1,
+                selection_foreground: 0x002b36,
                 ansi: [
                     0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
                     0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
@@ -110,6 +116,8 @@ pub struct TerminalPalette {
     pub foreground: u32,
     pub dim_foreground: u32,
     pub background: u32,
+    pub selection_background: u32,
+    pub selection_foreground: u32,
     pub ansi: [u32; 16],
 }
 
@@ -1322,5 +1330,48 @@ mod tests {
         assert_eq!(size.rows, 24);
         assert_eq!(CELL_WIDTH_PX, 8.0);
         assert_eq!(CELL_HEIGHT_PX, 18.0);
+    }
+
+    fn luminance(color: u32) -> f32 {
+        fn channel(value: u8) -> f32 {
+            let value = value as f32 / 255.0;
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        let r = channel((color >> 16) as u8);
+        let g = channel((color >> 8) as u8);
+        let b = channel(color as u8);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    fn contrast(first: u32, second: u32) -> f32 {
+        let (lighter, darker) = {
+            let first = luminance(first);
+            let second = luminance(second);
+            if first > second {
+                (first, second)
+            } else {
+                (second, first)
+            }
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn selection_colors_stay_readable_on_every_terminal_theme() {
+        for theme in TerminalTheme::ALL {
+            let palette = theme.palette();
+            assert!(
+                contrast(palette.selection_foreground, palette.selection_background) >= 4.5,
+                "{theme:?} selection text contrast is too low"
+            );
+            assert_ne!(
+                palette.selection_background, palette.background,
+                "{theme:?} selection must stand out from the terminal background"
+            );
+        }
     }
 }
