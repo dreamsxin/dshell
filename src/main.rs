@@ -458,6 +458,20 @@ fn format_rate(bytes_per_second: f64) -> String {
     }
 }
 
+fn remember_compose_history(history: &mut Vec<String>, text: String) {
+    history.retain(|item| item != &text);
+    history.insert(0, text);
+    history.truncate(20);
+}
+
+fn recall_compose_history(history: &[String], recall: usize) -> Option<(String, usize)> {
+    if history.is_empty() {
+        return None;
+    }
+    let index = recall % history.len();
+    Some((history[index].clone(), (index + 1) % history.len()))
+}
+
 fn format_log_time(milliseconds: u64) -> String {
     let hours = milliseconds / 3_600_000;
     let minutes = (milliseconds / 60_000) % 60;
@@ -677,10 +691,10 @@ mod session_tests {
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
         dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_log_time,
-        format_rate, move_profile_to_group, mpsc, remember_stopped_forward, remove_session,
-        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
-        session_terminal_size_for_split, split_panel_terminal_size, terminal_size_for_viewport,
-        watch,
+        format_rate, move_profile_to_group, mpsc, recall_compose_history, remember_compose_history,
+        remember_stopped_forward, remove_session, reorder_session_ids, search_result_message,
+        session_editor_escape, session_editor_key, session_terminal_size_for_split,
+        split_panel_terminal_size, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -865,6 +879,10 @@ mod session_tests {
         assert_eq!(
             app_shortcut(&defaults, "o", true, true, false),
             Some(AppShortcut::ToggleSettings)
+        );
+        assert_eq!(
+            app_shortcut(&defaults, "m", true, true, false),
+            Some(AppShortcut::ToggleCompose)
         );
         assert_eq!(
             app_shortcut(&defaults, "b", true, true, false),
@@ -1127,6 +1145,29 @@ mod session_tests {
     }
 
     #[test]
+    fn compose_history_is_deduplicated_bounded_and_recalled_in_order() {
+        let mut history = Vec::new();
+        remember_compose_history(&mut history, "one".to_owned());
+        remember_compose_history(&mut history, "two".to_owned());
+        remember_compose_history(&mut history, "one".to_owned());
+        assert_eq!(history, vec!["one".to_owned(), "two".to_owned()]);
+        assert_eq!(
+            recall_compose_history(&history, 0),
+            Some(("one".to_owned(), 1))
+        );
+        assert_eq!(
+            recall_compose_history(&history, 1),
+            Some(("two".to_owned(), 0))
+        );
+        for index in 0..25 {
+            remember_compose_history(&mut history, format!("cmd{index}"));
+        }
+        assert_eq!(history.len(), 20);
+        assert_eq!(history[0], "cmd24");
+        assert!(recall_compose_history(&[], 0).is_none());
+    }
+
+    #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
         let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
@@ -1363,6 +1404,10 @@ struct AppView {
     auth_prompt_needs_clear: bool,
     log_replay: Option<LogReplayState>,
     search_input: Entity<InputState>,
+    compose_input: Entity<InputState>,
+    compose_visible: bool,
+    compose_history: Vec<String>,
+    compose_recall: usize,
     search_visible: bool,
     search_message: String,
     search_target: Option<SearchTarget>,
@@ -1437,6 +1482,12 @@ impl AppView {
             })
             .collect();
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search terminal"));
+        let compose_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line()
+                .rows(3)
+                .placeholder("Compose a multi-line command, then press Ctrl+Enter")
+        });
         let default_key_path = home_directory()
             .join(".ssh")
             .join("dshell_ed25519")
@@ -1569,6 +1620,10 @@ impl AppView {
             auth_prompt_needs_clear: false,
             log_replay: None,
             search_input,
+            compose_input,
+            compose_visible: false,
+            compose_history: Vec::new(),
+            compose_recall: 0,
             search_visible: false,
             search_message: String::new(),
             search_target: None,
@@ -3286,6 +3341,7 @@ impl AppView {
                 AppShortcut::ToggleSnippets => self.toggle_snippets(cx),
                 AppShortcut::ToggleSettings => self.toggle_settings(window, cx),
                 AppShortcut::ToggleSidebar => self.toggle_sidebar(window, cx),
+                AppShortcut::ToggleCompose => self.toggle_compose(window, cx),
                 AppShortcut::Disconnect => self.disconnect_session(session_id, cx),
                 AppShortcut::ReplayLog => self.begin_log_replay(cx),
                 AppShortcut::Find => self.open_search(session_id, window, cx),
@@ -3781,6 +3837,23 @@ impl AppView {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.begin_upload(session_id, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            ("terminal-compose", session_id),
+                            IconName::PanelBottom,
+                            if self.compose_visible {
+                                ButtonKind::Secondary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            ButtonSize::Small,
+                            "Compose (Ctrl+Shift+M)",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_compose(window, cx);
                         })),
                     )
                     .child(
@@ -6229,6 +6302,157 @@ impl AppView {
         cx.notify();
     }
 
+    fn toggle_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.compose_visible = !self.compose_visible;
+        if self.compose_visible {
+            let focus = self.compose_input.read(cx).focus_handle(cx);
+            window.focus(&focus);
+        } else {
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn recall_compose_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((text, next)) = recall_compose_history(&self.compose_history, self.compose_recall)
+        else {
+            return;
+        };
+        Self::set_input_value(&self.compose_input, &text, window, cx);
+        self.compose_recall = next;
+        let focus = self.compose_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn send_compose(&mut self, session_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.compose_input.read(cx).text().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.send_terminal_request(
+            session_id,
+            TerminalRequest::Paste(text.clone()),
+            "Compose",
+            cx,
+        );
+        remember_compose_history(&mut self.compose_history, text);
+        self.compose_recall = 0;
+        Self::set_input_value(&self.compose_input, "", window, cx);
+        let focus = self.compose_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn compose_bar(
+        &mut self,
+        session_id: u64,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let history_label = if self.compose_history.is_empty() {
+            "History".to_owned()
+        } else {
+            format!(
+                "History {}/{}",
+                self.compose_recall % self.compose_history.len() + 1,
+                self.compose_history.len()
+            )
+        };
+        div()
+            .id("compose-bar")
+            .flex_shrink_0()
+            .mx(px(ui_tokens::SPACE_2))
+            .mb(px(ui_tokens::SPACE_2))
+            .h(px(96.0))
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .p(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .rounded(px(ui_tokens::RADIUS_CARD))
+            .bg(tokens.surface_raised)
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.to_ascii_lowercase();
+                let modifiers = event.keystroke.modifiers;
+                if key == "escape" {
+                    cx.stop_propagation();
+                    this.toggle_compose(window, cx);
+                } else if key == "enter" && (modifiers.control || modifiers.platform) {
+                    cx.stop_propagation();
+                    this.send_compose(session_id, window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(ui_tokens::SPACE_2))
+                    .child(components::help_text(
+                        tokens,
+                        "Compose · Ctrl+Enter sends · Esc closes",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .child(
+                                components::button(
+                                    tokens,
+                                    "compose-history",
+                                    history_label,
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.recall_compose_history(window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    tokens,
+                                    "compose-send",
+                                    "Send",
+                                    ButtonKind::Primary,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.send_compose(session_id, window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::icon_button(
+                                    tokens,
+                                    "compose-close",
+                                    IconName::Close,
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                    "Close compose",
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.toggle_compose(window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(TextInput::new(&self.compose_input).h_full()),
+            )
+            .into_any_element()
+    }
+
     fn toggle_ui_theme(&mut self, cx: &mut Context<Self>) {
         self.ui_theme = self.ui_theme.toggled();
         ui::theme::install(cx, self.ui_theme);
@@ -8461,6 +8685,7 @@ enum AppShortcut {
     ToggleSnippets,
     ToggleSettings,
     ToggleSidebar,
+    ToggleCompose,
     Disconnect,
     ReplayLog,
     Find,
@@ -8494,6 +8719,7 @@ fn app_shortcut(
                 ShortcutAction::ToggleSnippets => AppShortcut::ToggleSnippets,
                 ShortcutAction::ToggleSettings => AppShortcut::ToggleSettings,
                 ShortcutAction::ToggleSidebar => AppShortcut::ToggleSidebar,
+                ShortcutAction::ToggleCompose => AppShortcut::ToggleCompose,
                 ShortcutAction::Disconnect => AppShortcut::Disconnect,
                 ShortcutAction::ReplayLog => AppShortcut::ReplayLog,
                 ShortcutAction::Find => AppShortcut::Find,
@@ -8654,16 +8880,20 @@ impl Render for AppView {
                 cx,
             ));
         }
-        content_row = content_row.child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .child(tab_bar)
-                .child(terminal_workspace),
-        );
+        let mut content_column = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(tab_bar)
+            .child(terminal_workspace);
+        if self.compose_visible
+            && let Some(session_id) = self.active_session_id
+        {
+            content_column = content_column.child(self.compose_bar(session_id, &tokens, cx));
+        }
+        content_row = content_row.child(content_column);
 
         let mut root = div()
             .relative()
