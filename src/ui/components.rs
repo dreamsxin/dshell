@@ -11,10 +11,10 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Div, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Stateful, Styled, div, px,
+    SharedString, Stateful, Styled, div, px, relative,
 };
 use gpui_component::{
-    IconName, StyledExt as _,
+    Icon, IconName, Sizable as _, Size, StyledExt as _,
     button::{Button, ButtonVariants as _},
     input::{InputState, TextInput},
 };
@@ -336,6 +336,86 @@ pub fn empty_state(
                 .text_size(px(tokens::FONT_CAPTION))
                 .text_color(tokens.text_secondary)
                 .child(description.into()),
+        )
+}
+
+/// Thin transfer/inspection progress bar.
+pub fn progress_bar(tokens: &ThemeTokens, ratio: f32) -> Div {
+    let ratio = ratio.clamp(0.0, 1.0);
+    div()
+        .h(px(6.0))
+        .w_full()
+        .rounded(px(tokens::RADIUS_PILL))
+        .bg(tokens.border_subtle)
+        .child(
+            div()
+                .h_full()
+                .w(relative(ratio))
+                .rounded(px(tokens::RADIUS_PILL))
+                .bg(tokens.accent),
+        )
+}
+
+/// Inspector group header with a chevron indicating the expanded state.
+pub fn collapsible_header(
+    tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    open: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_between()
+        .h(px(tokens::PANEL_HEADER_HEIGHT))
+        .flex_shrink_0()
+        .px(px(tokens::SPACE_3))
+        .border_b_1()
+        .border_color(tokens.border_subtle)
+        .bg(tokens.surface)
+        .text_size(px(tokens::FONT_BODY))
+        .font_semibold()
+        .text_color(tokens.text_primary)
+        .child(label.into())
+        .child(
+            Icon::new(if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .with_size(Size::Small)
+            .text_color(tokens.text_secondary),
+        )
+}
+
+/// Label/value row for the connection inspector.
+pub fn info_row(
+    tokens: &ThemeTokens,
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(tokens::SPACE_2))
+        .px(px(tokens::SPACE_3))
+        .py(px(tokens::SPACE_1))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(tokens::FONT_CAPTION))
+                .text_color(tokens.text_secondary)
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_size(px(tokens::FONT_CAPTION))
+                .text_color(tokens.text_primary)
+                .child(value.into()),
         )
 }
 

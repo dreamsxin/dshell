@@ -74,9 +74,18 @@ fn terminal_size_for_viewport(
     height: f32,
     settings: &AppSettings,
     sidebar_collapsed: bool,
+    inspector_visible: bool,
 ) -> TerminalSize {
-    let width =
-        width - sidebar_width(sidebar_collapsed) - ui_tokens::SPACE_4 - TERMINAL_CARD_BORDER_PX;
+    let inspector = if inspector_visible {
+        ui_tokens::INSPECTOR_WIDTH + ui_tokens::SPACE_2
+    } else {
+        0.0
+    };
+    let width = width
+        - sidebar_width(sidebar_collapsed)
+        - ui_tokens::SPACE_4
+        - TERMINAL_CARD_BORDER_PX
+        - inspector;
     let height = height
         - ui_tokens::COMMAND_BAR_HEIGHT
         - ui_tokens::TAB_BAR_HEIGHT
@@ -801,7 +810,7 @@ mod session_tests {
     #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
-        let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false);
+        let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
         assert!(
             minimum.columns >= 80,
             "1280x800 must keep at least 80 columns, got {}",
@@ -809,7 +818,7 @@ mod session_tests {
         );
         assert!(minimum.rows >= 24);
 
-        let expanded = terminal_size_for_viewport(1920.0, 1080.0, &settings, false);
+        let expanded = terminal_size_for_viewport(1920.0, 1080.0, &settings, false, false);
         assert!(expanded.columns > minimum.columns);
         assert!(expanded.rows > minimum.rows);
     }
@@ -817,10 +826,19 @@ mod session_tests {
     #[test]
     fn collapsing_the_sidebar_widens_the_terminal() {
         let settings = AppSettings::default();
-        let expanded = terminal_size_for_viewport(1280.0, 800.0, &settings, false);
-        let collapsed = terminal_size_for_viewport(1280.0, 800.0, &settings, true);
+        let expanded = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
+        let collapsed = terminal_size_for_viewport(1280.0, 800.0, &settings, true, false);
         assert!(collapsed.columns > expanded.columns);
         assert_eq!(collapsed.rows, expanded.rows);
+    }
+
+    #[test]
+    fn opening_the_inspector_reduces_terminal_columns_only() {
+        let settings = AppSettings::default();
+        let hidden = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
+        let shown = terminal_size_for_viewport(1280.0, 800.0, &settings, false, true);
+        assert!(shown.columns < hidden.columns);
+        assert_eq!(shown.rows, hidden.rows);
     }
 
     #[test]
@@ -945,6 +963,10 @@ mod session_tests {
 struct AppView {
     ui_theme: UiTheme,
     sidebar_collapsed: bool,
+    inspector_visible: bool,
+    inspector_transfers_open: bool,
+    inspector_forwards_open: bool,
+    inspector_info_open: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
     profile_group: Entity<InputState>,
@@ -1108,7 +1130,8 @@ impl AppView {
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("user"));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
         password.update(cx, |state, cx| state.set_masked(true, window, cx));
-        let terminal_size = Self::size_for_window(window, &settings, settings.sidebar_collapsed);
+        let terminal_size =
+            Self::size_for_window(window, &settings, settings.sidebar_collapsed, false);
         let (profile_store, data, profiles_ready, profile_message) = match ProfileStore::discover()
         {
             Ok(store) => match store.load() {
@@ -1139,6 +1162,10 @@ impl AppView {
         Self {
             ui_theme: settings.ui_theme,
             sidebar_collapsed: settings.sidebar_collapsed,
+            inspector_visible: false,
+            inspector_transfers_open: true,
+            inspector_forwards_open: true,
+            inspector_info_open: true,
             profile_name,
             profile_search,
             profile_group,
@@ -1238,6 +1265,7 @@ impl AppView {
         window: &Window,
         settings: &AppSettings,
         sidebar_collapsed: bool,
+        inspector_visible: bool,
     ) -> TerminalSize {
         let bounds = window.bounds();
         terminal_size_for_viewport(
@@ -1245,11 +1273,17 @@ impl AppView {
             bounds.size.height / px(1.0),
             settings,
             sidebar_collapsed,
+            inspector_visible,
         )
     }
 
     fn resize_terminal(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.terminal_size = Self::size_for_window(window, &self.settings, self.sidebar_collapsed);
+        self.terminal_size = Self::size_for_window(
+            window,
+            &self.settings,
+            self.sidebar_collapsed,
+            self.inspector_visible,
+        );
         self.resize_sessions(cx);
         cx.notify();
     }
@@ -1424,19 +1458,21 @@ impl AppView {
     }
 
     fn search_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let message = self.search_message.clone();
         div()
             .id("terminal-search")
             .flex()
             .flex_col()
-            .gap(px(4.))
-            .p(px(6.))
-            .w(px(400.))
+            .gap(px(ui_tokens::SPACE_1))
+            .p(px(ui_tokens::SPACE_2))
+            .w_full()
             .border_1()
-            .border_color(rgb(0x3a484f))
-            .rounded(px(4.))
-            .bg(rgb(0x1a2228))
-            .text_color(rgb(0xd4dade))
+            .border_color(tokens.border_strong)
+            .rounded(px(ui_tokens::RADIUS_CARD))
+            .shadow_lg()
+            .bg(tokens.surface_overlay)
+            .text_color(tokens.text_primary)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.to_ascii_lowercase();
                 if key == "escape" {
@@ -1456,42 +1492,50 @@ impl AppView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(4.))
+                    .gap(px(ui_tokens::SPACE_1))
+                    .child(div().flex_1().min_w_0().child(
+                        TextInput::new(&self.search_input).h(px(ui_tokens::CONTROL_HEIGHT_SM)),
+                    ))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(TextInput::new(&self.search_input)),
+                        components::button(
+                            &tokens,
+                            "search-previous",
+                            "Prev",
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_search(SearchDirection::Backward, cx);
+                        })),
                     )
                     .child(
-                        Button::new("search-previous")
-                            .label("Prev")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.run_search(SearchDirection::Backward, cx);
-                            })),
+                        components::button(
+                            &tokens,
+                            "search-next",
+                            "Next",
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_search(SearchDirection::Forward, cx);
+                        })),
                     )
                     .child(
-                        Button::new("search-next")
-                            .label("Next")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.run_search(SearchDirection::Forward, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("search-close")
-                            .label("Close")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_search(window, cx);
-                            })),
+                        components::icon_button(
+                            &tokens,
+                            "search-close",
+                            IconName::Close,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Close search",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_search(window, cx);
+                        })),
                     ),
             )
             .when(!message.is_empty(), |bar| {
-                bar.child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(rgb(0x9aa4ab))
-                        .child(message),
-                )
+                bar.child(components::help_text(&tokens, message))
             })
             .into_any_element()
     }
@@ -1602,6 +1646,7 @@ impl AppView {
     }
 
     fn log_replay_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
         let Some(replay) = self.log_replay.as_ref() else {
             return div().into_any_element();
         };
@@ -1620,8 +1665,9 @@ impl AppView {
                 Some(
                     div()
                         .absolute()
-                        .top(px(54.))
-                        .right(px(8.))
+                        .top(px(ui_tokens::MODAL_HEADER_HEIGHT + ui_tokens::SPACE_2))
+                        .left(px(ui_tokens::SPACE_4))
+                        .right(px(ui_tokens::SPACE_4))
                         .child(self.search_bar(cx)),
                 )
             } else {
@@ -1635,8 +1681,8 @@ impl AppView {
             .flex()
             .items_center()
             .justify_center()
-            .p(px(16.))
-            .bg(hsla(0., 0., 0., 0.55))
+            .p(px(ui_tokens::SPACE_4))
+            .bg(tokens.scrim)
             .child(
                 div()
                     .id("log-replay")
@@ -1649,48 +1695,90 @@ impl AppView {
                     .max_h(px(760.))
                     .min_h_0()
                     .border_1()
-                    .border_color(rgb(0x343c42))
-                    .rounded(px(4.))
-                    .bg(rgb(0x11161b))
-                    .text_color(rgb(0xd4dade))
+                    .border_color(tokens.border_strong)
+                    .rounded(px(ui_tokens::RADIUS_PANEL))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .bg(tokens.surface_overlay)
+                    .text_color(tokens.text_primary)
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
-                            .h(px(48.))
+                            .h(px(ui_tokens::MODAL_HEADER_HEIGHT))
                             .flex_shrink_0()
-                            .px(px(12.))
-                            .bg(rgb(0x171d22))
-                            .child(div().text_size(px(13.)).font_semibold().child(title))
+                            .px(px(ui_tokens::SPACE_4))
+                            .border_b_1()
+                            .border_color(tokens.border_subtle)
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .text_size(px(ui_tokens::FONT_TITLE))
+                                    .font_semibold()
+                                    .child(title),
+                            )
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(4.))
-                                    .child(Button::new("log-replay-find").label("Find").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.search_target = Some(SearchTarget::LogReplay);
-                                            this.search_visible = true;
-                                            let focus = this.search_input.read(cx).focus_handle(cx);
-                                            window.focus(&focus);
-                                            cx.notify();
-                                        }),
-                                    ))
-                                    .child(Button::new("log-replay-top").label("Top").on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.scroll_log_replay_to(true, cx);
-                                        }),
-                                    ))
+                                    .gap(px(ui_tokens::SPACE_1))
                                     .child(
-                                        Button::new("log-replay-bottom").label("Bottom").on_click(
+                                        components::button(
+                                            &tokens,
+                                            "log-replay-find",
+                                            "Find",
+                                            ButtonKind::Ghost,
+                                            ButtonSize::Small,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.search_target = Some(SearchTarget::LogReplay);
+                                                this.search_visible = true;
+                                                let focus =
+                                                    this.search_input.read(cx).focus_handle(cx);
+                                                window.focus(&focus);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        components::button(
+                                            &tokens,
+                                            "log-replay-top",
+                                            "Top",
+                                            ButtonKind::Ghost,
+                                            ButtonSize::Small,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.scroll_log_replay_to(true, cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        components::button(
+                                            &tokens,
+                                            "log-replay-bottom",
+                                            "Bottom",
+                                            ButtonKind::Ghost,
+                                            ButtonSize::Small,
+                                        )
+                                        .on_click(
                                             cx.listener(|this, _, _, cx| {
                                                 this.scroll_log_replay_to(false, cx);
                                             }),
                                         ),
                                     )
                                     .child(
-                                        Button::new("log-replay-close").label("Close").on_click(
+                                        components::button(
+                                            &tokens,
+                                            "log-replay-close",
+                                            "Close",
+                                            ButtonKind::Secondary,
+                                            ButtonSize::Small,
+                                        )
+                                        .on_click(
                                             cx.listener(|this, _, _, cx| {
                                                 this.close_log_replay(cx);
                                             }),
@@ -1714,13 +1802,12 @@ impl AppView {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .px(px(10.))
-                            .py(px(5.))
+                            .px(px(ui_tokens::SPACE_3))
+                            .py(px(ui_tokens::SPACE_1))
                             .border_t_1()
-                            .border_color(rgb(0x2a3238))
-                            .text_size(px(10.))
-                            .text_color(rgb(0x9aa4ab))
-                            .child(message),
+                            .border_color(tokens.border_subtle)
+                            .bg(tokens.surface)
+                            .child(components::help_text(&tokens, message)),
                     )
                     .when(search_overlay.is_some(), |panel| {
                         panel.child(search_overlay.expect("search overlay is present"))
@@ -2818,6 +2905,28 @@ impl AppView {
         }
     }
 
+    fn copy_terminal_selection(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .session(session_id)
+            .and_then(|session| session.frame.as_ref())
+            .and_then(|frame| frame.selection_text.clone())
+            .filter(|text| !text.is_empty())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn paste_into_terminal(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.send_terminal_request(
+                session_id,
+                TerminalRequest::Paste(text),
+                "Terminal paste",
+                cx,
+            );
+        }
+    }
+
     fn terminal_surface(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
         let terminal_bounds = Rc::clone(&self.terminal_bounds);
         let palette = self.settings.theme.palette();
@@ -2901,8 +3010,9 @@ impl AppView {
             terminal_view = terminal_view.child(
                 div()
                     .absolute()
-                    .top(px(6.))
-                    .right(px(6.))
+                    .top(px(ui_tokens::SPACE_2))
+                    .left(px(ui_tokens::SPACE_4))
+                    .right(px(ui_tokens::SPACE_4))
                     .child(self.search_bar(cx)),
             );
         }
@@ -2918,6 +3028,7 @@ impl AppView {
         let state = session.state;
         let focused = self.active_session_id == Some(session_id);
         let surface = self.terminal_surface(session_id, cx);
+        let card_group: SharedString = format!("terminal-card-{session_id}").into();
         div()
             .id(("terminal-panel", session_id))
             .flex()
@@ -2925,6 +3036,8 @@ impl AppView {
             .flex_1()
             .min_w_0()
             .min_h_0()
+            .relative()
+            .group(card_group.clone())
             .border_1()
             .border_color(if focused {
                 tokens.border_strong
@@ -2962,6 +3075,105 @@ impl AppView {
                         session_state_label(state),
                         session_tone(state),
                     )),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(TERMINAL_PANEL_HEADER_PX + ui_tokens::SPACE_1))
+                    .right(px(ui_tokens::SPACE_2))
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .p(px(2.0))
+                    .rounded(px(ui_tokens::RADIUS_CONTROL))
+                    .border_1()
+                    .border_color(tokens.border_subtle)
+                    .bg(tokens.surface_overlay.opacity(0.94))
+                    .opacity(0.4)
+                    .group_hover(card_group, |style| style.opacity(1.0))
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            ("terminal-find", session_id),
+                            IconName::Search,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Find in terminal",
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.open_search(session_id, window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            ("terminal-copy", session_id),
+                            IconName::Copy,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Copy selection",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.copy_terminal_selection(session_id, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            ("terminal-paste", session_id),
+                            IconName::Replace,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Paste",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.paste_into_terminal(session_id, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            ("terminal-replay", session_id),
+                            IconName::BookOpen,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Replay log",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.begin_log_replay(cx))),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            ("terminal-upload", session_id),
+                            IconName::ArrowUp,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            "Send file",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.begin_upload(session_id, cx);
+                        })),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            ("toggle-inspector", session_id),
+                            IconName::Ellipsis,
+                            if self.inspector_visible {
+                                ButtonKind::Secondary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            ButtonSize::Small,
+                            "Toggle inspector",
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx)),
+                        ),
+                    ),
             )
             .child(surface)
             .into_any_element()
@@ -5300,6 +5512,12 @@ impl AppView {
         cx.notify();
     }
 
+    fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.inspector_visible = !self.inspector_visible;
+        self.resize_terminal(window, cx);
+        cx.notify();
+    }
+
     fn toggle_ui_theme(&mut self, cx: &mut Context<Self>) {
         self.ui_theme = self.ui_theme.toggled();
         ui::theme::install(cx, self.ui_theme);
@@ -6840,6 +7058,333 @@ impl AppView {
             )
             .into_any_element()
     }
+
+    fn inspector(
+        &mut self,
+        session_id: u64,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(session) = self.session(session_id) else {
+            return div().into_any_element();
+        };
+        let transfer = session.sftp.transfer.clone();
+        let transfer_message = session.sftp.message.clone();
+        let sftp_visible = session.sftp.visible;
+        let rules = session.forwards.rules.clone();
+        let forward_message = session.forwards.message.clone();
+        let forwards_visible = session.forwards.visible;
+        let username = session.username.clone();
+        let host = session.host.clone();
+        let port = session.port;
+        let state = session.state;
+        let terminal_size = session.terminal_size;
+        let log_active = session.log_path.is_some();
+        let profile = session
+            .profile_name
+            .as_ref()
+            .and_then(|name| {
+                self.profiles
+                    .iter()
+                    .find(|profile| profile.name.eq_ignore_ascii_case(name))
+            })
+            .cloned();
+
+        let mut body = div()
+            .id("inspector-body")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-transfers",
+                "Transfers",
+                self.inspector_transfers_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_transfers_open = !this.inspector_transfers_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_transfers_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            if let Some(transfer) = transfer {
+                let ratio = if transfer.total > 0 {
+                    transfer.transferred as f32 / transfer.total as f32
+                } else {
+                    0.0
+                };
+                group = group
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_primary)
+                                    .child(transfer.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(transfer.kind.label()),
+                            ),
+                    )
+                    .child(components::progress_bar(tokens, ratio))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .text_color(tokens.text_secondary)
+                            .child(format!(
+                                "{} / {}",
+                                format_size(transfer.transferred),
+                                format_size(transfer.total)
+                            ))
+                            .child(format!("{:.0}%", ratio * 100.0)),
+                    );
+            } else {
+                group = group.child(components::help_text(
+                    tokens,
+                    if transfer_message.is_empty() {
+                        "No active transfer.".to_owned()
+                    } else {
+                        transfer_message.clone()
+                    },
+                ));
+            }
+            group = group.child(
+                components::button(
+                    tokens,
+                    "inspector-files",
+                    if sftp_visible {
+                        "Close files"
+                    } else {
+                        "Open files"
+                    },
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_sftp(session_id, cx);
+                })),
+            );
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-forwards",
+                "Forwards",
+                self.inspector_forwards_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_forwards_open = !this.inspector_forwards_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_forwards_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            if rules.is_empty() {
+                group = group.child(components::help_text(tokens, "No forwarding rules."));
+            } else {
+                for (rule_id, rule) in rules {
+                    let target = if rule.spec.kind.needs_target() {
+                        format!("{}:{}", rule.spec.target_host, rule.spec.target_port)
+                    } else {
+                        "SOCKS5".to_owned()
+                    };
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_primary)
+                                            .child(format!(
+                                                "{} {}:{}",
+                                                rule.spec.kind.label(),
+                                                rule.spec.listen_host,
+                                                rule.bound_port
+                                            )),
+                                    )
+                                    .child(
+                                        components::icon_button(
+                                            tokens,
+                                            ("inspector-stop-forward", rule_id),
+                                            IconName::Close,
+                                            ButtonKind::Ghost,
+                                            ButtonSize::Small,
+                                            "Stop rule",
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.remove_forward_rule(session_id, rule_id, cx);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(target)
+                                    .child(format!("{} active", rule.connections)),
+                            ),
+                    );
+                }
+            }
+            if !forward_message.is_empty() {
+                group = group.child(components::help_text(tokens, forward_message));
+            }
+            group = group.child(
+                components::button(
+                    tokens,
+                    "inspector-tunnels",
+                    if forwards_visible {
+                        "Close tunnels"
+                    } else {
+                        "Manage tunnels"
+                    },
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_tunnels(session_id, cx);
+                })),
+            );
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-connection",
+                "Connection",
+                self.inspector_info_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_info_open = !this.inspector_info_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_info_open {
+            let auth = profile
+                .as_ref()
+                .map_or("Quick connect", |profile| profile.auth_method.label());
+            let profile_name = profile
+                .as_ref()
+                .map_or_else(|| "Unsaved".to_owned(), |profile| profile.name.clone());
+            let jump = profile
+                .as_ref()
+                .map(|profile| profile.proxy_jump.clone())
+                .filter(|jump| !jump.is_empty())
+                .unwrap_or_else(|| "None".to_owned());
+            let keepalive = profile
+                .as_ref()
+                .map(|profile| profile.keepalive_seconds)
+                .unwrap_or(0);
+            body = body
+                .child(components::info_row(
+                    tokens,
+                    "Host",
+                    format!("{username}@{host}:{port}"),
+                ))
+                .child(components::info_row(
+                    tokens,
+                    "State",
+                    session_state_label(state),
+                ))
+                .child(components::info_row(
+                    tokens,
+                    "Terminal",
+                    format!("{} x {}", terminal_size.columns, terminal_size.rows),
+                ))
+                .child(components::info_row(tokens, "Auth", auth))
+                .child(components::info_row(tokens, "Profile", profile_name))
+                .child(components::info_row(tokens, "Jump host", jump))
+                .child(components::info_row(
+                    tokens,
+                    "Keep-alive",
+                    if keepalive == 0 {
+                        "Off".to_owned()
+                    } else {
+                        format!("{keepalive}s")
+                    },
+                ))
+                .child(components::info_row(
+                    tokens,
+                    "Logging",
+                    if log_active { "Recording" } else { "Off" },
+                ));
+        }
+
+        components::panel(tokens)
+            .id("inspector")
+            .w(px(ui_tokens::INSPECTOR_WIDTH))
+            .ml(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_subtle)
+            .rounded(px(ui_tokens::RADIUS_PANEL))
+            .overflow_hidden()
+            .child(
+                components::panel_header(tokens, "Inspector").child(
+                    components::icon_button(
+                        tokens,
+                        "close-inspector",
+                        IconName::Close,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        "Close inspector",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx))),
+                ),
+            )
+            .child(body)
+            .into_any_element()
+    }
 }
 
 fn terminal_mouse_button(button: MouseButton) -> Option<TerminalMouseButton> {
@@ -7120,6 +7665,11 @@ impl Render for AppView {
                         "Create a session or open a saved host from the sidebar.",
                     )),
             );
+        }
+        if self.inspector_visible
+            && let Some(session_id) = self.active_session_id
+        {
+            terminal_workspace = terminal_workspace.child(self.inspector(session_id, &tokens, cx));
         }
         if let Some(session_id) = self.active_session_id
             && self

@@ -135,6 +135,17 @@ Matches are selected in the terminal, so `Ctrl+Shift+C` copies the current
 match. New terminal output or a resize clears the match list and the next search
 starts from the first match.
 
+Each terminal card has a floating toolbar in its top-right corner with Find,
+Copy, Paste, Replay log, Send file and the inspector toggle. The toolbar is
+dimmed until the pointer enters the card. The find bar spans the card width minus
+32 px. The 380 px inspector on the right has three independently collapsible
+groups: Transfers shows the active transfer's name, direction and progress;
+Forwards lists forwarding rules with their listen address, target and active
+connection count; Connection shows the host, session state, terminal size,
+authentication method, profile, jump host, keep-alive and logging state. Opening
+or closing the inspector recalculates the terminal columns and resizes every
+active PTY; collapsing a group does not change the terminal size.
+
 ## Test and Verify
 
 Run the unit tests directly:
