@@ -99,6 +99,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Host" => "主机",
         "Port" => "端口",
         "Group" => "分组",
+        "Group order updated." => "分组顺序已更新。",
         "name" => "名称",
         "Unix seconds" => "Unix 秒",
         "Favorite" => "已收藏",

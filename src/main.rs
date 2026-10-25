@@ -129,9 +129,9 @@ struct TabDragData {
 }
 
 #[derive(Clone, Debug)]
-struct HostDragData {
-    name: String,
-    title: SharedString,
+enum SidebarDragData {
+    Host { name: String, title: SharedString },
+    Group { key: String, title: SharedString },
 }
 
 struct DragPreview {
@@ -375,6 +375,29 @@ fn move_profile_to_group(profiles: &mut [HostProfile], name: &str, group: &str) 
     }
     profile.group = group.to_owned();
     sort_profiles(profiles);
+    true
+}
+
+fn reorder_group_order(order: &mut Vec<String>, dragged: &str, target: &str) -> bool {
+    let dragged = collapsed_group_key(dragged);
+    let target = collapsed_group_key(target);
+    if dragged == target {
+        return false;
+    }
+    if !order.iter().any(|entry| entry == &dragged) {
+        order.push(dragged.clone());
+    }
+    if !order.iter().any(|entry| entry == &target) {
+        order.push(target.clone());
+    }
+    let Some(index) = order.iter().position(|entry| entry == &dragged) else {
+        return false;
+    };
+    let value = order.remove(index);
+    let Some(target_index) = order.iter().position(|entry| entry == &target) else {
+        return false;
+    };
+    order.insert(target_index, value);
     true
 }
 
@@ -893,9 +916,9 @@ mod session_tests {
         filesystem_usage_percent, forget_stopped_forward, format_log_time, format_rate,
         is_sftp_transfer_command, keyword_matches, move_profile_to_group, mpsc,
         recall_compose_history, remember_compose_history, remember_stopped_forward, remove_session,
-        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
-        take_next_sftp_transfer, terminal_size_for_viewport, watch,
+        reorder_group_order, reorder_session_ids, search_result_message, session_editor_escape,
+        session_editor_key, session_terminal_size_for_split, split_panel_terminal_size,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1403,6 +1426,15 @@ mod session_tests {
                 .is_empty()
         );
         assert!(!move_profile_to_group(&mut profiles, "missing", "Prod"));
+    }
+
+    #[test]
+    fn dragging_a_group_reorders_persisted_group_order() {
+        let mut order = vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+        assert!(reorder_group_order(&mut order, " GAMMA ", " alpha "));
+        assert_eq!(order, vec!["gamma", "alpha", "beta"]);
+        assert!(!reorder_group_order(&mut order, "gamma", "GAMMA"));
+        assert!(!reorder_group_order(&mut order, "missing", "missing"));
     }
 
     #[test]
@@ -3124,6 +3156,25 @@ impl AppView {
         self.persist_ui_preferences(cx);
     }
 
+    fn reorder_groups_before(&mut self, dragged: &str, target: &str, cx: &mut Context<Self>) {
+        let mut order = self.settings.group_order.clone();
+        let mut missing = self
+            .profiles
+            .iter()
+            .map(|profile| collapsed_group_key(&profile.group))
+            .filter(|key| !order.iter().any(|entry| entry == key))
+            .collect::<Vec<_>>();
+        missing.sort();
+        missing.dedup();
+        order.extend(missing);
+        if !reorder_group_order(&mut order, dragged, target) {
+            return;
+        }
+        self.settings.group_order = order;
+        self.persist_ui_preferences(cx);
+        self.show_toast(self.tr("Group order updated."), Tone::Success, cx);
+    }
+
     fn group_drop_header(
         &self,
         tokens: &ThemeTokens,
@@ -3132,16 +3183,43 @@ impl AppView {
         open: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let label: SharedString = label.into();
         let drop_id: SharedString = format!("host-group-drop-{group}").into();
         let toggle_group = group.clone();
-        components::collapsible_header(tokens, drop_id, label, open)
+        let target_group = collapsed_group_key(&group);
+        let host_group = group.clone();
+        let preview_tokens = *tokens;
+        components::collapsible_header(tokens, drop_id, label.clone(), open)
             .rounded(px(ui_tokens::RADIUS_CONTROL))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_group_collapsed(&toggle_group, cx);
             }))
-            .on_drop(cx.listener(move |this, data: &HostDragData, _, cx| {
-                this.move_host_to_group(&data.name, &group, cx);
-            }))
+            .on_drag(
+                SidebarDragData::Group {
+                    key: target_group.clone(),
+                    title: label,
+                },
+                move |data: &SidebarDragData, _, _, cx| {
+                    let title = match data {
+                        SidebarDragData::Host { title, .. }
+                        | SidebarDragData::Group { title, .. } => title.clone(),
+                    };
+                    cx.new(|_| DragPreview {
+                        title,
+                        tokens: preview_tokens,
+                    })
+                },
+            )
+            .on_drop(
+                cx.listener(move |this, data: &SidebarDragData, _, cx| match data {
+                    SidebarDragData::Host { name, .. } => {
+                        this.move_host_to_group(name, &host_group, cx);
+                    }
+                    SidebarDragData::Group { key, .. } => {
+                        this.reorder_groups_before(key, &target_group, cx);
+                    }
+                }),
+            )
             .hover(|style| style.bg(tokens.surface_overlay))
             .into_any_element()
     }
@@ -5469,12 +5547,16 @@ impl AppView {
             this.load_profile(&selected_profile, window, cx);
         }))
         .on_drag(
-            HostDragData {
+            SidebarDragData::Host {
                 name: drag_name,
                 title: drag_title,
             },
-            move |data: &HostDragData, _, _, cx| {
-                let title = data.title.clone();
+            move |data: &SidebarDragData, _, _, cx| {
+                let title = match data {
+                    SidebarDragData::Host { title, .. } | SidebarDragData::Group { title, .. } => {
+                        title.clone()
+                    }
+                };
                 cx.new(|_| DragPreview {
                     title: title.clone(),
                     tokens: preview_tokens,
@@ -9469,6 +9551,7 @@ impl AppView {
             sidebar_width: self.settings.sidebar_width,
             inspector_width: self.settings.inspector_width,
             collapsed_groups: self.settings.collapsed_groups.clone(),
+            group_order: self.settings.group_order.clone(),
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -10088,7 +10171,7 @@ impl AppView {
 
             let mut groups: BTreeMap<String, (String, Vec<usize>)> = BTreeMap::new();
             for (index, profile) in self.profiles.iter().enumerate() {
-                let key = profile.group.to_lowercase();
+                let key = collapsed_group_key(&profile.group);
                 let display = if profile.group.is_empty() {
                     self.tr("UNGROUPED")
                 } else {
@@ -10105,7 +10188,18 @@ impl AppView {
                     .entry(String::new())
                     .or_insert_with(|| (self.tr("UNGROUPED"), Vec::new()));
             }
-            for (key, (display, mut indexes)) in groups {
+            let mut group_keys = groups.keys().cloned().collect::<Vec<_>>();
+            let preferred_order = &self.settings.group_order;
+            group_keys.sort_by_key(|key| {
+                preferred_order
+                    .iter()
+                    .position(|preferred| preferred == key)
+                    .unwrap_or(usize::MAX)
+            });
+            for key in group_keys {
+                let Some((display, mut indexes)) = groups.get(&key).cloned() else {
+                    continue;
+                };
                 indexes.sort_by_key(|index| self.profiles[*index].name.to_lowercase());
                 let group_value = if key.is_empty() {
                     String::new()

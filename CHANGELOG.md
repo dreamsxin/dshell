@@ -2,6 +2,23 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.11] - 2026-10-25
+
+Adds persistent ordering for host groups in the server sidebar.
+
+### Added
+
+- Drag a group header onto another group header to reorder saved groups.
+- Persist normalized group order in versioned UI settings while remaining compatible with older settings files.
+- Keep the local manual Docker SSH service available on `127.0.0.1:2222` for desktop smoke testing.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo test --locked --offline` and `scripts\verify-hard-constraints.ps1` passed (114 unit tests passed, 9 Docker-only tests ignored by the unit-test run).
+- `scripts\test-docker-ssh.ps1`: 9 integration tests passed.
+- Manual Windows screenshots captured from the fresh build: [Chinese workspace](artifacts/dshell-v0.1.11-chinese-workspace.png), [local SSH form](artifacts/dshell-v0.1.11-local-ssh-form.png), and [authentication form](artifacts/dshell-v0.1.11-auth-cn.png). Real DPI, IME and glyph alignment remain manual checks.
+
 ## [0.1.10] - 2026-10-25
 
 Completes Simplified Chinese coverage for the workspace shell and input placeholders.
