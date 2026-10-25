@@ -164,6 +164,12 @@ pub struct ServerServiceActionResult {
     pub message: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerServiceLogs {
+    pub name: String,
+    pub lines: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerPowerAction {
     Reboot,
@@ -192,6 +198,7 @@ pub enum ServerData {
     ProcessAction(ServerProcessActionResult),
     Services(Vec<ServerService>),
     ServiceAction(ServerServiceActionResult),
+    ServiceLogs(ServerServiceLogs),
     PowerAction(ServerPowerActionResult),
 }
 
@@ -199,6 +206,7 @@ pub enum ServerDataError {
     Metrics(String),
     Processes(String),
     Services(String),
+    ServiceLogs(String),
 }
 
 fn connection_info_for_key(key: &PublicKey) -> ConnectionInfo {
@@ -721,6 +729,9 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::ControlServerService { name, action }) => {
                         control_server_service(&mut session, &events, name, action).await;
                     }
+                    Some(TerminalRequest::ReadServerServiceLogs { name }) => {
+                        read_server_service_logs(&mut session, &events, name).await;
+                    }
                     Some(TerminalRequest::ControlServerPower { action }) => {
                         control_server_power(&mut session, &events, action).await;
                     }
@@ -964,12 +975,13 @@ async fn run_connection_with_known_hosts(
     Ok(())
 }
 
-const SERVER_METRICS_COMMAND: &str = r##"printf 'DSHELL_METRICS_V1\n'; printf 'OS=%s\n' "$(uname -s 2>/dev/null || printf unknown)"; printf 'KERNEL=%s\n' "$(uname -r 2>/dev/null || printf unknown)"; printf 'LOAD1=%s\n' "$(awk '{print $1}' /proc/loadavg 2>/dev/null)"; printf 'LOAD5=%s\n' "$(awk '{print $2}' /proc/loadavg 2>/dev/null)"; printf 'LOAD15=%s\n' "$(awk '{print $3}' /proc/loadavg 2>/dev/null)"; printf 'MEM_TOTAL_KIB=%s\n' "$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf 'MEM_AVAILABLE_KIB=%s\n' "$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf 'UPTIME_SECONDS=%s\n' "$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"; printf 'DISK_TOTAL_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $2; exit}')"; printf 'DISK_USED_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $3; exit}')"; printf 'DISK_AVAILABLE_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4; exit}')"; printf 'DISK_USE_PERCENT=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5; exit}')"##;
+const SERVER_METRICS_COMMAND: &str = r##"printf '%s\n' 'DSHELL_METRICS_V1'; printf '%s\n' "OS=$(uname -s 2>/dev/null || printf unknown)"; printf '%s\n' "KERNEL=$(uname -r 2>/dev/null || printf unknown)"; printf '%s\n' "LOAD1=$(awk '{print $1}' /proc/loadavg 2>/dev/null)"; printf '%s\n' "LOAD5=$(awk '{print $2}' /proc/loadavg 2>/dev/null)"; printf '%s\n' "LOAD15=$(awk '{print $3}' /proc/loadavg 2>/dev/null)"; printf '%s\n' "MEM_TOTAL_KIB=$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf '%s\n' "MEM_AVAILABLE_KIB=$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf '%s\n' "UPTIME_SECONDS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"; printf '%s\n' "DISK_TOTAL_KIB=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $2; exit}')"; printf '%s\n' "DISK_USED_KIB=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $3; exit}')"; printf '%s\n' "DISK_AVAILABLE_KIB=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4; exit}')"; printf '%s\n' "DISK_USE_PERCENT=$(df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5; exit}')"##;
 
 const SERVER_PROCESSES_COMMAND: &str = r##"printf 'DSHELL_PROCESSES_V1\n'; ps -eo pid=,user=,pcpu=,pmem=,stat=,args= --sort=-pcpu 2>/dev/null | head -n 50 | awk '{pid=$1; user=$2; cpu=$3; mem=$4; state=$5; $1=$2=$3=$4=$5=""; sub(/^[ \t]+/, ""); print "PROC\t" pid "\t" user "\t" cpu "\t" mem "\t" state "\t" $0}'"##;
 const MAX_SERVER_PROCESSES: usize = 50;
 
 const SERVER_SERVICES_COMMAND: &str = r##"if command -v systemctl >/dev/null 2>&1; then services=$(systemctl list-units --type=service --all --no-legend --no-pager 2>/dev/null); if [ $? -eq 0 ] && [ -n "$services" ]; then printf 'DSHELL_SERVICES_V1\n'; printf '%s\n' "$services" | head -n 50 | awk '{unit=$1; load=$2; active=$3; sub=$4; $1=$2=$3=$4=""; sub(/^[ \t]+/, ""); print "SERVICE\t" unit "\t" load "\t" active "\t" sub "\t" $0}'; exit 0; fi; fi; if command -v service >/dev/null 2>&1; then printf 'DSHELL_SERVICES_V1\n'; service --status-all 2>&1 | head -n 50 | awk '$2 == "+" || $2 == "-" || $2 == "?" {mark=$2; name=$4; active=(mark == "+") ? "active" : ((mark == "-") ? "inactive" : "unknown"); print "SERVICE\t" name "\tloaded\t" active "\t" active "\t" $0}'; exit 0; fi; printf 'DSHELL_SERVICES_V1\n'"##;
+const SERVER_SERVICE_LOG_LINES: usize = 80;
 
 fn metric_value<'a>(lines: &'a str, key: &str) -> Option<&'a str> {
     lines
@@ -1161,6 +1173,57 @@ fn parse_server_services(output: &str) -> Result<Vec<ServerService>> {
         });
     }
     Ok(services)
+}
+
+fn service_logs_command(name: &str) -> String {
+    format!(
+        "printf '%s\\n' 'DSHELL_SERVICE_LOGS_V1'; if command -v journalctl >/dev/null 2>&1; then journalctl -u {} -n {} --no-pager -o short-iso 2>&1; status=$?; elif command -v service >/dev/null 2>&1; then service {} status 2>&1; status=$?; else status=127; fi; printf 'DSHELL_SERVICE_LOGS_END\\t%d\\n' \"$status\"",
+        name, SERVER_SERVICE_LOG_LINES, name,
+    )
+}
+
+fn parse_service_logs(output: &str, name: &str) -> Result<ServerServiceLogs> {
+    if !output
+        .lines()
+        .any(|line| line.trim() == "DSHELL_SERVICE_LOGS_V1")
+    {
+        bail!("The remote host did not return a supported service logs response.");
+    }
+    let (body, status) = output
+        .rsplit_once("DSHELL_SERVICE_LOGS_END\t")
+        .ok_or_else(|| anyhow!("The remote host returned an incomplete service logs response."))?;
+    let status = status
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse::<u8>()
+        .context("The remote host returned an invalid service logs status.")?;
+    let lines = body
+        .lines()
+        .skip_while(|line| line.trim() != "DSHELL_SERVICE_LOGS_V1")
+        .skip(1)
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .take(SERVER_SERVICE_LOG_LINES)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if status != 0 {
+        let detail = lines
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("; ");
+        if detail.is_empty() {
+            bail!("The remote host could not read service logs.");
+        }
+        bail!("The remote host could not read service logs: {detail}");
+    }
+    Ok(ServerServiceLogs {
+        name: name.to_owned(),
+        lines,
+    })
 }
 
 async fn refresh_server_processes(
@@ -1356,6 +1419,65 @@ async fn refresh_server_services(
             let _ = events
                 .send(UiEvent::ServerMetricsError(ServerDataError::Services(
                     "Timed out waiting for server services.".to_owned(),
+                )))
+                .await;
+        }
+    }
+}
+
+async fn read_server_service_logs(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+    name: String,
+) {
+    let name = name.trim().to_owned();
+    if !valid_service_name(&name) {
+        let _ = events
+            .send(UiEvent::ServerMetricsError(ServerDataError::ServiceLogs(
+                "The service name contains unsupported characters.".to_owned(),
+            )))
+            .await;
+        return;
+    }
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a service logs channel")?;
+        channel
+            .exec(true, service_logs_command(&name))
+            .await
+            .context("could not start the service logs command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the service logs response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server service logs response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_service_logs(&output, &name)
+    })
+    .await;
+    match result {
+        Ok(Ok(logs)) => {
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::ServiceLogs(logs)))
+                .await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::ServiceLogs(
+                    format!("{error:#}"),
+                )))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::ServiceLogs(
+                    "Timed out waiting for service logs.".to_owned(),
                 )))
                 .await;
         }
@@ -1847,9 +1969,9 @@ mod tests {
         Authentication, ConnectionSpec, JumpSpec, ServerPowerAction, ServiceAction, UiEvent,
         can_answer_with_password, connection_info_for_key, is_known_host_key, parse_power_action,
         parse_process_action, parse_server_metrics, parse_server_processes, parse_server_services,
-        parse_service_action, power_action_command, process_termination_command,
-        run_connection_with_known_hosts, service_action_command, valid_process_pid,
-        valid_service_name,
+        parse_service_action, parse_service_logs, power_action_command,
+        process_termination_command, run_connection_with_known_hosts, service_action_command,
+        service_logs_command, valid_process_pid, valid_service_name,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -1995,6 +2117,31 @@ mod tests {
         assert!(
             parse_server_services("DSHELL_SERVICES_V1\nSERVICE\t\tloaded\tactive\trunning\tssh\n")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn service_logs_parser_reads_bounded_output_and_status() {
+        let logs = parse_service_logs(
+            "DSHELL_SERVICE_LOGS_V1\n2026-10-25T10:00:00+0000 sshd started\n2026-10-25T10:01:00+0000 sshd ready\nDSHELL_SERVICE_LOGS_END\t0\n",
+            "sshd.service",
+        )
+        .unwrap();
+        assert_eq!(logs.name, "sshd.service");
+        assert_eq!(logs.lines.len(), 2);
+        assert!(logs.lines[1].contains("ready"));
+        assert!(service_logs_command("sshd.service").contains("journalctl -u sshd.service -n 80"));
+    }
+
+    #[test]
+    fn service_logs_parser_rejects_missing_or_failed_response() {
+        assert!(parse_service_logs("journal output", "ssh").is_err());
+        assert!(
+            parse_service_logs(
+                "DSHELL_SERVICE_LOGS_V1\nfailed\nDSHELL_SERVICE_LOGS_END\t1\n",
+                "ssh",
+            )
+            .is_err()
         );
     }
 

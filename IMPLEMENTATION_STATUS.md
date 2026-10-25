@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：服务日志查看完成并准备发布 `v0.1.25`。Services 分组每行新增查看日志图标，远端优先读取 `journalctl -u` 最近 80 行，缺少 systemd 时回退 `service status`；结果只保留在当前会话检查器，不写入终端、会话日志或主机资料。服务日志读取通过独立 SSH exec channel，限制 3 秒和 64 KiB，服务名沿用安全字符校验，失败、超时和不完整响应会显示明确反馈。指标协议标记改为更稳健的 POSIX `printf` 输出；新增日志协议解析、状态失败和边界单测。`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（139 项通过、9 项 Docker 专项跳过）、硬约束检查和 Docker SSH（9/9）均已通过；Services 日志入口的隔离 Windows 中文界面截图和远程日志人工烟测仍待用户桌面复核。
+
+## 当前切片
+
 2026-10-25，Windows/MSVC：服务器电源控制补齐并发布 `v0.1.24`。Server health 分组新增确认后的 Reboot server 和 Shut down server 图标入口，动作通过独立 SSH exec channel 发送固定命令，限制 3 秒和 64 KiB，并将成功、失败和超时反馈保留在检查器中；非 systemd 主机回退到后台 reboot/shutdown 调用，避免把重启动作写入终端。新增电源动作协议解析、状态码和简体中文文案单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（137 项通过、9 项 Docker 专项跳过）、硬约束检查和 Docker SSH（9/9）均已通过。Windows 手工验证确认中文电源确认弹窗，测试后选择取消，未触发远端重启或关机。
 
 ## 当前切片

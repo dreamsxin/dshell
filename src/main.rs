@@ -53,8 +53,8 @@ use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerMetrics, ServerPowerAction, ServerProcess, ServerService, ServiceAction,
-    UiEvent,
+    ServerDataError, ServerMetrics, ServerPowerAction, ServerProcess, ServerService,
+    ServerServiceLogs, ServiceAction, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -901,6 +901,9 @@ struct ServerMetricsViewState {
     services: Vec<ServerService>,
     services_loading: bool,
     services_message: String,
+    service_logs: Option<ServerServiceLogs>,
+    service_logs_loading: bool,
+    service_logs_message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1017,6 +1020,11 @@ impl SshSession {
             UiEvent::ServerMetrics(ServerData::ServiceAction(result)) => {
                 self.server_metrics.services_message = result.message;
             }
+            UiEvent::ServerMetrics(ServerData::ServiceLogs(logs)) => {
+                self.server_metrics.service_logs = Some(logs);
+                self.server_metrics.service_logs_loading = false;
+                self.server_metrics.service_logs_message.clear();
+            }
             UiEvent::ServerMetrics(ServerData::PowerAction(result)) => {
                 self.server_metrics.power_action_loading = false;
                 self.server_metrics.power_action_message = result.message;
@@ -1032,6 +1040,10 @@ impl SshSession {
             UiEvent::ServerMetricsError(ServerDataError::Services(error)) => {
                 self.server_metrics.services_loading = false;
                 self.server_metrics.services_message = error;
+            }
+            UiEvent::ServerMetricsError(ServerDataError::ServiceLogs(error)) => {
+                self.server_metrics.service_logs_loading = false;
+                self.server_metrics.service_logs_message = error;
             }
             UiEvent::Screen(frame) => {
                 self.frame = Some(frame);
@@ -9378,6 +9390,39 @@ impl AppView {
         cx.notify();
     }
 
+    fn read_server_service_logs(&mut self, session_id: u64, name: String, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before reading service logs.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.service_logs_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.service_logs_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        match command_tx.try_send(TerminalRequest::ReadServerServiceLogs { name }) {
+            Ok(()) => {
+                session.server_metrics.service_logs_loading = true;
+                session.server_metrics.service_logs = None;
+                session.server_metrics.service_logs_message.clear();
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                session.server_metrics.service_logs_message = queue_full;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                session.server_metrics.service_logs_message = not_accepting;
+            }
+        }
+        cx.notify();
+    }
+
     fn request_service_action(
         &mut self,
         session_id: u64,
@@ -14651,6 +14696,9 @@ impl AppView {
         let server_services = server_metrics.services.clone();
         let services_loading = server_metrics.services_loading;
         let services_message = server_metrics.services_message.clone();
+        let service_logs = server_metrics.service_logs.clone();
+        let service_logs_loading = server_metrics.service_logs_loading;
+        let service_logs_message = server_metrics.service_logs_message.clone();
         let alert_cpu_percent = self.settings.alert_cpu_percent;
         let alert_memory_percent = self.settings.alert_memory_percent;
         let alert_disk_percent = self.settings.alert_disk_percent;
@@ -15418,10 +15466,31 @@ impl AppView {
                     let start_name = service.name.clone();
                     let stop_name = service.name.clone();
                     let restart_name = service.name.clone();
+                    let logs_name = service.name.clone();
                     let service_actions = div()
                         .flex()
                         .items_center()
                         .gap(px(ui_tokens::SPACE_1))
+                        .child(
+                            components::icon_button(
+                                tokens,
+                                ("service-logs", service_index),
+                                IconName::File,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("View service logs"),
+                            )
+                            .disabled(service_logs_loading || state != SessionState::Connected)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.read_server_service_logs(
+                                        session_id,
+                                        logs_name.clone(),
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
                         .child(
                             components::icon_button(
                                 tokens,
@@ -15531,6 +15600,50 @@ impl AppView {
                             ),
                     );
                 }
+            }
+            if service_logs_loading || !service_logs_message.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if service_logs_loading {
+                        self.tr("Reading service logs...")
+                    } else {
+                        self.tr(&service_logs_message)
+                    },
+                ));
+            }
+            if let Some(logs) = service_logs {
+                let mut logs_group = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .p(px(ui_tokens::SPACE_2))
+                    .rounded(px(ui_tokens::RADIUS_CONTROL))
+                    .bg(tokens.surface)
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .font_semibold()
+                            .text_color(tokens.text_primary)
+                            .child(format!("{} · {}", self.tr("Service logs"), logs.name)),
+                    );
+                if logs.lines.is_empty() {
+                    logs_group = logs_group.child(components::help_text(
+                        tokens,
+                        self.tr("No service log lines were returned."),
+                    ));
+                } else {
+                    for line in logs.lines {
+                        logs_group = logs_group.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
+                                .child(line),
+                        );
+                    }
+                }
+                group = group.child(logs_group);
             }
             body = body.child(group);
         }

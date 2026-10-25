@@ -70,11 +70,13 @@ connected sessions. Press `Refresh` to run short read-only commands through
 separate SSH exec channels and display the remote OS, kernel, load average,
 memory, root filesystem usage, uptime, a bounded process list, and service
 states. Each process row has a confirmed `Terminate` action that sends `SIGTERM`
-to the remote PID and refreshes the list. Probe output stays in the current session memory and is not added to the
-terminal stream, session log or host profile. Each probe has a three-second
-timeout and a 64 KiB response limit. Server alert thresholds for process CPU,
-memory use and root-disk use are configurable in Settings and persist in the
-versioned settings file.
+to the remote PID and refreshes the list. Each service row can read the latest
+bounded log lines through `journalctl`, with a `service status` fallback when
+systemd is unavailable. Probe and log output stays in the current session
+memory and is not added to the terminal stream, session log or host profile.
+Each request has a three-second timeout and a 64 KiB response limit. Server
+alert thresholds for process CPU, memory use and root-disk use are configurable
+in Settings and persist in the versioned settings file.
 
 The Server health group also provides confirmed `Reboot server` and `Shut down
 server` actions. They use fixed commands through separate SSH exec channels,

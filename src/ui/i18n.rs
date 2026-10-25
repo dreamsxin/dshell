@@ -101,6 +101,23 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Start service" => "启动服务",
         "Stop service" => "停止服务",
         "Restart service" => "重启服务",
+        "View service logs" => "查看服务日志",
+        "Reading service logs..." => "正在读取服务日志……",
+        "Service logs" => "服务日志",
+        "No service log lines were returned." => "远端未返回服务日志行。",
+        "Connect to the server before reading service logs." => "请先连接服务器，再读取服务日志。",
+        "Timed out waiting for service logs." => "等待服务日志超时。",
+        "The remote host did not return a supported service logs response." => {
+            "远端主机未返回受支持的服务日志响应。"
+        }
+        "The remote host returned an incomplete service logs response." => {
+            "远端主机返回的服务日志响应不完整。"
+        }
+        "The remote host returned an invalid service logs status." => {
+            "远端主机返回了无效的服务日志状态。"
+        }
+        "The remote host could not read service logs." => "远端主机无法读取服务日志。",
+        "The server service logs response was too large." => "服务器服务日志响应过大。",
         "Reboot server" => "重启服务器",
         "Shut down server" => "关闭服务器",
         "Reboot server requested." => "已请求重启服务器。",

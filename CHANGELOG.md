@@ -2,6 +2,28 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.25] - 2026-10-25
+
+Adds bounded remote service log viewing to the server inspector.
+
+### Added
+
+- Add a per-service log icon that reads the latest bounded entries through a
+  separate SSH exec channel, using `journalctl` with a `service status` fallback.
+- Keep service log output in the current session inspector only; cap requests at
+  80 lines, 64 KiB and three seconds, with explicit failure feedback.
+- Add Simplified Chinese labels, protocol parsing and failure-path tests.
+- Harden the metrics marker command to use portable `printf` output.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (139 passed, 9 Docker-only ignored).
+- Hard-constraint verification passed; Docker SSH integration passed 9/9.
+- The new Services log icon still needs an isolated Windows desktop screenshot;
+  no GUI or DPI/IME claim is made here.
+
 ## [0.1.24] - 2026-10-25
 
 Adds guarded remote server power controls to the Server health inspector.

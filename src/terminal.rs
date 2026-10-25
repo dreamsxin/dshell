@@ -180,6 +180,9 @@ pub enum TerminalRequest {
         pid: u32,
     },
     RefreshServerServices,
+    ReadServerServiceLogs {
+        name: String,
+    },
     ControlServerService {
         name: String,
         action: ServiceAction,
