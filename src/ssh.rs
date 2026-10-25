@@ -116,6 +116,13 @@ pub struct ServerProcess {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ServerNetworkInterface {
+    pub name: String,
+    pub state: String,
+    pub addresses: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerProcessActionResult {
     pub pid: u32,
     pub success: bool,
@@ -195,6 +202,7 @@ pub struct ServerPowerActionResult {
 pub enum ServerData {
     Metrics(ServerMetrics),
     Processes(Vec<ServerProcess>),
+    Network(Vec<ServerNetworkInterface>),
     ProcessAction(ServerProcessActionResult),
     Services(Vec<ServerService>),
     ServiceAction(ServerServiceActionResult),
@@ -205,6 +213,7 @@ pub enum ServerData {
 pub enum ServerDataError {
     Metrics(String),
     Processes(String),
+    Network(String),
     Services(String),
     ServiceLogs(String),
 }
@@ -720,6 +729,9 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::RefreshServerProcesses) => {
                         refresh_server_processes(&mut session, &events).await;
                     }
+                    Some(TerminalRequest::RefreshServerNetwork) => {
+                        refresh_server_network(&mut session, &events).await;
+                    }
                     Some(TerminalRequest::TerminateServerProcess { pid }) => {
                         terminate_server_process(&mut session, &events, pid).await;
                     }
@@ -980,6 +992,9 @@ const SERVER_METRICS_COMMAND: &str = r##"printf '%s\n' 'DSHELL_METRICS_V1'; prin
 const SERVER_PROCESSES_COMMAND: &str = r##"printf 'DSHELL_PROCESSES_V1\n'; ps -eo pid=,user=,pcpu=,pmem=,stat=,args= --sort=-pcpu 2>/dev/null | head -n 50 | awk '{pid=$1; user=$2; cpu=$3; mem=$4; state=$5; $1=$2=$3=$4=$5=""; sub(/^[ \t]+/, ""); print "PROC\t" pid "\t" user "\t" cpu "\t" mem "\t" state "\t" $0}'"##;
 const MAX_SERVER_PROCESSES: usize = 50;
 
+const SERVER_NETWORK_COMMAND: &str = r##"printf 'DSHELL_NETWORK_V1\n'; if command -v ip >/dev/null 2>&1; then ip -o -brief addr show 2>/dev/null | head -n 32 | awk '{name=$1; state=$2; $1=$2=""; sub(/^[ \t]+/, ""); print "IFACE\t" name "\t" state "\t" $0}'; else for path in /sys/class/net/*; do [ -e "$path" ] || continue; name=${path##*/}; state=$(cat "$path/operstate" 2>/dev/null || printf unknown); printf 'IFACE\t%s\t%s\t%s\n' "$name" "$state" 'addresses unavailable'; done | head -n 32; fi"##;
+const MAX_SERVER_NETWORK_INTERFACES: usize = 32;
+
 const SERVER_SERVICES_COMMAND: &str = r##"if command -v systemctl >/dev/null 2>&1; then services=$(systemctl list-units --type=service --all --no-legend --no-pager 2>/dev/null); if [ $? -eq 0 ] && [ -n "$services" ]; then printf 'DSHELL_SERVICES_V1\n'; printf '%s\n' "$services" | head -n 50 | awk '{unit=$1; load=$2; active=$3; sub=$4; $1=$2=$3=$4=""; sub(/^[ \t]+/, ""); print "SERVICE\t" unit "\t" load "\t" active "\t" sub "\t" $0}'; exit 0; fi; fi; if command -v service >/dev/null 2>&1; then printf 'DSHELL_SERVICES_V1\n'; service --status-all 2>&1 | head -n 50 | awk '$2 == "+" || $2 == "-" || $2 == "?" {mark=$2; name=$4; active=(mark == "+") ? "active" : ((mark == "-") ? "inactive" : "unknown"); print "SERVICE\t" name "\tloaded\t" active "\t" active "\t" $0}'; exit 0; fi; printf 'DSHELL_SERVICES_V1\n'"##;
 const SERVER_SERVICE_LOG_LINES: usize = 80;
 
@@ -1142,6 +1157,37 @@ fn parse_server_processes(output: &str) -> Result<Vec<ServerProcess>> {
     Ok(processes)
 }
 
+fn parse_server_network(output: &str) -> Result<Vec<ServerNetworkInterface>> {
+    if !output
+        .lines()
+        .any(|line| line.trim() == "DSHELL_NETWORK_V1")
+    {
+        bail!("The remote host did not return a supported network response.");
+    }
+    let mut interfaces = Vec::new();
+    for line in output.lines() {
+        let Some(fields) = line.strip_prefix("IFACE\t") else {
+            continue;
+        };
+        let fields = fields.splitn(3, '\t').collect::<Vec<_>>();
+        if fields.len() != 3 {
+            bail!("The remote host returned a malformed network interface row.");
+        }
+        if fields[..2].iter().any(|field| field.trim().is_empty()) {
+            bail!("The remote host returned an invalid network interface row.");
+        }
+        if interfaces.len() >= MAX_SERVER_NETWORK_INTERFACES {
+            bail!("The remote host returned too many network interfaces.");
+        }
+        interfaces.push(ServerNetworkInterface {
+            name: fields[0].trim().to_owned(),
+            state: fields[1].trim().to_owned(),
+            addresses: fields[2].trim().to_owned(),
+        });
+    }
+    Ok(interfaces)
+}
+
 fn parse_server_services(output: &str) -> Result<Vec<ServerService>> {
     if !output
         .lines()
@@ -1270,6 +1316,55 @@ async fn refresh_server_processes(
             let _ = events
                 .send(UiEvent::ServerMetricsError(ServerDataError::Processes(
                     "Timed out waiting for server processes.".to_owned(),
+                )))
+                .await;
+        }
+    }
+}
+
+async fn refresh_server_network(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a server network channel")?;
+        channel
+            .exec(true, SERVER_NETWORK_COMMAND)
+            .await
+            .context("could not start the server network command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the server network response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server network response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_server_network(&output)
+    })
+    .await;
+    match result {
+        Ok(Ok(network)) => {
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::Network(network)))
+                .await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Network(
+                    format!("{error:#}"),
+                )))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Network(
+                    "Timed out waiting for server network information.".to_owned(),
                 )))
                 .await;
         }
@@ -1968,8 +2063,8 @@ mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, ServerPowerAction, ServiceAction, UiEvent,
         can_answer_with_password, connection_info_for_key, is_known_host_key, parse_power_action,
-        parse_process_action, parse_server_metrics, parse_server_processes, parse_server_services,
-        parse_service_action, parse_service_logs, power_action_command,
+        parse_process_action, parse_server_metrics, parse_server_network, parse_server_processes,
+        parse_server_services, parse_service_action, parse_service_logs, power_action_command,
         process_termination_command, run_connection_with_known_hosts, service_action_command,
         service_logs_command, valid_process_pid, valid_service_name,
     };
@@ -2094,6 +2189,25 @@ mod tests {
             too_many.push_str(&format!("PROC\t{pid}\troot\t0.0\t0.0\tS\tprocess-{pid}\n"));
         }
         assert!(parse_server_processes(&too_many).is_err());
+    }
+
+    #[test]
+    fn server_network_parser_reads_bounded_interfaces() {
+        let interfaces = parse_server_network(
+            "DSHELL_NETWORK_V1\nIFACE\teth0\tUP\t192.0.2.5/24 fe80::1/64\nIFACE\tlo\tUNKNOWN\t127.0.0.1/8\n",
+        )
+        .unwrap();
+        assert_eq!(interfaces.len(), 2);
+        assert_eq!(interfaces[0].name, "eth0");
+        assert_eq!(interfaces[0].state, "UP");
+        assert!(interfaces[0].addresses.contains("192.0.2.5/24"));
+    }
+
+    #[test]
+    fn server_network_parser_rejects_missing_marker_and_bad_rows() {
+        assert!(parse_server_network("IFACE\teth0\tUP\taddress\n").is_err());
+        assert!(parse_server_network("DSHELL_NETWORK_V1\nIFACE\t\tUP\taddress\n").is_err());
+        assert!(parse_server_network("DSHELL_NETWORK_V1\nIFACE\teth0\tUP\n").is_err());
     }
 
     #[test]

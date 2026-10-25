@@ -2,6 +2,22 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.27] - 2026-10-25
+
+Adds remote network interface inspection to the server inspector.
+
+### Added
+
+- Add a Network group that reads up to 32 remote interfaces through a bounded SSH exec channel, using `ip -o -brief addr show` with a `/sys/class/net` fallback.
+- Display interface name, operational state and reported addresses with loading, empty and failure states; keep results in the current session.
+- Add Simplified Chinese labels and parser/failure-path tests.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets` and `cargo test --locked` (143 passed, 9 Docker-only ignored).
+- Hard-constraint verification passed; Docker SSH integration passed 9/9.
+
 ## [0.1.26] - 2026-10-25
 
 Adds current-session server alert history.

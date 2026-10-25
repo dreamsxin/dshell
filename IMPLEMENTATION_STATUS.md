@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：服务器网络接口巡检完成并准备发布 `v0.1.27`。检查器新增 Network 分组和刷新入口，通过独立 SSH exec channel 读取最多 32 个接口的名称、运行状态和地址；优先使用 `ip -o -brief addr show`，不可用时回退 `/sys/class/net`。响应限制为 64 KiB、3 秒超时，空结果、失败和加载状态保留在当前会话，不写入终端、日志或主机资料。新增网络协议解析、缺少标记、非法行和边界单测；`cargo fmt --all`、硬约束验证（常规测试 143 项通过、9 项 Docker 专项跳过）和 Docker SSH（9/9）均已通过。Network 分组的隔离 Windows 界面截图和真实远端接口人工烟测仍需用户手工复核。
+
+## 当前切片
+
 2026-10-25，Windows/MSVC：服务器告警历史完成并准备发布 `v0.1.26`。Server health 检查器在指标或进程刷新后记录新出现或数值变化的 CPU、内存和根分区告警，最多保留 32 条，显示观察时间、当前值和阈值；新增清除图标，历史只保存在当前会话，连接失败或断开时随会话状态清空，不写入配置、日志或远端。新增阈值观察与时间格式单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（141 项通过、9 项 Docker 专项跳过）已完成。硬约束、Docker SSH、Windows 中文界面截图和告警历史人工烟测待本切片收尾。
 
 ## 当前切片

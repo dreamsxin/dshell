@@ -53,8 +53,8 @@ use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerMetrics, ServerPowerAction, ServerProcess, ServerService,
-    ServerServiceLogs, ServiceAction, UiEvent,
+    ServerDataError, ServerMetrics, ServerNetworkInterface, ServerPowerAction, ServerProcess,
+    ServerService, ServerServiceLogs, ServiceAction, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -954,6 +954,9 @@ struct ServerMetricsViewState {
     services: Vec<ServerService>,
     services_loading: bool,
     services_message: String,
+    network: Vec<ServerNetworkInterface>,
+    network_loading: bool,
+    network_message: String,
     service_logs: Option<ServerServiceLogs>,
     service_logs_loading: bool,
     service_logs_message: String,
@@ -1095,6 +1098,11 @@ impl SshSession {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message.clear();
             }
+            UiEvent::ServerMetrics(ServerData::Network(network)) => {
+                self.server_metrics.network = network;
+                self.server_metrics.network_loading = false;
+                self.server_metrics.network_message.clear();
+            }
             UiEvent::ServerMetrics(ServerData::ProcessAction(result)) => {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message = result.message;
@@ -1123,6 +1131,10 @@ impl SshSession {
             UiEvent::ServerMetricsError(ServerDataError::Processes(error)) => {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message = error;
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Network(error)) => {
+                self.server_metrics.network_loading = false;
+                self.server_metrics.network_message = error;
             }
             UiEvent::ServerMetricsError(ServerDataError::Services(error)) => {
                 self.server_metrics.services_loading = false;
@@ -2245,6 +2257,7 @@ struct AppView {
     inspector_info_open: bool,
     inspector_server_open: bool,
     inspector_processes_open: bool,
+    inspector_network_open: bool,
     pending_process_termination: Option<(u64, u32)>,
     inspector_services_open: bool,
     pending_service_action: Option<(u64, String, ServiceAction)>,
@@ -2562,6 +2575,7 @@ impl AppView {
             inspector_info_open: true,
             inspector_server_open: true,
             inspector_processes_open: true,
+            inspector_network_open: true,
             pending_process_termination: None,
             inspector_services_open: true,
             pending_service_action: None,
@@ -9411,6 +9425,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_server_network(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing network information.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.network_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.network_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        if let Err(error) = command_tx.try_send(TerminalRequest::RefreshServerNetwork) {
+            session.server_metrics.network_message = match error {
+                mpsc::error::TrySendError::Full(_) => queue_full,
+                mpsc::error::TrySendError::Closed(_) => not_accepting,
+            };
+            session.server_metrics.network_loading = false;
+        } else {
+            session.server_metrics.network_loading = true;
+            session.server_metrics.network_message.clear();
+        }
+        cx.notify();
+    }
+
     fn request_process_termination(&mut self, session_id: u64, pid: u32, cx: &mut Context<Self>) {
         let not_connected = self.tr("Connect to the server before terminating a process.");
         if self
@@ -14886,6 +14930,9 @@ impl AppView {
         let server_processes = server_metrics.processes.clone();
         let processes_loading = server_metrics.processes_loading;
         let processes_message = server_metrics.processes_message.clone();
+        let network = server_metrics.network.clone();
+        let network_loading = server_metrics.network_loading;
+        let network_message = server_metrics.network_message.clone();
         let server_services = server_metrics.services.clone();
         let services_loading = server_metrics.services_loading;
         let services_message = server_metrics.services_message.clone();
@@ -15516,6 +15563,104 @@ impl AppView {
                         self.tr(&server_metrics.message)
                     },
                 ));
+            }
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-network",
+                self.tr("Network"),
+                self.inspector_network_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_network_open = !this.inspector_network_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_network_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let refresh_label = if network_loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            group = group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-network", session_id),
+                    refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(network_loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_network(session_id, cx);
+                })),
+            );
+            if network.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if network_loading {
+                        self.tr("Collecting network information...")
+                    } else if network_message.is_empty() {
+                        self.tr("No network interfaces reported yet.")
+                    } else {
+                        self.tr(&network_message)
+                    },
+                ));
+            } else {
+                for interface in network {
+                    let status_tone = if interface.state.eq_ignore_ascii_case("up") {
+                        Tone::Success
+                    } else {
+                        Tone::Warning
+                    };
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_primary)
+                                            .child(interface.name),
+                                    )
+                                    .child(components::pill(tokens, interface.state, status_tone)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(if interface.addresses.is_empty() {
+                                        self.tr("Addresses unavailable")
+                                    } else {
+                                        interface.addresses
+                                    }),
+                            ),
+                    );
+                }
             }
             body = body.child(group);
         }

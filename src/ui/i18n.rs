@@ -96,6 +96,14 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Server health" => "服务器健康",
         "Processes" => "进程",
         "processes" => "个进程",
+        "Network" => "网络",
+        "Collecting network information..." => "正在采集网络信息……",
+        "No network interfaces reported yet." => "尚未获取网络接口。",
+        "Connect to the server before refreshing network information." => {
+            "请先连接服务器，再刷新网络信息。"
+        }
+        "Timed out waiting for server network information." => "等待服务器网络信息超时。",
+        "Addresses unavailable" => "地址不可用",
         "Top CPU" => "CPU 占用最高",
         "Services" => "服务",
         "Start service" => "启动服务",
@@ -971,6 +979,11 @@ mod tests {
             "检查器"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "Processes"), "进程");
+        assert_eq!(translate(Language::SimplifiedChinese, "Network"), "网络");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Addresses unavailable"),
+            "地址不可用"
+        );
         assert_eq!(translate(Language::SimplifiedChinese, "Services"), "服务");
         assert_eq!(
             translate(Language::SimplifiedChinese, "Server alerts"),
