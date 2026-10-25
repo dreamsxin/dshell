@@ -76,7 +76,9 @@ systemd is unavailable. Probe and log output stays in the current session
 memory and is not added to the terminal stream, session log or host profile.
 Each request has a three-second timeout and a 64 KiB response limit. Server
 alert thresholds for process CPU, memory use and root-disk use are configurable
-in Settings and persist in the versioned settings file.
+in Settings and persist in the versioned settings file. New or changed
+threshold alerts are kept in a bounded current-session history with observation
+time and can be cleared from the inspector; the history is not persisted.
 
 The Server health group also provides confirmed `Reboot server` and `Shut down
 server` actions. They use fixed commands through separate SSH exec channels,

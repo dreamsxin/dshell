@@ -2,6 +2,27 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.26] - 2026-10-25
+
+Adds current-session server alert history.
+
+### Added
+
+- Record new or changed CPU, memory and root-disk threshold alerts after
+  metrics or process refreshes.
+- Show the latest bounded alert history in the Server health inspector with
+  observation time and threshold values.
+- Add a clear-history icon; history is session-only and is cleared on
+  disconnect, failure or explicit clear.
+- Add Simplified Chinese labels and pure threshold/history formatting tests.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (141 passed, 9 Docker-only ignored).
+- Hard-constraint verification and Docker SSH integration passed.
+
 ## [0.1.25] - 2026-10-25
 
 Adds bounded remote service log viewing to the server inspector.

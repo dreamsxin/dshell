@@ -82,6 +82,7 @@ const LAYOUT_DIVIDER_PX: f32 = 4.0;
 const MAX_AUTH_PROMPTS: usize = 8;
 const MAX_LOG_REPLAY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_KEYWORD_HIGHLIGHTS: usize = 32;
+const MAX_SERVER_ALERT_HISTORY: usize = 32;
 
 fn sidebar_width(settings: &AppSettings, collapsed: bool) -> f32 {
     if collapsed {
@@ -674,6 +675,58 @@ fn memory_usage_percent(total_kib: Option<u64>, available_kib: Option<u64>) -> O
     )
 }
 
+fn server_alert_observations(
+    metrics: Option<&ServerMetrics>,
+    processes: &[ServerProcess],
+    cpu_threshold: u8,
+    memory_threshold: u8,
+    disk_threshold: u8,
+) -> Vec<ServerAlertObservation> {
+    let mut alerts = Vec::new();
+    if let Some(max_cpu) = processes
+        .iter()
+        .map(|process| process.cpu_percent)
+        .filter(|value| value.is_finite())
+        .reduce(f32::max)
+        && max_cpu >= f32::from(cpu_threshold)
+    {
+        alerts.push(ServerAlertObservation {
+            kind: ServerAlertKind::Cpu,
+            value: format!("{max_cpu:.1}%"),
+            threshold: cpu_threshold,
+        });
+    }
+    if let Some(memory_percent) = metrics.and_then(|metrics| {
+        memory_usage_percent(metrics.memory_total_kib, metrics.memory_available_kib)
+    }) && memory_percent >= memory_threshold
+    {
+        alerts.push(ServerAlertObservation {
+            kind: ServerAlertKind::Memory,
+            value: format!("{memory_percent}%"),
+            threshold: memory_threshold,
+        });
+    }
+    if let Some(disk_percent) = metrics.and_then(|metrics| metrics.disk_use_percent)
+        && disk_percent >= disk_threshold
+    {
+        alerts.push(ServerAlertObservation {
+            kind: ServerAlertKind::Disk,
+            value: format!("{disk_percent}%"),
+            threshold: disk_threshold,
+        });
+    }
+    alerts
+}
+
+fn format_alert_time(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let within_day = seconds % 86_400;
+    let hours = within_day / 3_600;
+    let minutes = (within_day / 60) % 60;
+    let seconds = within_day % 60;
+    format!("{days}d {hours:02}:{minutes:02}:{seconds:02} UTC")
+}
+
 fn parse_alert_percent(value: &str) -> Option<u8> {
     value
         .trim()
@@ -904,6 +957,40 @@ struct ServerMetricsViewState {
     service_logs: Option<ServerServiceLogs>,
     service_logs_loading: bool,
     service_logs_message: String,
+    alert_history: Vec<ServerAlertRecord>,
+    active_alerts: Vec<ServerAlertObservation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerAlertKind {
+    Cpu,
+    Memory,
+    Disk,
+}
+
+impl ServerAlertKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU alert",
+            Self::Memory => "Memory alert",
+            Self::Disk => "Disk alert",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerAlertObservation {
+    kind: ServerAlertKind,
+    value: String,
+    threshold: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerAlertRecord {
+    kind: ServerAlertKind,
+    value: String,
+    threshold: u8,
+    observed_at: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1180,15 +1267,15 @@ mod session_tests {
         MouseTrackingMode, SessionEditorEscape, SessionEditorKey, SessionSplit, SessionState,
         SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
         UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
-        enqueue_session_request, filesystem_usage_percent, forget_stopped_forward, format_log_time,
-        format_rate, is_authentication_failure, is_sftp_transfer_command, keyword_matches,
-        memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
-        parse_alert_percent, recall_compose_history, remember_compose_history,
-        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
-        reorder_group_order, reorder_session_ids, search_result_message, session_editor_escape,
-        session_editor_key, session_matches_target, session_terminal_size_for_split,
-        split_panel_terminal_size, synchronized_targets, take_next_sftp_transfer,
-        terminal_size_for_viewport, watch,
+        enqueue_session_request, filesystem_usage_percent, forget_stopped_forward,
+        format_alert_time, format_log_time, format_rate, is_authentication_failure,
+        is_sftp_transfer_command, keyword_matches, memory_usage_percent, merge_unique_profiles,
+        move_profile_to_group, mpsc, parse_alert_percent, recall_compose_history,
+        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
+        rename_profile_group, reorder_group_order, reorder_session_ids, search_result_message,
+        server_alert_observations, session_editor_escape, session_editor_key,
+        session_matches_target, session_terminal_size_for_split, split_panel_terminal_size,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1196,6 +1283,7 @@ mod session_tests {
     use crate::settings::AppSettings;
     use crate::sftp::SftpCommand;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
+    use crate::ssh::{ServerMetrics, ServerProcess};
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
     use crate::ui::tokens as ui_tokens;
     use std::collections::{HashSet, VecDeque};
@@ -1681,6 +1769,51 @@ mod session_tests {
         assert_eq!(memory_usage_percent(Some(0), Some(0)), Some(0));
         assert_eq!(memory_usage_percent(Some(100), Some(25)), Some(75));
         assert_eq!(memory_usage_percent(Some(100), Some(200)), Some(0));
+    }
+
+    #[test]
+    fn server_alert_observations_capture_cpu_memory_and_disk_thresholds() {
+        let metrics = ServerMetrics {
+            os: "Linux".to_owned(),
+            kernel: "6.8".to_owned(),
+            load_1m: None,
+            load_5m: None,
+            load_15m: None,
+            memory_total_kib: Some(100),
+            memory_available_kib: Some(10),
+            disk_total_kib: Some(100),
+            disk_used_kib: Some(95),
+            disk_available_kib: Some(5),
+            disk_use_percent: Some(95),
+            uptime_seconds: None,
+        };
+        let processes = vec![ServerProcess {
+            pid: 42,
+            user: "root".to_owned(),
+            cpu_percent: 91.25,
+            memory_percent: 1.0,
+            state: "R".to_owned(),
+            command: "busy".to_owned(),
+        }];
+        let alerts = server_alert_observations(Some(&metrics), &processes, 80, 80, 90);
+        assert_eq!(alerts.len(), 3);
+        assert_eq!(alerts[0].value, "91.2%");
+        assert_eq!(alerts[1].value, "90%");
+        assert_eq!(alerts[2].value, "95%");
+        assert_eq!(format_alert_time(86_401), "1d 00:00:01 UTC");
+    }
+
+    #[test]
+    fn server_alert_observations_ignore_missing_metrics_and_safe_cpu_values() {
+        let processes = vec![ServerProcess {
+            pid: 42,
+            user: "root".to_owned(),
+            cpu_percent: 79.9,
+            memory_percent: 0.0,
+            state: "S".to_owned(),
+            command: "idle".to_owned(),
+        }];
+        assert!(server_alert_observations(None, &processes, 80, 80, 90).is_empty());
     }
 
     #[test]
@@ -5047,6 +5180,11 @@ impl AppView {
                     }
                     event => {
                         let result = this.update(cx, |view, cx| {
+                            let server_alerts_changed = matches!(
+                                &event,
+                                UiEvent::ServerMetrics(ServerData::Metrics(_))
+                                    | UiEvent::ServerMetrics(ServerData::Processes(_))
+                            );
                             let connection_established = matches!(
                                 &event,
                                 UiEvent::Status(status) if status.starts_with("Connected to ")
@@ -5072,6 +5210,9 @@ impl AppView {
                                 _ => None,
                             };
                             if apply_session_event(&mut view.sessions, id, event) {
+                                cx.notify();
+                            }
+                            if server_alerts_changed && view.record_server_alerts(id) {
                                 cx.notify();
                             }
                             if let Some(result) = process_action {
@@ -9186,6 +9327,58 @@ impl AppView {
             session.server_metrics.message.clear();
         }
         cx.notify();
+    }
+
+    fn record_server_alerts(&mut self, session_id: u64) -> bool {
+        let observations = {
+            let Some(session) = self.session(session_id) else {
+                return false;
+            };
+            server_alert_observations(
+                session.server_metrics.metrics.as_ref(),
+                &session.server_metrics.processes,
+                self.settings.alert_cpu_percent,
+                self.settings.alert_memory_percent,
+                self.settings.alert_disk_percent,
+            )
+        };
+        let Some(session) = self.session_mut(session_id) else {
+            return false;
+        };
+        let previous = std::mem::replace(
+            &mut session.server_metrics.active_alerts,
+            observations.clone(),
+        );
+        let mut changed = previous != observations;
+        for observation in observations {
+            if previous.contains(&observation) {
+                continue;
+            }
+            session
+                .server_metrics
+                .alert_history
+                .push(ServerAlertRecord {
+                    kind: observation.kind,
+                    value: observation.value,
+                    threshold: observation.threshold,
+                    observed_at: unix_now(),
+                });
+            changed = true;
+        }
+        if session.server_metrics.alert_history.len() > MAX_SERVER_ALERT_HISTORY {
+            let excess = session.server_metrics.alert_history.len() - MAX_SERVER_ALERT_HISTORY;
+            session.server_metrics.alert_history.drain(0..excess);
+            changed = true;
+        }
+        changed
+    }
+
+    fn clear_server_alert_history(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if let Some(session) = self.session_mut(session_id) {
+            session.server_metrics.alert_history.clear();
+            session.server_metrics.active_alerts.clear();
+            cx.notify();
+        }
     }
 
     fn refresh_server_processes(&mut self, session_id: u64, cx: &mut Context<Self>) {
@@ -14699,6 +14892,7 @@ impl AppView {
         let service_logs = server_metrics.service_logs.clone();
         let service_logs_loading = server_metrics.service_logs_loading;
         let service_logs_message = server_metrics.service_logs_message.clone();
+        let alert_history = server_metrics.alert_history.clone();
         let alert_cpu_percent = self.settings.alert_cpu_percent;
         let alert_memory_percent = self.settings.alert_memory_percent;
         let alert_disk_percent = self.settings.alert_disk_percent;
@@ -15254,6 +15448,59 @@ impl AppView {
                 }
                 for alert in alerts {
                     group = group.child(components::warning_text(tokens, alert));
+                }
+                if !alert_history.is_empty() {
+                    let clear_alerts = components::icon_button(
+                        tokens,
+                        ("server-alerts-clear", session_id),
+                        IconName::Delete,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Clear alert history"),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.clear_server_alert_history(session_id, cx);
+                    }));
+                    let mut history_group = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .bg(tokens.surface)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(ui_tokens::FONT_CAPTION))
+                                        .font_semibold()
+                                        .text_color(tokens.text_primary)
+                                        .child(self.tr("Alert history")),
+                                )
+                                .child(clear_alerts),
+                        );
+                    for record in alert_history.iter().rev().take(8) {
+                        history_group = history_group.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(ui_tokens::SPACE_2))
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
+                                .child(format!(
+                                    "{} · {} ≥ {}",
+                                    self.tr(record.kind.label()),
+                                    record.value,
+                                    format!("{}%", record.threshold)
+                                ))
+                                .child(format_alert_time(record.observed_at)),
+                        );
+                    }
+                    group = group.child(history_group);
                 }
             } else if server_metrics.loading {
                 group = group.child(components::help_text(

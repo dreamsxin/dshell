@@ -165,6 +165,11 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "The remote host returned too many service rows." => "远端主机返回了过多服务行。",
         "The server service response was too large." => "服务器服务响应过大。",
         "Server alerts" => "服务器告警",
+        "Alert history" => "告警历史",
+        "Clear alert history" => "清除告警历史",
+        "CPU alert" => "CPU 告警",
+        "Memory alert" => "内存告警",
+        "Disk alert" => "磁盘告警",
         "CPU alert threshold (%)" => "CPU 告警阈值（%）",
         "Memory alert threshold (%)" => "内存告警阈值（%）",
         "Disk alert threshold (%)" => "磁盘告警阈值（%）",
@@ -970,6 +975,14 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Server alerts"),
             "服务器告警"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Alert history"),
+            "告警历史"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Clear alert history"),
+            "清除告警历史"
         );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Collecting process list..."),
