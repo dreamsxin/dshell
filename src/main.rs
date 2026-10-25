@@ -40,7 +40,10 @@ use profiles::{
     record_recent,
 };
 use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
-use sftp::{RemoteEntry, SftpCommand, SftpEvent, TransferKind, parent_remote_path, remote_join};
+use sftp::{
+    RemoteEntry, SftpCommand, SftpEvent, TransferKind, format_permission_mode, parent_remote_path,
+    parse_permission_mode, parse_unix_timestamp, remote_join,
+};
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, UiEvent};
@@ -468,6 +471,10 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn format_unix_timestamp(value: Option<u32>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
 fn format_rate(bytes_per_second: f64) -> String {
     if !bytes_per_second.is_finite() || bytes_per_second <= 0.5 {
         "0 B/s".to_owned()
@@ -679,6 +686,12 @@ struct OverwritePrompt {
     is_directory: bool,
 }
 
+#[derive(Clone, Debug)]
+struct SftpMetadataEdit {
+    path: String,
+    name: String,
+}
+
 #[derive(Default)]
 struct SftpViewState {
     visible: bool,
@@ -691,6 +704,7 @@ struct SftpViewState {
     overwrite: Option<OverwritePrompt>,
     rename_from: Option<String>,
     pending_delete: Option<(String, bool)>,
+    metadata_edit: Option<SftpMetadataEdit>,
 }
 
 #[derive(Default)]
@@ -761,6 +775,7 @@ impl SshSession {
                 self.sftp.active_transfer = None;
                 self.sftp.transfer_queue.clear();
                 self.sftp.overwrite = None;
+                self.sftp.metadata_edit = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
                 self.forwards.stopped.clear();
@@ -781,6 +796,7 @@ impl SshSession {
                 self.sftp.active_transfer = None;
                 self.sftp.transfer_queue.clear();
                 self.sftp.overwrite = None;
+                self.sftp.metadata_edit = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
                 self.forwards.stopped.clear();
@@ -1585,6 +1601,9 @@ struct AppView {
     forward_target_host: Entity<InputState>,
     forward_target_port: Entity<InputState>,
     sftp_name: Entity<InputState>,
+    sftp_permissions: Entity<InputState>,
+    sftp_atime: Entity<InputState>,
+    sftp_mtime: Entity<InputState>,
     host: Entity<InputState>,
     port: Entity<InputState>,
     username: Entity<InputState>,
@@ -1714,6 +1733,9 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("target.internal"));
         let forward_target_port = cx.new(|cx| InputState::new(window, cx).default_value("22"));
         let sftp_name = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
+        let sftp_permissions = cx.new(|cx| InputState::new(window, cx).placeholder("0755"));
+        let sftp_atime = cx.new(|cx| InputState::new(window, cx).placeholder("Unix seconds"));
+        let sftp_mtime = cx.new(|cx| InputState::new(window, cx).placeholder("Unix seconds"));
         let snippet_name = cx.new(|cx| InputState::new(window, cx).placeholder("Snippet name"));
         let snippet_command = cx.new(|cx| InputState::new(window, cx).placeholder("uptime"));
         let keyword_input =
@@ -1862,6 +1884,9 @@ impl AppView {
             forward_target_host,
             forward_target_port,
             sftp_name,
+            sftp_permissions,
+            sftp_atime,
+            sftp_mtime,
             host,
             port,
             username,
@@ -5973,6 +5998,7 @@ impl AppView {
         let overwrite = session.sftp.overwrite.clone();
         let rename_from = session.sftp.rename_from.clone();
         let pending_delete = session.sftp.pending_delete.clone();
+        let metadata_edit = session.sftp.metadata_edit.clone();
 
         let mut list = div()
             .id("sftp-entries")
@@ -6003,6 +6029,18 @@ impl AppView {
             let rename_path = entry.path.clone();
             let rename_name = entry.name.clone();
             let delete_path = entry.path.clone();
+            let metadata_path = entry.path.clone();
+            let metadata_name = entry.name.clone();
+            let metadata_permissions = entry.permissions;
+            let metadata_atime = entry.atime;
+            let metadata_mtime = entry.mtime;
+            let metadata_summary = format!(
+                "{} · {}",
+                format_permission_mode(entry.permissions),
+                entry
+                    .mtime
+                    .map_or_else(|| "-".to_owned(), |value| value.to_string())
+            );
             let mut row = div().flex().items_center().gap(px(4.)).min_w_0();
             if is_dir {
                 let download_path = entry.path.clone();
@@ -6058,6 +6096,35 @@ impl AppView {
                     );
             }
             row = row
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(9.))
+                        .text_color(tokens.text_disabled)
+                        .child(metadata_summary),
+                )
+                .child(
+                    components::icon_button(
+                        &tokens,
+                        ("sftp-metadata", index),
+                        IconName::Settings2,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Edit metadata"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.begin_sftp_metadata(
+                            session_id,
+                            metadata_path.clone(),
+                            metadata_name.clone(),
+                            metadata_permissions,
+                            metadata_atime,
+                            metadata_mtime,
+                            window,
+                            cx,
+                        );
+                    })),
+                )
                 .child(
                     Button::new(("sftp-rename", index))
                         .label(self.tr("Rename"))
@@ -6148,44 +6215,119 @@ impl AppView {
                         path
                     }),
             );
-        let mut operations = div()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .px(px(8.))
-            .py(px(4.))
-            .child(div().flex_1().child(components::field(
-                &tokens,
-                self.tr("Remote name"),
-                &self.sftp_name,
-                false,
-            )));
-        if rename_from.is_some() {
-            operations = operations
-                .child(
-                    Button::new("sftp-rename-apply")
-                        .label(self.tr("Rename"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.apply_sftp_rename(session_id, window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("sftp-rename-cancel")
-                        .label(self.tr("Cancel"))
+        if metadata_edit.is_none() {
+            let mut operations = div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .px(px(8.))
+                .py(px(4.))
+                .child(div().flex_1().child(components::field(
+                    &tokens,
+                    self.tr("Remote name"),
+                    &self.sftp_name,
+                    false,
+                )));
+            if rename_from.is_some() {
+                operations = operations
+                    .child(
+                        Button::new("sftp-rename-apply")
+                            .label(self.tr("Rename"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.apply_sftp_rename(session_id, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sftp-rename-cancel")
+                            .label(self.tr("Cancel"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.cancel_sftp_rename(session_id, cx);
+                            })),
+                    );
+            } else {
+                operations = operations.child(
+                    Button::new("sftp-mkdir")
+                        .label(self.tr("New folder"))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.cancel_sftp_rename(session_id, cx);
+                            this.create_sftp_directory(session_id, cx);
                         })),
                 );
-        } else {
-            operations = operations.child(
-                Button::new("sftp-mkdir")
-                    .label(self.tr("New folder"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.create_sftp_directory(session_id, cx);
-                    })),
+            }
+            panel = panel.child(operations);
+        } else if let Some(metadata) = metadata_edit {
+            let metadata_name = metadata.name;
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .px(px(8.))
+                    .py(px(6.))
+                    .border_b_1()
+                    .border_color(tokens.border_subtle)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_semibold()
+                            .child(format!("{}: {metadata_name}", self.tr("Metadata"))),
+                    )
+                    .child(
+                        div().flex().gap(px(4.)).child(
+                            components::field(
+                                &tokens,
+                                self.tr("Permissions (octal)"),
+                                &self.sftp_permissions,
+                                false,
+                            )
+                            .flex_1(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(4.))
+                            .child(
+                                components::field(
+                                    &tokens,
+                                    self.tr("Access time (Unix)"),
+                                    &self.sftp_atime,
+                                    false,
+                                )
+                                .flex_1(),
+                            )
+                            .child(
+                                components::field(
+                                    &tokens,
+                                    self.tr("Modified time (Unix)"),
+                                    &self.sftp_mtime,
+                                    false,
+                                )
+                                .flex_1(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                Button::new("sftp-metadata-save")
+                                    .label(self.tr("Save metadata"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.apply_sftp_metadata(session_id, window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("sftp-metadata-cancel")
+                                    .label(self.tr("Cancel"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.cancel_sftp_metadata(session_id, window, cx);
+                                    })),
+                            ),
+                    ),
             );
         }
-        panel = panel.child(operations).child(list);
+        panel = panel.child(list);
 
         if let Some((delete_path, is_dir)) = pending_delete {
             panel = panel.child(
@@ -8112,6 +8254,113 @@ impl AppView {
             .into_any_element()
     }
 
+    fn begin_sftp_metadata(
+        &mut self,
+        session_id: u64,
+        path: String,
+        name: String,
+        permissions: Option<u32>,
+        atime: Option<u32>,
+        mtime: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.session_mut(session_id) {
+            session.sftp.metadata_edit = Some(SftpMetadataEdit { path, name });
+            session.sftp.rename_from = None;
+            session.sftp.pending_delete = None;
+        }
+        Self::set_input_value(
+            &self.sftp_permissions,
+            &format_permission_mode(permissions),
+            window,
+            cx,
+        );
+        Self::set_input_value(&self.sftp_atime, &format_unix_timestamp(atime), window, cx);
+        Self::set_input_value(&self.sftp_mtime, &format_unix_timestamp(mtime), window, cx);
+        cx.notify();
+    }
+
+    fn apply_sftp_metadata(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mode = match parse_permission_mode(&self.sftp_permissions.read(cx).value()) {
+            Ok(mode) => mode,
+            Err(_) => {
+                let message = self.tr("Invalid permission mode.");
+                self.set_sftp_message(session_id, message, cx);
+                return;
+            }
+        };
+        let atime = match parse_unix_timestamp(&self.sftp_atime.read(cx).value()) {
+            Ok(value) => value,
+            Err(_) => {
+                let message = self.tr("Invalid access time.");
+                self.set_sftp_message(session_id, message, cx);
+                return;
+            }
+        };
+        let mtime = match parse_unix_timestamp(&self.sftp_mtime.read(cx).value()) {
+            Ok(value) => value,
+            Err(_) => {
+                let message = self.tr("Invalid modified time.");
+                self.set_sftp_message(session_id, message, cx);
+                return;
+            }
+        };
+        let Some((path, current_permissions)) = self.session(session_id).and_then(|session| {
+            session.sftp.metadata_edit.as_ref().map(|edit| {
+                (
+                    edit.path.clone(),
+                    session
+                        .sftp
+                        .entries
+                        .iter()
+                        .find(|entry| entry.path == edit.path)
+                        .and_then(|entry| entry.permissions),
+                )
+            })
+        }) else {
+            return;
+        };
+        let permissions = Some((current_permissions.unwrap_or_default() & !0o7777) | mode);
+        self.send_sftp_command(
+            session_id,
+            SftpCommand::SetMetadata {
+                path,
+                permissions,
+                atime,
+                mtime,
+            },
+            cx,
+        );
+        if let Some(session) = self.session_mut(session_id) {
+            session.sftp.metadata_edit = None;
+        }
+        Self::set_input_value(&self.sftp_permissions, "", window, cx);
+        Self::set_input_value(&self.sftp_atime, "", window, cx);
+        Self::set_input_value(&self.sftp_mtime, "", window, cx);
+        cx.notify();
+    }
+
+    fn cancel_sftp_metadata(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.session_mut(session_id) {
+            session.sftp.metadata_edit = None;
+        }
+        Self::set_input_value(&self.sftp_permissions, "", window, cx);
+        Self::set_input_value(&self.sftp_atime, "", window, cx);
+        Self::set_input_value(&self.sftp_mtime, "", window, cx);
+        cx.notify();
+    }
+
     fn begin_sftp_rename(
         &mut self,
         session_id: u64,
@@ -8123,6 +8372,7 @@ impl AppView {
         if let Some(session) = self.session_mut(session_id) {
             session.sftp.rename_from = Some(path);
             session.sftp.pending_delete = None;
+            session.sftp.metadata_edit = None;
         }
         Self::set_input_value(&self.sftp_name, &name, window, cx);
         cx.notify();
@@ -8147,6 +8397,7 @@ impl AppView {
         self.send_sftp_command(session_id, SftpCommand::Rename { from, to }, cx);
         if let Some(session) = self.session_mut(session_id) {
             session.sftp.rename_from = None;
+            session.sftp.metadata_edit = None;
         }
         Self::set_input_value(&self.sftp_name, "", window, cx);
         cx.notify();
@@ -8189,6 +8440,7 @@ impl AppView {
         if let Some(session) = self.session_mut(session_id) {
             session.sftp.pending_delete = Some((path, is_dir));
             session.sftp.rename_from = None;
+            session.sftp.metadata_edit = None;
         }
         cx.notify();
     }
@@ -11668,7 +11920,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.6 · native GPUI · Esc closes"),
+                        self.tr("dshell 0.1.7 · native GPUI · Esc closes"),
                     )),
             );
 

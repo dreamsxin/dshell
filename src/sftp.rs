@@ -8,7 +8,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use russh_sftp::{client::SftpSession, protocol::OpenFlags};
+use russh_sftp::{
+    client::SftpSession,
+    protocol::{FileAttributes, OpenFlags},
+};
 use tokio::{
     io::{
         AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWrite, AsyncWriteExt as _, SeekFrom,
@@ -46,6 +49,9 @@ pub struct RemoteEntry {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
+    pub permissions: Option<u32>,
+    pub atime: Option<u32>,
+    pub mtime: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +88,12 @@ pub enum SftpCommand {
     CreateDirectory(String),
     RemoveFile(String),
     RemoveDirectory(String),
+    SetMetadata {
+        path: String,
+        permissions: Option<u32>,
+        atime: Option<u32>,
+        mtime: Option<u32>,
+    },
 }
 
 #[derive(Debug)]
@@ -298,6 +310,35 @@ pub async fn run<S>(
                         .await;
                 }
             },
+            SftpCommand::SetMetadata {
+                path,
+                permissions,
+                atime,
+                mtime,
+            } => {
+                let metadata = FileAttributes {
+                    permissions,
+                    atime,
+                    mtime,
+                    ..FileAttributes::default()
+                };
+                match session.set_metadata(path.clone(), metadata).await {
+                    Ok(()) => {
+                        let _ = events
+                            .send(SftpEvent::OperationFinished {
+                                action: format!("Updated metadata for {path}"),
+                            })
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = events
+                            .send(SftpEvent::Error(format!(
+                                "Could not update metadata for {path}: {error}"
+                            )))
+                            .await;
+                    }
+                }
+            }
         }
     }
     let _ = session.close().await;
@@ -333,11 +374,17 @@ async fn read_entries(session: &SftpSession, path: &str) -> Result<Vec<RemoteEnt
             let name = entry.file_name();
             name != "." && name != ".."
         })
-        .map(|entry| RemoteEntry {
-            name: entry.file_name(),
-            path: entry.path(),
-            is_dir: entry.file_type().is_dir(),
-            size: entry.metadata().size.unwrap_or(0),
+        .map(|entry| {
+            let metadata = entry.metadata();
+            RemoteEntry {
+                name: entry.file_name(),
+                path: entry.path(),
+                is_dir: entry.file_type().is_dir(),
+                size: metadata.size.unwrap_or(0),
+                permissions: metadata.permissions,
+                atime: metadata.atime,
+                mtime: metadata.mtime,
+            }
         })
         .collect::<Vec<_>>();
     result.sort_by(|left, right| {
@@ -1514,9 +1561,45 @@ pub fn parent_remote_path(path: &str) -> String {
     }
 }
 
+pub fn permission_mode(permissions: Option<u32>) -> u32 {
+    permissions.unwrap_or_default() & 0o7777
+}
+
+pub fn format_permission_mode(permissions: Option<u32>) -> String {
+    format!("{:04o}", permission_mode(permissions))
+}
+
+pub fn parse_permission_mode(input: &str) -> Result<u32, &'static str> {
+    let value = input.trim();
+    if !(3..=4).contains(&value.len()) || !value.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
+        return Err("permissions must be a 3- or 4-digit octal value");
+    }
+    let mode = u32::from_str_radix(value, 8).map_err(|_| "permissions must be octal")?;
+    if mode > 0o7777 {
+        return Err("permissions must be at most 07777");
+    }
+    Ok(mode)
+}
+
+pub fn parse_unix_timestamp(input: &str) -> Result<Option<u32>, &'static str> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let timestamp = value
+        .parse::<u64>()
+        .map_err(|_| "timestamps must be unsigned Unix seconds")?;
+    u32::try_from(timestamp)
+        .map(Some)
+        .map_err(|_| "timestamps must fit in an unsigned 32-bit value")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parent_remote_path, remote_join, resume_offset};
+    use super::{
+        format_permission_mode, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
+        remote_join, resume_offset,
+    };
 
     #[test]
     fn resume_offsets_continue_partial_files_and_restart_invalid_ones() {
@@ -1543,5 +1626,24 @@ mod tests {
         assert_eq!(parent_remote_path("/etc"), "/");
         assert_eq!(parent_remote_path("/"), "/");
         assert_eq!(parent_remote_path("relative"), "/");
+    }
+
+    #[test]
+    fn permission_modes_parse_and_format_as_octal() {
+        assert_eq!(parse_permission_mode("755"), Ok(0o755));
+        assert_eq!(parse_permission_mode("0755"), Ok(0o755));
+        assert_eq!(format_permission_mode(Some(0o100755)), "0755");
+        assert_eq!(format_permission_mode(None), "0000");
+        assert!(parse_permission_mode("888").is_err());
+        assert!(parse_permission_mode("17777").is_err());
+    }
+
+    #[test]
+    fn unix_timestamps_accept_empty_and_unsigned_32_bit_values() {
+        assert_eq!(parse_unix_timestamp(""), Ok(None));
+        assert_eq!(parse_unix_timestamp("0"), Ok(Some(0)));
+        assert_eq!(parse_unix_timestamp("4294967295"), Ok(Some(u32::MAX)));
+        assert!(parse_unix_timestamp("-1").is_err());
+        assert!(parse_unix_timestamp("4294967296").is_err());
     }
 }

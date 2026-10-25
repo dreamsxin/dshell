@@ -2,6 +2,24 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.7] - 2026-10-25
+
+Adds remote SFTP metadata management.
+
+### Added
+
+- Show each SFTP entry's permission mode and modification timestamp.
+- Add an icon action for editing octal permissions and Unix access/modification timestamps.
+- Apply metadata through SFTP `SETSTAT` while preserving the remote file type bits.
+- Localize the metadata editor and validation messages in Simplified Chinese.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, offline `cargo check --locked`, and `cargo test --locked --offline` (111 passed, 9 ignored) passed.
+- Docker SSH/SFTP integration includes metadata read, update, and missing-target failure checks.
+- Real Windows DPI, Chinese IME, and metadata editor interaction remain manual checks.
+
 ## [0.1.6] - 2026-10-25
 
 Adds local SSH identity passphrase management.

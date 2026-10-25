@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.6`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.7`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -93,7 +93,9 @@ the queued count and can clear waiting transfers. Cancellation uses a best-effor
 entries created by that transfer while preserving partially resumed files. The
 panel can also create directories, rename entries, and delete files or empty
 directories; deletion requires a second confirmation. Symbolic links are
-skipped.
+skipped. Each entry shows its permission mode and modification timestamp; the
+metadata action edits octal permissions plus Unix access and modification
+seconds through SFTP `SETSTAT`.
 
 Use the `Tunnels` button to manage port forwarding for the active session.
 Local forwards listen on this machine and connect through the SSH server;

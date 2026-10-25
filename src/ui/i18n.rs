@@ -214,6 +214,15 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Download" => "下载",
         "Rename" => "重命名",
         "New folder" => "新建文件夹",
+        "Edit metadata" => "编辑属性",
+        "Metadata" => "属性",
+        "Permissions (octal)" => "权限（八进制）",
+        "Access time (Unix)" => "访问时间（Unix）",
+        "Modified time (Unix)" => "修改时间（Unix）",
+        "Save metadata" => "保存属性",
+        "Invalid permission mode." => "权限格式无效。",
+        "Invalid access time." => "访问时间无效。",
+        "Invalid modified time." => "修改时间无效。",
         "Cancel transfer" => "取消传输",
         "Queued transfers" => "排队中的传输",
         "Clear queue" => "清空队列",
@@ -320,7 +329,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Stop logging" => "停止记录",
         "Quick commands (Ctrl+Shift+S)" => "快捷命令 (Ctrl+Shift+S)",
         "Settings (Ctrl+Shift+O)" => "设置 (Ctrl+Shift+O)",
-        "dshell 0.1.6 · native GPUI · Esc closes" => "dshell 0.1.6 · 原生 GPUI · 按 Esc 关闭",
+        "dshell 0.1.7 · native GPUI · Esc closes" => "dshell 0.1.7 · 原生 GPUI · 按 Esc 关闭",
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",
@@ -381,6 +390,14 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Change key passphrase"),
             "修改密钥口令"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Edit metadata"),
+            "编辑属性"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Permissions (octal)"),
+            "权限（八进制）"
         );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Trigger engine enabled."),

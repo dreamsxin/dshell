@@ -2636,6 +2636,49 @@ mod tests {
                     );
 
                     sftp_command_tx
+                        .send(SftpCommand::SetMetadata {
+                            path: remote.clone(),
+                            permissions: Some(0o640),
+                            atime: Some(1_700_000_000),
+                            mtime: Some(1_700_000_123),
+                        })
+                        .await?;
+                    next_sftp_action(&mut sftp_event_rx, "Updated metadata").await?;
+                    sftp_command_tx
+                        .send(SftpCommand::List(home.clone()))
+                        .await?;
+                    let entries = next_sftp_event(
+                        &mut sftp_event_rx,
+                        |event| matches!(event, SftpEvent::Entries { path, .. } if path == &home),
+                    )
+                    .await?;
+                    let SftpEvent::Entries { entries, .. } = entries else {
+                        unreachable!()
+                    };
+                    let metadata_entry = entries
+                        .iter()
+                        .find(|entry| entry.name == remote_name)
+                        .context("metadata test file is missing from the listing")?;
+                    assert_eq!(
+                        metadata_entry.permissions.map(|permissions| permissions & 0o7777),
+                        Some(0o640)
+                    );
+                    assert_eq!(metadata_entry.atime, Some(1_700_000_000));
+                    assert_eq!(metadata_entry.mtime, Some(1_700_000_123));
+                    sftp_command_tx
+                        .send(SftpCommand::SetMetadata {
+                            path: "dshell-sftp-missing-file.txt".to_owned(),
+                            permissions: Some(0o600),
+                            atime: None,
+                            mtime: None,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::Error(error) if error.contains("Could not update metadata"))
+                    })
+                    .await?;
+
+                    sftp_command_tx
                         .send(SftpCommand::Download {
                             remote: remote.clone(),
                             local: download_path.clone(),
