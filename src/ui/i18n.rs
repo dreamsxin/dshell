@@ -117,6 +117,28 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Group renamed." => "分组已重命名。",
         "Group deleted; hosts moved to Ungrouped." => "分组已删除，主机已移至未分组。",
         "Loaded {name}. Enter the credentials to connect." => "已载入{name}。请输入凭据以连接。",
+        "Loaded {name}. Passwords are never saved; enter the password to connect." => {
+            "已载入{name}。密码不会保存，请输入密码后连接。"
+        }
+        "Enter credentials for {name}. They will be remembered in memory for this run." => {
+            "请输入{name}的认证信息。本次运行期间会在内存中记住。"
+        }
+        "Authenticate {name}" => "认证{name}",
+        "Authenticate {target}" => "认证{target}",
+        "SSH connection" => "SSH 连接",
+        "Enter the authentication information and confirm to connect." => {
+            "请输入认证信息，然后确认连接。"
+        }
+        "The password is remembered only in memory for this run and is never written to the host profile." => {
+            "密码只会在本次运行的内存中记住，不会写入主机资料。"
+        }
+        "Leave the passphrase empty when the private key is not encrypted. It is remembered only in memory for this run." => {
+            "如果私钥未加密，可将口令留空。口令只会在本次运行的内存中记住。"
+        }
+        "Uses the SSH agent; no password is required." => "使用 SSH agent，无需密码。",
+        "Credentials are cleared from the form after connecting or cancelling. A successful connection can reuse them during this run; they are never written to host profiles." => {
+            "连接或取消后会清空表单中的凭据。连接成功后，本次运行期间可以复用凭据；凭据不会写入主机资料。"
+        }
         "Loaded {name} from recent connections." => "已从最近连接载入{name}。",
         "Loaded a recent connection. Save it as a host profile if you want to keep it." => {
             "已载入最近连接。若要保留，请将其保存为主机资料。"
@@ -128,6 +150,52 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Could not move the host." => "无法移动主机。",
         "Saved {name}." => "已保存{name}。",
         "Deleted {name}." => "已删除{name}。",
+        "Host profiles could not be loaded; fix the profile file before saving." => {
+            "主机资料无法加载，请先修复资料文件再保存。"
+        }
+        "Host profile storage is unavailable." => "主机资料存储不可用。",
+        "Keep-alive must be between 0 and 3600 seconds (0 disables it)." => {
+            "保活必须介于 0 到 3600 秒之间（0 表示关闭）。"
+        }
+        "Port must be between 1 and 65535." => "端口必须介于 1 到 65535 之间。",
+        "Profile name, host, username, and a valid port are required." => {
+            "主机资料名称、主机、用户名和有效端口不能为空。"
+        }
+        "Public key authentication requires an identity file path." => "公钥认证需要身份文件路径。",
+        "A host cannot use itself as its jump host." => "主机不能将自己设置为跳板机。",
+        "Jump host {name} is not another saved host." => "跳板机{name}不是其他已保存的主机。",
+        "A host named {name} already exists." => "已存在名为{name}的主机。",
+        "Host and user are required." => "主机和用户名不能为空。",
+        "A password is required for password authentication." => "密码认证需要输入密码。",
+        "SSH password authentication failed" => "SSH 密码认证失败。",
+        "SSH password authentication was rejected" => "SSH 密码认证被拒绝。",
+        "A password is required for keyboard-interactive authentication." => {
+            "键盘交互认证需要输入密码。"
+        }
+        "SSH keyboard-interactive authentication failed" => "SSH 键盘交互认证失败。",
+        "SSH keyboard-interactive authentication was rejected" => "SSH 键盘交互认证被拒绝。",
+        "SSH public key authentication failed" => "SSH 公钥认证失败。",
+        "SSH public key authentication was rejected" => "SSH 公钥认证被拒绝。",
+        "SSH agent authentication was rejected" => "SSH agent 认证被拒绝。",
+        "An identity file path is required for public key authentication." => {
+            "公钥认证需要输入身份文件路径。"
+        }
+        "Jump host {name} is not a saved host." => "跳板机{name}不是已保存的主机。",
+        "Jump host {name} already uses jump host {jump}. Nested jump hosts are not supported yet." => {
+            "跳板机{name}已经使用跳板机{jump}。暂不支持多级跳板机。"
+        }
+        "The jump host resolves to the same target; choose a different jump host." => {
+            "跳板机解析到相同目标，请选择其他跳板机。"
+        }
+        "Jump host {name}: {error}" => "跳板机{name}：{error}",
+        "Checking host keys and connecting to {host}:{port}{route}..." => {
+            "正在检查主机密钥并连接到 {host}:{port}{route}……"
+        }
+        "Connecting..." => "连接中……",
+        "Connected, but recent connections could not be saved: {error}" => {
+            "连接成功，但无法保存最近连接：{error}"
+        }
+        "Could not start SSH runtime: {error}" => "无法启动 SSH 运行时：{error}",
         "Applied authentication template {name}. Re-enter any password or passphrase." => {
             "已应用认证模板{name}。请重新输入密码或口令。"
         }
@@ -151,8 +219,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Username" => "用户名",
         "Authentication method" => "认证方式",
         "Password" => "密码",
-        "Passwords are used for a connection and are never saved with host profiles." => {
-            "密码仅用于本次连接，不会随主机资料保存。"
+        "Passwords are remembered only in memory for this run and are never saved with host profiles." => {
+            "密码只会在本次运行的内存中记住，不会随主机资料保存。"
         }
         "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet." => {
             "隐藏的键盘交互提示会使用此密码回答。一次性验证码和明文提示暂不支持。"
@@ -197,6 +265,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Keep" => "保留",
         "Delete" => "删除",
         "Edit host" => "编辑主机",
+        "Connect to host" => "连接主机",
         "Remove favorite" => "取消收藏",
         "Add favorite" => "加入收藏",
         "Load into the connection form" => "载入连接表单",
@@ -410,6 +479,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "SESSION" => "会话",
         "VIEW" => "视图",
         "TOOLS" => "工具",
+        "TABS" => "标签页",
         "Quick actions" => "快捷操作",
         "Close tab" => "关闭标签页",
         "Split side by side" => "左右分屏",
@@ -462,6 +532,126 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         }
         "Host key" => "主机密钥",
         "Fingerprint" => "指纹",
+        "Local" => "本地",
+        "Remote" => "远程",
+        "Dynamic" => "动态",
+        "Listen host" => "监听主机",
+        "Listen port (0 = auto)" => "监听端口（0 = 自动）",
+        "Target host" => "目标主机",
+        "Target port" => "目标端口",
+        "SOCKS5 clients choose the target host and port." => {
+            "SOCKS5 客户端自行选择目标主机和端口。"
+        }
+        "connection" => "个连接",
+        "connections" => "个连接",
+        "No highlighted keywords" => "没有高亮关键词",
+        "Add literal words such as error, warning or timeout." => {
+            "添加 error、warning 或 timeout 等字面量词。"
+        }
+        "Remove keyword" => "删除关键词",
+        "Disable keyword highlighting" => "停用关键词高亮",
+        "Enable keyword highlighting" => "启用关键词高亮",
+        "Close keyword highlights" => "关闭关键词高亮",
+        "Add keyword" => "添加关键词",
+        "Literal matches are highlighted in the terminal." => "终端中的字面量匹配会高亮显示。",
+        "Highlighting is off until you enable it." => "启用前不会进行高亮。",
+        "Keyword highlighting enabled." => "关键词高亮已启用。",
+        "Keyword highlighting disabled." => "关键词高亮已停用。",
+        "Enter a keyword to highlight." => "请输入要高亮的关键词。",
+        "Keyword highlights are limited to {count} entries." => "关键词高亮最多支持 {count} 条。",
+        "Keyword {keyword} is already listed." => "关键词 {keyword} 已存在。",
+        "Added {keyword}." => "已添加 {keyword}。",
+        "Removed {keyword}." => "已删除 {keyword}。",
+        "No quick commands" => "没有快捷命令",
+        "Create a command tile for the active SSH session." => "为当前 SSH 会话创建一个命令磁贴。",
+        "Edit quick command" => "编辑快捷命令",
+        "Delete quick command" => "删除快捷命令",
+        "New quick command" => "新建快捷命令",
+        "Close quick commands" => "关闭快捷命令",
+        "Name" => "名称",
+        "Command" => "命令",
+        "Save command" => "保存命令",
+        "Send to {title}" => "发送到{title}",
+        "Open a connected session to run a command." => "请打开已连接的会话以运行命令。",
+        "Broadcast targets" => "广播目标",
+        "Send to {count} selected" => "发送到已选择的 {count} 个会话",
+        "There is no active session." => "没有活动会话。",
+        "Sent {name} to the active session." => "已将{name}发送到当前会话。",
+        "The active session cannot accept commands." => "当前会话无法接收命令。",
+        "Enter a command before broadcasting." => "广播前请输入命令。",
+        "Select at least one connected target session." => "至少选择一个已连接的目标会话。",
+        "No selected session could accept the command." => "没有已选择的会话可以接收命令。",
+        "Sent to: {targets}." => "已发送到：{targets}。",
+        "Could not send the command: {error}" => "无法发送命令：{error}",
+        "{kind} target already exists: {target}" => "{kind} 目标已存在：{target}",
+        "Editing {name}." => "正在编辑{name}。",
+        "Snippet name and command are required." => "片段名称和命令不能为空。",
+        "Command snippet storage is unavailable." => "快捷命令存储不可用。",
+        "A snippet named {name} already exists." => "已存在名为{name}的片段。",
+        "Cannot have more than {count} snippets." => "片段数量不能超过 {count} 个。",
+        "History" => "历史",
+        "History {current}/{total}" => "历史 {current}/{total}",
+        "Compose · Ctrl+Enter sends · Esc closes" => "编辑命令 · Ctrl+Enter 发送 · Esc 关闭",
+        "Send" => "发送",
+        "Close compose" => "关闭命令编辑器",
+        "The server requested {count} keyboard-interactive prompts; at most {max} are supported." => {
+            "服务器请求了 {count} 个键盘交互提示，最多支持 {max} 个。"
+        }
+        "Waiting for keyboard-interactive input..." => "等待键盘交互输入……",
+        "Keyboard-interactive authentication: {name}" => "键盘交互认证：{name}",
+        "Submitting authentication response..." => "正在提交认证响应……",
+        "Keyboard-interactive authentication" => "键盘交互认证",
+        "Responses are sent only to the SSH server and are not stored." => {
+            "响应只发送到 SSH 服务器，不会保存。"
+        }
+        "Continue" => "继续",
+        "Session tab actions" => "标签页操作",
+        "Close split" => "关闭分屏",
+        "split" => "分屏",
+        "Sync" => "同步",
+        "target" => "目标",
+        "Connect at least one session before enabling synchronized input." => {
+            "请先连接至少一个会话，再启用同步输入。"
+        }
+        "Syncing" => "同步中",
+        "Add" => "添加",
+        "{count} target(s) selected" => "已选择 {count} 个目标",
+        "Keyboard, paste and compose are mirrored; mouse, scrolling and resize stay per-session." => {
+            "键盘、粘贴和命令编辑会镜像到目标会话；鼠标、滚动和尺寸调整仍按会话独立处理。"
+        }
+        "Clear" => "清空",
+        "Done" => "完成",
+        "Close tab actions" => "关闭标签操作",
+        "Close other tabs" => "关闭其他标签",
+        "Close tabs to the right" => "关闭右侧标签",
+        "Unsaved" => "未保存",
+        "None" => "无",
+        "Pending" => "等待中",
+        "Not reported" => "未报告",
+        "Off" => "关闭",
+        "Recording" => "记录中",
+        "No active transfer." => "没有活动传输。",
+        "Close files" => "关闭文件",
+        "No forwarding rules." => "没有转发规则。",
+        "Stop rule" => "停止规则",
+        "active" => "活动",
+        "Start rule" => "启动规则",
+        "Stopped" => "已停止",
+        "Close tunnels" => "关闭隧道",
+        "Manage tunnels" => "管理隧道",
+        "Auth" => "认证",
+        "State" => "状态",
+        "Terminal" => "终端",
+        "Profile" => "资料",
+        "Keep-alive" => "保活",
+        "Logging" => "日志记录",
+        "File" => "文件",
+        "New logs use timestamped records with a replay timeline. Appending to an existing legacy raw log keeps the raw format. Logs may contain sensitive terminal output." => {
+            "新日志使用带时间戳的记录并支持回放时间轴。追加到旧版原始日志时会保留原始格式。日志可能包含敏感的终端输出。"
+        }
+        "Open replay..." => "打开回放……",
+        "Close inspector" => "关闭检查器",
+        "Cancel connection" => "取消连接",
         _ => return Cow::Borrowed(key),
     };
     Cow::Borrowed(translated)
@@ -511,9 +701,9 @@ mod tests {
         assert_eq!(
             translate(
                 Language::SimplifiedChinese,
-                "Passwords are used for a connection and are never saved with host profiles."
+                "Passwords are remembered only in memory for this run and are never saved with host profiles."
             ),
-            "密码仅用于本次连接，不会随主机资料保存。"
+            "密码只会在本次运行的内存中记住，不会随主机资料保存。"
         );
         assert_eq!(
             translate(
@@ -572,6 +762,49 @@ mod tests {
             "已载入{name}。请输入凭据以连接。"
         );
         assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Loaded {name}. Passwords are never saved; enter the password to connect."
+            ),
+            "已载入{name}。密码不会保存，请输入密码后连接。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Enter credentials for {name}. They will be remembered in memory for this run."
+            ),
+            "请输入{name}的认证信息。本次运行期间会在内存中记住。"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Authenticate {name}"),
+            "认证{name}"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Enter the authentication information and confirm to connect."
+            ),
+            "请输入认证信息，然后确认连接。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Uses the SSH agent; no password is required."
+            ),
+            "使用 SSH agent，无需密码。"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Connect to host"),
+            "连接主机"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "SSH password authentication was rejected"
+            ),
+            "SSH 密码认证被拒绝。"
+        );
+        assert_eq!(
             translate(Language::SimplifiedChinese, "Export host profiles"),
             "导出主机资料"
         );
@@ -587,5 +820,33 @@ mod tests {
             "dshell {version} · 原生 GPUI · 按 Esc 关闭"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "my-host"), "my-host");
+    }
+
+    #[test]
+    fn simplified_chinese_covers_recent_panels_and_validation() {
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Add tunnel"),
+            "添加隧道"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Quick commands"),
+            "快捷命令"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Synchronized input"),
+            "同步输入"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "A password is required for password authentication."
+            ),
+            "密码认证需要输入密码。"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Inspector"),
+            "检查器"
+        );
+        assert_eq!(translate(Language::SimplifiedChinese, "TABS"), "标签页");
     }
 }

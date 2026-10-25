@@ -237,6 +237,78 @@ struct AuthPromptState {
     respond_to: Option<oneshot::Sender<Vec<Zeroizing<String>>>>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CredentialCacheKey {
+    host: String,
+    port: u16,
+    username: String,
+    auth_method: AuthMethod,
+    identity_file: String,
+    jump_profile: String,
+}
+
+impl CredentialCacheKey {
+    fn from_profile(profile: &HostProfile) -> Self {
+        Self {
+            host: profile.host.trim().to_owned(),
+            port: profile.port,
+            username: profile.username.trim().to_owned(),
+            auth_method: profile.auth_method,
+            identity_file: profile.identity_file.trim().to_owned(),
+            jump_profile: profile.proxy_jump.trim().to_owned(),
+        }
+    }
+
+    fn from_connection(
+        host: &str,
+        port: u16,
+        username: &str,
+        auth_method: AuthMethod,
+        identity_file: &str,
+        jump_profile: &str,
+    ) -> Self {
+        Self {
+            host: host.trim().to_owned(),
+            port,
+            username: username.trim().to_owned(),
+            auth_method,
+            identity_file: identity_file.trim().to_owned(),
+            jump_profile: jump_profile.trim().to_owned(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CachedCredentials {
+    password: Zeroizing<String>,
+    passphrase: Zeroizing<String>,
+    jump_password: Zeroizing<String>,
+    jump_passphrase: Zeroizing<String>,
+}
+
+impl CachedCredentials {
+    fn from_inputs(
+        password: &Zeroizing<String>,
+        passphrase: &Zeroizing<String>,
+        jump_password: &Zeroizing<String>,
+        jump_passphrase: &Zeroizing<String>,
+    ) -> Self {
+        Self {
+            password: Zeroizing::new(password.as_str().to_owned()),
+            passphrase: Zeroizing::new(passphrase.as_str().to_owned()),
+            jump_password: Zeroizing::new(jump_password.as_str().to_owned()),
+            jump_passphrase: Zeroizing::new(jump_passphrase.as_str().to_owned()),
+        }
+    }
+
+    fn contains_secret(&self) -> bool {
+        !self.password.is_empty()
+            || !self.passphrase.is_empty()
+            || !self.jump_password.is_empty()
+            || !self.jump_passphrase.is_empty()
+    }
+}
+
 struct LogReplayState {
     path: PathBuf,
     terminal: TerminalEmulator,
@@ -765,6 +837,7 @@ struct SshSession {
     pending_forwards: Vec<ForwardRuleSpec>,
     log_path: Option<PathBuf>,
     connection_info: Option<ConnectionInfo>,
+    credential_key: Option<CredentialCacheKey>,
     state: SessionState,
 }
 
@@ -950,6 +1023,21 @@ fn keyword_matches(text: &str, keywords: &[String]) -> bool {
     })
 }
 
+fn session_matches_target(session: &SshSession, host: &str, port: u16, username: &str) -> bool {
+    session.state != SessionState::Disconnected
+        && session.host.eq_ignore_ascii_case(host)
+        && session.port == port
+        && session.username == username
+}
+
+fn is_authentication_failure(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("authentication")
+        || message.contains("password")
+        || message.contains("passphrase")
+        || message.contains("private key")
+}
+
 fn remove_session(
     sessions: &mut Vec<SshSession>,
     active_session_id: &mut Option<u64>,
@@ -974,15 +1062,16 @@ fn remove_session(
 #[cfg(test)]
 mod session_tests {
     use super::{
-        AppShortcut, ForwardViewState, LayoutDragTarget, MouseTrackingMode, SessionEditorEscape,
-        SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
-        TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
-        collapsed_group_key, dragged_panel_width, enqueue_session_request,
-        filesystem_usage_percent, forget_stopped_forward, format_log_time, format_rate,
-        is_sftp_transfer_command, keyword_matches, merge_unique_profiles, move_profile_to_group,
-        mpsc, recall_compose_history, remember_compose_history, remember_stopped_forward,
-        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
-        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
+        AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, LayoutDragTarget,
+        MouseTrackingMode, SessionEditorEscape, SessionEditorKey, SessionSplit, SessionState,
+        SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
+        UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
+        enqueue_session_request, filesystem_usage_percent, forget_stopped_forward, format_log_time,
+        format_rate, is_authentication_failure, is_sftp_transfer_command, keyword_matches,
+        merge_unique_profiles, move_profile_to_group, mpsc, recall_compose_history,
+        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
+        rename_profile_group, reorder_group_order, reorder_session_ids, search_result_message,
+        session_editor_escape, session_editor_key, session_matches_target,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
         take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
@@ -995,6 +1084,7 @@ mod session_tests {
     use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
     use crate::ui::tokens as ui_tokens;
     use std::collections::{HashSet, VecDeque};
+    use zeroize::Zeroizing;
 
     fn test_session(
         id: u64,
@@ -1032,6 +1122,7 @@ mod session_tests {
                 pending_forwards: Vec::new(),
                 log_path: None,
                 connection_info: None,
+                credential_key: None,
                 state: SessionState::Connected,
             },
             command_rx,
@@ -1068,6 +1159,71 @@ mod session_tests {
             99,
             UiEvent::Disconnected
         ));
+    }
+
+    #[test]
+    fn host_rows_reuse_only_live_sessions_for_the_same_target() {
+        let (mut session, _, _) = test_session(1);
+        assert!(session_matches_target(&session, "127.0.0.1", 22, "test"));
+        assert!(!session_matches_target(&session, "127.0.0.1", 22, "TEST"));
+        assert!(!session_matches_target(&session, "127.0.0.1", 2222, "test"));
+
+        session.state = SessionState::Disconnected;
+        assert!(!session_matches_target(&session, "127.0.0.1", 22, "test"));
+    }
+
+    #[test]
+    fn authentication_failures_reopen_the_credential_flow() {
+        assert!(is_authentication_failure(
+            "SSH password authentication was rejected"
+        ));
+        assert!(is_authentication_failure(
+            "private key passphrase is invalid"
+        ));
+        assert!(!is_authentication_failure(
+            "Server key is not present in known_hosts"
+        ));
+    }
+
+    #[test]
+    fn credential_cache_keys_normalize_profile_target_fields() {
+        let first = CredentialCacheKey::from_connection(
+            "  example.com ",
+            22,
+            " ops ",
+            AuthMethod::Password,
+            " ~/.ssh/id_ed25519 ",
+            " jump ",
+        );
+        let second = CredentialCacheKey::from_connection(
+            "example.com",
+            22,
+            "ops",
+            AuthMethod::Password,
+            "~/.ssh/id_ed25519",
+            "jump",
+        );
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cached_credentials_track_only_non_empty_secret_values() {
+        let empty = CachedCredentials::from_inputs(
+            &Zeroizing::new(String::new()),
+            &Zeroizing::new(String::new()),
+            &Zeroizing::new(String::new()),
+            &Zeroizing::new(String::new()),
+        );
+        assert!(!empty.contains_secret());
+
+        let password = Zeroizing::new("secret".to_owned());
+        let cached = CachedCredentials::from_inputs(
+            &password,
+            &Zeroizing::new(String::new()),
+            &Zeroizing::new(String::new()),
+            &Zeroizing::new(String::new()),
+        );
+        assert!(cached.contains_secret());
     }
 
     #[test]
@@ -1857,9 +2013,13 @@ struct AppView {
     profiles_ready: bool,
     selected_profile: Option<String>,
     session_editor_open: bool,
+    credential_prompt_open: bool,
     session_editor_section: SessionEditorSection,
     confirm_delete: bool,
     profile_message: String,
+    credential_focus_pending: bool,
+    credential_cache: HashMap<CredentialCacheKey, CachedCredentials>,
+    pending_credentials: HashMap<u64, (CredentialCacheKey, CachedCredentials)>,
     snippets: Vec<CommandSnippet>,
     snippet_store: Option<SnippetStore>,
     snippet_name: Entity<InputState>,
@@ -2151,9 +2311,13 @@ impl AppView {
             profiles_ready,
             selected_profile: None,
             session_editor_open: false,
+            credential_prompt_open: false,
             session_editor_section: SessionEditorSection::Connection,
             confirm_delete: false,
             profile_message,
+            credential_focus_pending: false,
+            credential_cache: HashMap::new(),
+            pending_credentials: HashMap::new(),
             snippets,
             snippet_store,
             snippet_name,
@@ -2418,6 +2582,168 @@ impl AppView {
 
     fn active_session(&self) -> Option<&SshSession> {
         self.active_session_id.and_then(|id| self.session(id))
+    }
+
+    fn session_for_target(&self, host: &str, port: u16, username: &str) -> Option<u64> {
+        self.sessions
+            .iter()
+            .find(|session| session_matches_target(session, host, port, username))
+            .map(|session| session.id)
+    }
+
+    fn saved_jump_profile(&self, name: &str) -> Option<&HostProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case(name.trim()))
+    }
+
+    fn profile_needs_credential_prompt(&self, profile: &HostProfile) -> bool {
+        matches!(
+            profile.auth_method,
+            AuthMethod::Password | AuthMethod::KeyboardInteractive
+        ) || (!profile.proxy_jump.trim().is_empty()
+            && self
+                .saved_jump_profile(&profile.proxy_jump)
+                .is_some_and(|jump| {
+                    matches!(
+                        jump.auth_method,
+                        AuthMethod::Password | AuthMethod::KeyboardInteractive
+                    )
+                }))
+    }
+
+    fn apply_cached_credentials(
+        &self,
+        credentials: &CachedCredentials,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        Self::set_input_value(&self.password, credentials.password.as_str(), window, cx);
+        Self::set_input_value(
+            &self.key_passphrase,
+            credentials.passphrase.as_str(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.jump_password,
+            credentials.jump_password.as_str(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.jump_passphrase,
+            credentials.jump_passphrase.as_str(),
+            window,
+            cx,
+        );
+    }
+
+    fn open_credential_prompt(&mut self, message: String, cx: &mut Context<Self>) {
+        self.session_editor_open = false;
+        self.credential_prompt_open = true;
+        self.session_editor_section = SessionEditorSection::Authentication;
+        self.confirm_delete = false;
+        self.profile_message = message;
+        self.overlay_focus_pending = true;
+        let jump_name = self.jump_profile.read(cx).value();
+        self.credential_focus_pending = self.auth_method != AuthMethod::Agent
+            || self
+                .saved_jump_profile(&jump_name)
+                .is_some_and(|profile| profile.auth_method != AuthMethod::Agent);
+        cx.notify();
+    }
+
+    fn reopen_authentication_after_failure(
+        &mut self,
+        id: u64,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !is_authentication_failure(&error) {
+            return;
+        }
+        let credential_key = self
+            .session(id)
+            .and_then(|session| session.credential_key.clone());
+        self.pending_credentials.remove(&id);
+        if let Some(key) = credential_key {
+            self.credential_cache.remove(&key);
+        }
+        let profile_name = self
+            .session(id)
+            .and_then(|session| session.profile_name.clone());
+        self.selected_profile = profile_name;
+        self.profile_message = self.tr(&error);
+        self.session_editor_section = SessionEditorSection::Authentication;
+        self.session_editor_open = false;
+        self.credential_prompt_open = true;
+        self.confirm_delete = false;
+        self.applied_auth_profile = None;
+        self.overlay_focus_pending = true;
+        let jump_name = self.jump_profile.read(cx).value();
+        self.credential_focus_pending = self.auth_method != AuthMethod::Agent
+            || self
+                .saved_jump_profile(&jump_name)
+                .is_some_and(|profile| profile.auth_method != AuthMethod::Agent);
+        cx.notify();
+    }
+
+    fn activate_saved_profile(
+        &mut self,
+        profile: &HostProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.session_for_target(&profile.host, profile.port, &profile.username) {
+            self.selected_profile = Some(profile.name.clone());
+            self.session_editor_open = false;
+            self.select_session(id, window, cx);
+        } else {
+            self.load_profile(profile, window, cx);
+        }
+    }
+
+    fn activate_recent_connection(
+        &mut self,
+        entry: &RecentConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.session_for_target(&entry.host, entry.port, &entry.username) {
+            self.session_editor_open = false;
+            self.select_session(id, window, cx);
+        } else {
+            self.load_recent(entry, window, cx);
+        }
+    }
+
+    fn connect_saved_profile(
+        &mut self,
+        profile: &HostProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.session_for_target(&profile.host, profile.port, &profile.username) {
+            self.selected_profile = Some(profile.name.clone());
+            self.session_editor_open = false;
+            self.select_session(id, window, cx);
+            return;
+        }
+
+        self.load_profile(profile, window, cx);
+        let key = CredentialCacheKey::from_profile(profile);
+        if let Some(credentials) = self.credential_cache.get(&key).cloned() {
+            self.apply_cached_credentials(&credentials, window, cx);
+            self.connect(window, cx);
+        } else if self.profile_needs_credential_prompt(profile) {
+            let message = self
+                .tr("Enter credentials for {name}. They will be remembered in memory for this run.")
+                .replace("{name}", &profile.name);
+            self.open_credential_prompt(message, cx);
+        } else {
+            self.connect(window, cx);
+        }
     }
 
     fn size_for_window(
@@ -3263,6 +3589,7 @@ impl AppView {
         self.selected_profile = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
+        self.credential_prompt_open = false;
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message.clear();
@@ -3293,6 +3620,7 @@ impl AppView {
         self.selected_profile = Some(profile.name.clone());
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
+        self.credential_prompt_open = false;
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message = self
@@ -3339,6 +3667,7 @@ impl AppView {
         self.selected_profile = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
+        self.credential_prompt_open = false;
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message = self
@@ -4003,13 +4332,13 @@ impl AppView {
     fn save_profile(&mut self, cx: &mut Context<Self>) {
         if !self.profiles_ready {
             self.profile_message =
-                "Host profiles could not be loaded; fix the profile file before saving.".to_owned();
+                self.tr("Host profiles could not be loaded; fix the profile file before saving.");
             cx.notify();
             return;
         }
 
         if self.profile_store.is_none() {
-            self.profile_message = "Host profile storage is unavailable.".to_owned();
+            self.profile_message = self.tr("Host profile storage is unavailable.");
             cx.notify();
             return;
         }
@@ -4030,7 +4359,7 @@ impl AppView {
             Ok(seconds) if seconds <= 3600 => seconds,
             _ => {
                 self.profile_message =
-                    "Keep-alive must be between 0 and 3600 seconds (0 disables it).".to_owned();
+                    self.tr("Keep-alive must be between 0 and 3600 seconds (0 disables it).");
                 cx.notify();
                 return;
             }
@@ -4046,25 +4375,25 @@ impl AppView {
             .map(|profile| profile.forwards.clone())
             .unwrap_or_default();
         let Ok(port) = port else {
-            self.profile_message = "Port must be between 1 and 65535.".to_owned();
+            self.profile_message = self.tr("Port must be between 1 and 65535.");
             cx.notify();
             return;
         };
         if name.is_empty() || host.is_empty() || username.is_empty() || port == 0 {
             self.profile_message =
-                "Profile name, host, username, and a valid port are required.".to_owned();
+                self.tr("Profile name, host, username, and a valid port are required.");
             cx.notify();
             return;
         }
         if self.auth_method == AuthMethod::PublicKey && identity_file.is_empty() {
             self.profile_message =
-                "Public key authentication requires an identity file path.".to_owned();
+                self.tr("Public key authentication requires an identity file path.");
             cx.notify();
             return;
         }
         if !proxy_jump.is_empty() {
             if proxy_jump.eq_ignore_ascii_case(&name) {
-                self.profile_message = "A host cannot use itself as its jump host.".to_owned();
+                self.profile_message = self.tr("A host cannot use itself as its jump host.");
                 cx.notify();
                 return;
             }
@@ -4072,7 +4401,9 @@ impl AppView {
                 profile.name.eq_ignore_ascii_case(&proxy_jump)
                     && !profile.name.eq_ignore_ascii_case(&name)
             }) {
-                self.profile_message = format!("Jump host {proxy_jump} is not another saved host.");
+                self.profile_message = self
+                    .tr("Jump host {name} is not another saved host.")
+                    .replace("{name}", &proxy_jump);
                 cx.notify();
                 return;
             }
@@ -4088,7 +4419,9 @@ impl AppView {
             .iter()
             .any(|profile| profile.name.eq_ignore_ascii_case(&name) && !replaces_selected(profile))
         {
-            self.profile_message = format!("A host named {name} already exists.");
+            self.profile_message = self
+                .tr("A host named {name} already exists.")
+                .replace("{name}", &name);
             cx.notify();
             return;
         }
@@ -4141,7 +4474,7 @@ impl AppView {
             return;
         };
         if self.profile_store.is_none() {
-            self.profile_message = "Host profile storage is unavailable.".to_owned();
+            self.profile_message = self.tr("Host profile storage is unavailable.");
             cx.notify();
             return;
         }
@@ -4151,6 +4484,14 @@ impl AppView {
             self.profile_message = error;
             cx.notify();
             return;
+        }
+        if let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case(&selected))
+        {
+            self.credential_cache
+                .remove(&CredentialCacheKey::from_profile(profile));
         }
 
         self.new_profile(window, cx);
@@ -4168,6 +4509,7 @@ impl AppView {
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
         self.confirm_delete = false;
         self.session_editor_open = false;
+        self.credential_prompt_open = false;
         self.overlay_focus_pending = false;
         window.focus(&self.terminal_focus);
         cx.notify();
@@ -4184,6 +4526,12 @@ impl AppView {
         let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
         let jump_password = Zeroizing::new(self.jump_password.read(cx).text().to_string());
         let jump_passphrase = Zeroizing::new(self.jump_passphrase.read(cx).text().to_string());
+        let cached_credentials = CachedCredentials::from_inputs(
+            &password,
+            &passphrase,
+            &jump_password,
+            &jump_passphrase,
+        );
         Self::set_input_value(&self.password, "", window, cx);
         Self::set_input_value(&self.key_passphrase, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
@@ -4192,13 +4540,13 @@ impl AppView {
         let port = match port {
             Ok(port) if port > 0 => port,
             _ => {
-                self.profile_message = "Port must be between 1 and 65535.".to_owned();
+                self.profile_message = self.tr("Port must be between 1 and 65535.");
                 cx.notify();
                 return;
             }
         };
         if host.trim().is_empty() || username.trim().is_empty() {
-            self.profile_message = "Host and user are required.".to_owned();
+            self.profile_message = self.tr("Host and user are required.");
             cx.notify();
             return;
         }
@@ -4212,7 +4560,7 @@ impl AppView {
             Ok(seconds) if seconds <= 3600 => seconds,
             _ => {
                 self.profile_message =
-                    "Keep-alive must be between 0 and 3600 seconds (0 disables it).".to_owned();
+                    self.tr("Keep-alive must be between 0 and 3600 seconds (0 disables it).");
                 cx.notify();
                 return;
             }
@@ -4234,7 +4582,7 @@ impl AppView {
             match build_authentication(self.auth_method, &identity_file, password, passphrase) {
                 Ok(authentication) => authentication,
                 Err(error) => {
-                    self.profile_message = error;
+                    self.profile_message = self.tr(&error);
                     cx.notify();
                     return;
                 }
@@ -4248,15 +4596,17 @@ impl AppView {
                 .find(|profile| profile.name.eq_ignore_ascii_case(&jump_name))
                 .cloned()
             else {
-                self.profile_message = format!("Jump host {jump_name} is not a saved host.");
+                self.profile_message = self
+                    .tr("Jump host {name} is not a saved host.")
+                    .replace("{name}", &jump_name);
                 cx.notify();
                 return;
             };
             if !profile.proxy_jump.trim().is_empty() {
-                self.profile_message = format!(
-                    "Jump host {} already uses jump host {}. Nested jump hosts are not supported yet.",
-                    profile.name, profile.proxy_jump
-                );
+                self.profile_message = self
+                    .tr("Jump host {name} already uses jump host {jump}. Nested jump hosts are not supported yet.")
+                    .replace("{name}", &profile.name)
+                    .replace("{jump}", &profile.proxy_jump);
                 cx.notify();
                 return;
             }
@@ -4264,9 +4614,8 @@ impl AppView {
                 && profile.port == port
                 && profile.username == username
             {
-                self.profile_message =
-                    "The jump host resolves to the same target; choose a different jump host."
-                        .to_owned();
+                self.profile_message = self
+                    .tr("The jump host resolves to the same target; choose a different jump host.");
                 cx.notify();
                 return;
             }
@@ -4278,7 +4627,10 @@ impl AppView {
             ) {
                 Ok(authentication) => authentication,
                 Err(error) => {
-                    self.profile_message = format!("Jump host {}: {error}", profile.name);
+                    self.profile_message = self
+                        .tr("Jump host {name}: {error}")
+                        .replace("{name}", &profile.name)
+                        .replace("{error}", &error);
                     cx.notify();
                     return;
                 }
@@ -4303,7 +4655,19 @@ impl AppView {
         } else {
             String::new()
         };
-        let status = format!("Checking host keys and connecting to {host}:{port}{route}...");
+        let credential_key = CredentialCacheKey::from_connection(
+            &host,
+            port,
+            &username,
+            self.auth_method,
+            &identity_file,
+            &jump_name,
+        );
+        let status = self
+            .tr("Checking host keys and connecting to {host}:{port}{route}...")
+            .replace("{host}", &host)
+            .replace("{port}", &port.to_string())
+            .replace("{route}", &route);
         let terminal_size = self
             .active_session()
             .map_or(self.terminal_size, |session| session.terminal_size);
@@ -4341,7 +4705,7 @@ impl AppView {
                     username: username.clone(),
                     status,
                     frame: None,
-                    terminal_message: "Connecting...".to_owned(),
+                    terminal_message: self.tr("Connecting..."),
                     terminal_size,
                     scroll_remainder: 0.0,
                     mouse_position: None,
@@ -4356,12 +4720,18 @@ impl AppView {
                     pending_forwards: saved_forwards.clone(),
                     log_path: None,
                     connection_info: None,
+                    credential_key: Some(credential_key.clone()),
                     state: SessionState::Connecting,
                 });
+                if cached_credentials.contains_secret() {
+                    self.pending_credentials
+                        .insert(id, (credential_key, cached_credentials));
+                }
                 self.split = None;
                 self.terminal_bounds.borrow_mut().clear();
                 self.active_session_id = Some(id);
                 self.session_editor_open = false;
+                self.credential_prompt_open = false;
                 self.overlay_focus_pending = false;
                 let mut recent = self.recent.clone();
                 record_recent(
@@ -4375,8 +4745,9 @@ impl AppView {
                     },
                 );
                 if let Err(error) = self.save_workspace(self.profiles.clone(), recent) {
-                    self.profile_message =
-                        format!("Connected, but recent connections could not be saved: {error}");
+                    self.profile_message = self
+                        .tr("Connected, but recent connections could not be saved: {error}")
+                        .replace("{error}", &error);
                 }
                 self.resize_sessions(cx);
                 cx.spawn(async move |this, cx| {
@@ -4407,7 +4778,10 @@ impl AppView {
                 .detach();
             }
             Err(error) => {
-                self.profile_message = format!("Could not start SSH runtime: {error}");
+                self.pending_credentials.remove(&id);
+                self.profile_message = self
+                    .tr("Could not start SSH runtime: {error}")
+                    .replace("{error}", &error.to_string());
                 cx.notify();
                 return;
             }
@@ -4441,12 +4815,33 @@ impl AppView {
                     }
                     event => {
                         let result = this.update(cx, |view, cx| {
+                            let connection_established = matches!(
+                                &event,
+                                UiEvent::Status(status) if status.starts_with("Connected to ")
+                            );
                             let screen = match &event {
                                 UiEvent::Screen(frame) => Some(frame.clone()),
                                 _ => None,
                             };
+                            let failure = match &event {
+                                UiEvent::Failed(error) => Some(error.clone()),
+                                _ => None,
+                            };
                             if apply_session_event(&mut view.sessions, id, event) {
                                 cx.notify();
+                            }
+                            if connection_established
+                                && view
+                                    .session(id)
+                                    .is_some_and(|session| session.state == SessionState::Connected)
+                                && let Some((key, credentials)) =
+                                    view.pending_credentials.remove(&id)
+                                && credentials.contains_secret()
+                            {
+                                view.credential_cache.insert(key, credentials);
+                            }
+                            if failure.is_some() {
+                                view.pending_credentials.remove(&id);
                             }
                             if let Some(frame) = screen {
                                 view.process_triggers(id, &frame, cx);
@@ -4467,6 +4862,9 @@ impl AppView {
                                 if had_auth_prompt || had_trigger_latch {
                                     cx.notify();
                                 }
+                                if let Some(error) = failure {
+                                    view.reopen_authentication_after_failure(id, error, cx);
+                                }
                             }
                         });
                         if result.is_err() {
@@ -4476,6 +4874,7 @@ impl AppView {
                 }
             }
             let _ = this.update(cx, |view, cx| {
+                view.pending_credentials.remove(&id);
                 if view
                     .session(id)
                     .is_some_and(|session| session.state != SessionState::Disconnected)
@@ -4548,6 +4947,7 @@ impl AppView {
     }
 
     fn disconnect_session(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.pending_credentials.remove(&id);
         if self
             .auth_prompt
             .as_ref()
@@ -4584,6 +4984,7 @@ impl AppView {
     }
 
     fn close_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_credentials.remove(&id);
         let closes_split_pane = self.split.is_some_and(|split| split.contains(id));
         if !remove_session(&mut self.sessions, &mut self.active_session_id, id) {
             return;
@@ -5796,7 +6197,7 @@ impl AppView {
                                 if self.auth_method == AuthMethod::KeyboardInteractive {
                                     self.tr("Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet.")
                                 } else {
-                                    self.tr("Passwords are used for a connection and are never saved with host profiles.")
+                        self.tr("Passwords are remembered only in memory for this run and are never saved with host profiles.")
                                 },
                             ))
                     })
@@ -6055,6 +6456,179 @@ impl AppView {
             .into_any_element()
     }
 
+    fn credential_prompt_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let host = self.host.read(cx).value().trim().to_owned();
+        let port = self.port.read(cx).value().trim().to_owned();
+        let username = self.username.read(cx).value().trim().to_owned();
+        let jump_name = self.jump_profile.read(cx).value().trim().to_owned();
+        let jump_profile = self.saved_jump_profile(&jump_name).cloned();
+        let target = if host.is_empty() {
+            self.tr("SSH connection")
+        } else {
+            format!("{username}@{host}:{port}")
+        };
+        let title = self
+            .selected_profile
+            .as_ref()
+            .map(|name| self.tr("Authenticate {name}").replace("{name}", name))
+            .unwrap_or_else(|| {
+                self.tr("Authenticate {target}")
+                    .replace("{target}", &target)
+            });
+
+        let mut fields = div().flex().flex_col().gap(px(ui_tokens::SPACE_3));
+        if self.auth_method.uses_password_input() {
+            fields = fields
+                .child(components::field(
+                    &tokens,
+                    self.tr("Password"),
+                    &self.password,
+                    true,
+                ))
+                .child(components::help_text(
+                    &tokens,
+                    if self.auth_method == AuthMethod::KeyboardInteractive {
+                        self.tr("Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet.")
+                    } else {
+                        self.tr("The password is remembered only in memory for this run and is never written to the host profile.")
+                    },
+                ));
+        }
+        if self.auth_method == AuthMethod::PublicKey {
+            fields = fields
+                .child(components::field(
+                    &tokens,
+                    self.tr("Key passphrase"),
+                    &self.key_passphrase,
+                    true,
+                ))
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("Leave the passphrase empty when the private key is not encrypted. It is remembered only in memory for this run."),
+                ));
+        }
+        if self.auth_method == AuthMethod::Agent {
+            fields = fields.child(components::help_text(
+                &tokens,
+                self.tr("Uses the SSH agent; no password is required."),
+            ));
+        }
+        if !jump_name.is_empty() {
+            fields = fields.child(components::subheading(&tokens, self.tr("Jump host")));
+            if let Some(profile) = jump_profile {
+                fields = fields.child(components::help_text(
+                    &tokens,
+                    format!(
+                        "{}@{}:{} · {}",
+                        profile.username,
+                        profile.host,
+                        profile.port,
+                        self.tr(profile.auth_method.label())
+                    ),
+                ));
+                match profile.auth_method {
+                    AuthMethod::Password | AuthMethod::KeyboardInteractive => {
+                        fields = fields.child(components::field(
+                            &tokens,
+                            self.tr("Jump password"),
+                            &self.jump_password,
+                            true,
+                        ));
+                    }
+                    AuthMethod::PublicKey => {
+                        fields = fields.child(components::field(
+                            &tokens,
+                            self.tr("Jump key passphrase"),
+                            &self.jump_passphrase,
+                            true,
+                        ));
+                    }
+                    AuthMethod::Agent => {}
+                }
+            } else {
+                fields = fields.child(components::warning_text(
+                    &tokens,
+                    self.tr("Jump host {name} is not a saved host.")
+                        .replace("{name}", &jump_name),
+                ));
+            }
+        }
+
+        let mut body = div()
+            .id("credential-prompt-body")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_3))
+            .p(px(ui_tokens::SPACE_4))
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(components::help_text(
+                &tokens,
+                self.tr("Enter the authentication information and confirm to connect."),
+            ))
+            .child(fields);
+        if !self.profile_message.is_empty() {
+            body = body.child(components::warning_text(
+                &tokens,
+                self.profile_message.clone(),
+            ));
+        }
+        body = body.child(components::help_text(
+            &tokens,
+            self.tr("Credentials are cleared from the form after connecting or cancelling. A successful connection can reuse them during this run; they are never written to host profiles."),
+        ));
+
+        components::modal_overlay(&tokens, "credential-prompt-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.cancel_session_editor(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "credential-prompt")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_AUTH))
+                    .max_h(px(640.))
+                    .child(components::modal_header(&tokens, title))
+                    .child(body)
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "credential-prompt-cancel",
+                                    self.tr("Cancel"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.cancel_session_editor(window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "credential-prompt-connect",
+                                    self.tr("Connect"),
+                                    ButtonKind::Primary,
+                                    ButtonSize::Large,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.connect(window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn saved_host_row(
         &self,
         tokens: &ThemeTokens,
@@ -6063,18 +6637,37 @@ impl AppView {
         profile: &HostProfile,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_selected = self.selected_profile.as_deref() == Some(&profile.name);
+        let is_selected = self.selected_profile.as_deref() == Some(&profile.name)
+            || self
+                .session_for_target(&profile.host, profile.port, &profile.username)
+                .is_some_and(|id| self.active_session_id == Some(id));
         let favorite = profile.favorite;
         let preview_tokens = *tokens;
         let drag_name = profile.name.clone();
         let drag_title: SharedString = profile.name.clone().into();
         let favorite_name = profile.name.clone();
         let selected_profile = profile.clone();
+        let connect_profile = profile.clone();
+        let double_click_profile = profile.clone();
         let edit_profile = profile.clone();
         let actions = div()
             .flex()
             .items_center()
             .gap(px(2.0))
+            .child(
+                components::icon_button(
+                    tokens,
+                    (ElementId::from((prefix, index)), "connect"),
+                    IconName::ArrowRight,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    self.tr("Connect to host"),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.connect_saved_profile(&connect_profile, window, cx);
+                })),
+            )
             .child(
                 components::icon_button(
                     tokens,
@@ -6104,7 +6697,7 @@ impl AppView {
                     IconName::Settings2,
                     ButtonKind::Ghost,
                     ButtonSize::Small,
-                    "Edit host",
+                    self.tr("Edit host"),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
@@ -6120,8 +6713,12 @@ impl AppView {
         .selected(is_selected)
         .actions(actions)
         .into_row()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.load_profile(&selected_profile, window, cx);
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if event.click_count() >= 2 {
+                this.connect_saved_profile(&double_click_profile, window, cx);
+            } else {
+                this.activate_saved_profile(&selected_profile, window, cx);
+            }
         }))
         .on_drag(
             SidebarDragData::Host {
@@ -6158,7 +6755,7 @@ impl AppView {
             IconName::ArrowRight,
             ButtonKind::Ghost,
             ButtonSize::Small,
-            "Load into the connection form",
+            self.tr("Load into the connection form"),
         )
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
@@ -6173,7 +6770,7 @@ impl AppView {
         .actions(actions)
         .into_row()
         .on_click(cx.listener(move |this, _, window, cx| {
-            this.load_recent(&row_entry, window, cx);
+            this.activate_recent_connection(&row_entry, window, cx);
         }))
         .into_any_element()
     }
@@ -7200,7 +7797,7 @@ impl AppView {
                     .text_size(px(10.))
                     .child(format!(
                         "{} {} · {percent}% · {} / {}",
-                        progress.kind.label(),
+                        self.tr(progress.kind.label()),
                         progress.name,
                         format_size(progress.transferred),
                         format_size(progress.total)
@@ -7255,10 +7852,11 @@ impl AppView {
                     .border_t_1()
                     .border_color(tokens.border_subtle)
                     .text_size(px(11.))
-                    .child(format!(
-                        "{} target already exists: {target}",
-                        overwrite.kind.label()
-                    ))
+                    .child(
+                        self.tr("{kind} target already exists: {target}")
+                            .replace("{kind}", &self.tr(overwrite.kind.label()))
+                            .replace("{target}", &target),
+                    )
                     .child(
                         div()
                             .flex()
@@ -7552,7 +8150,7 @@ impl AppView {
 
         let mut kind_buttons = div().flex().items_center().gap(px(4.));
         for (index, candidate) in ForwardKind::ALL.into_iter().enumerate() {
-            let button = Button::new(("forward-kind", index)).label(candidate.label());
+            let button = Button::new(("forward-kind", index)).label(self.tr(candidate.label()));
             let button = if kind == candidate {
                 button.primary()
             } else {
@@ -7573,13 +8171,13 @@ impl AppView {
             .child(kind_buttons)
             .child(components::field(
                 &tokens,
-                "Listen host",
+                self.tr("Listen host"),
                 &self.forward_listen_host,
                 false,
             ))
             .child(components::field(
                 &tokens,
-                "Listen port (0 = auto)",
+                self.tr("Listen port (0 = auto)"),
                 &self.forward_listen_port,
                 false,
             ));
@@ -7587,13 +8185,13 @@ impl AppView {
             form = form
                 .child(components::field(
                     &tokens,
-                    "Target host",
+                    self.tr("Target host"),
                     &self.forward_target_host,
                     false,
                 ))
                 .child(components::field(
                     &tokens,
-                    "Target port",
+                    self.tr("Target port"),
                     &self.forward_target_port,
                     false,
                 ));
@@ -7602,12 +8200,12 @@ impl AppView {
                 div()
                     .text_size(px(10.))
                     .text_color(tokens.text_secondary)
-                    .child("SOCKS5 clients choose the target host and port."),
+                    .child(self.tr("SOCKS5 clients choose the target host and port.")),
             );
         }
         form = form.child(
             Button::new("forward-add")
-                .label("Add tunnel")
+                .label(self.tr("Add tunnel"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.add_forward_rule(session_id, cx);
                 })),
@@ -7627,30 +8225,35 @@ impl AppView {
                     .p(px(8.))
                     .text_size(px(11.))
                     .text_color(tokens.text_disabled)
-                    .child("No forwarding rules"),
+                    .child(self.tr("No forwarding rules")),
             );
         }
         for (rule_id, rule) in rules {
             let spec = rule.spec.clone();
+            let connection_word = if rule.connections == 1 {
+                self.tr("connection")
+            } else {
+                self.tr("connections")
+            };
             let summary = if spec.kind == ForwardKind::Dynamic {
                 format!(
-                    "{} {}:{} · {} connection{}",
-                    spec.kind.label(),
+                    "{} {}:{} · {} {}",
+                    self.tr(spec.kind.label()),
                     spec.listen_host,
                     rule.bound_port,
                     rule.connections,
-                    if rule.connections == 1 { "" } else { "s" }
+                    connection_word,
                 )
             } else {
                 format!(
-                    "{} {}:{} -> {}:{} · {} connection{}",
-                    spec.kind.label(),
+                    "{} {}:{} -> {}:{} · {} {}",
+                    self.tr(spec.kind.label()),
                     spec.listen_host,
                     rule.bound_port,
                     spec.target_host,
                     spec.target_port,
                     rule.connections,
-                    if rule.connections == 1 { "" } else { "s" }
+                    connection_word,
                 )
             };
             rule_list = rule_list.child(
@@ -7661,7 +8264,7 @@ impl AppView {
                     .child(div().flex_1().min_w_0().text_size(px(11.)).child(summary))
                     .child(
                         Button::new(("forward-remove", rule_id))
-                            .label("Stop")
+                            .label(self.tr("Stop"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_forward_rule(session_id, rule_id, cx);
                             })),
@@ -7690,10 +8293,14 @@ impl AppView {
                     .flex_shrink_0()
                     .px(px(8.))
                     .bg(tokens.surface)
-                    .child(div().text_size(px(11.)).child("Tunnels"))
-                    .child(Button::new("forward-close").label("Close").on_click(
-                        cx.listener(move |this, _, _, cx| this.toggle_tunnels(session_id, cx)),
-                    )),
+                    .child(div().text_size(px(11.)).child(self.tr("Tunnels")))
+                    .child(
+                        Button::new("forward-close")
+                            .label(self.tr("Close"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_tunnels(session_id, cx)
+                            })),
+                    ),
             )
             .child(form)
             .child(
@@ -7774,7 +8381,7 @@ impl AppView {
         Self::set_input_value(&self.snippet_command, &snippet.command, window, cx);
         self.snippet_send_enter = snippet.send_enter;
         self.editing_snippet = Some(snippet.name.clone());
-        self.snippet_message = format!("Editing {}.", snippet.name);
+        self.snippet_message = self.tr("Editing {name}.").replace("{name}", &snippet.name);
         cx.notify();
     }
 
@@ -7782,12 +8389,12 @@ impl AppView {
         let name = self.snippet_name.read(cx).value().trim().to_owned();
         let command = self.snippet_command.read(cx).value().trim().to_owned();
         if name.is_empty() || command.is_empty() {
-            self.snippet_message = "Snippet name and command are required.".to_owned();
+            self.snippet_message = self.tr("Snippet name and command are required.");
             cx.notify();
             return;
         }
         let Some(store) = self.snippet_store.as_ref() else {
-            self.snippet_message = "Command snippet storage is unavailable.".to_owned();
+            self.snippet_message = self.tr("Command snippet storage is unavailable.");
             cx.notify();
             return;
         };
@@ -7798,7 +8405,9 @@ impl AppView {
                     .as_ref()
                     .is_none_or(|editing| !editing.eq_ignore_ascii_case(&snippet.name))
         }) {
-            self.snippet_message = format!("A snippet named {name} already exists.");
+            self.snippet_message = self
+                .tr("A snippet named {name} already exists.")
+                .replace("{name}", &name);
             cx.notify();
             return;
         }
@@ -7807,7 +8416,9 @@ impl AppView {
             snippets.retain(|snippet| !snippet.name.eq_ignore_ascii_case(editing));
         }
         if snippets.len() >= MAX_SNIPPETS {
-            self.snippet_message = format!("Cannot have more than {MAX_SNIPPETS} snippets.");
+            self.snippet_message = self
+                .tr("Cannot have more than {count} snippets.")
+                .replace("{count}", &MAX_SNIPPETS.to_string());
             cx.notify();
             return;
         }
@@ -7824,13 +8435,13 @@ impl AppView {
         }
         self.snippets = snippets;
         self.editing_snippet = Some(name.clone());
-        self.snippet_message = format!("Saved {name}.");
+        self.snippet_message = self.tr("Saved {name}.").replace("{name}", &name);
         cx.notify();
     }
 
     fn delete_snippet(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.snippet_store.as_ref() else {
-            self.snippet_message = "Command snippet storage is unavailable.".to_owned();
+            self.snippet_message = self.tr("Command snippet storage is unavailable.");
             cx.notify();
             return;
         };
@@ -7849,7 +8460,7 @@ impl AppView {
         {
             self.new_snippet(window, cx);
         }
-        self.snippet_message = format!("Deleted {name}.");
+        self.snippet_message = self.tr("Deleted {name}.").replace("{name}", name);
         cx.notify();
     }
 
@@ -8133,9 +8744,9 @@ impl AppView {
     fn toggle_keyword_highlighting(&mut self, cx: &mut Context<Self>) {
         self.keyword_highlighting_enabled = !self.keyword_highlighting_enabled;
         self.keyword_message = if self.keyword_highlighting_enabled {
-            "Keyword highlighting enabled.".to_owned()
+            self.tr("Keyword highlighting enabled.")
         } else {
-            "Keyword highlighting disabled.".to_owned()
+            self.tr("Keyword highlighting disabled.")
         };
         cx.notify();
     }
@@ -8143,13 +8754,14 @@ impl AppView {
     fn add_keyword(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let keyword = self.keyword_input.read(cx).value().trim().to_owned();
         if keyword.is_empty() {
-            self.keyword_message = "Enter a keyword to highlight.".to_owned();
+            self.keyword_message = self.tr("Enter a keyword to highlight.");
             cx.notify();
             return;
         }
         if self.keyword_highlights.len() >= MAX_KEYWORD_HIGHLIGHTS {
-            self.keyword_message =
-                format!("Keyword highlights are limited to {MAX_KEYWORD_HIGHLIGHTS} entries.");
+            self.keyword_message = self
+                .tr("Keyword highlights are limited to {count} entries.")
+                .replace("{count}", &MAX_KEYWORD_HIGHLIGHTS.to_string());
             cx.notify();
             return;
         }
@@ -8158,12 +8770,14 @@ impl AppView {
             .iter()
             .any(|item| item.eq_ignore_ascii_case(&keyword))
         {
-            self.keyword_message = format!("Keyword {keyword} is already listed.");
+            self.keyword_message = self
+                .tr("Keyword {keyword} is already listed.")
+                .replace("{keyword}", &keyword);
             cx.notify();
             return;
         }
         self.keyword_highlights.push(keyword.clone());
-        self.keyword_message = format!("Added {keyword}.");
+        self.keyword_message = self.tr("Added {keyword}.").replace("{keyword}", &keyword);
         Self::set_input_value(&self.keyword_input, "", window, cx);
         cx.notify();
     }
@@ -8174,7 +8788,7 @@ impl AppView {
         if self.keyword_highlights.is_empty() {
             self.keyword_highlighting_enabled = false;
         }
-        self.keyword_message = format!("Removed {keyword}.");
+        self.keyword_message = self.tr("Removed {keyword}.").replace("{keyword}", keyword);
         cx.notify();
     }
 
@@ -8187,14 +8801,16 @@ impl AppView {
 
     fn send_snippet_to_active(&mut self, snippet: &CommandSnippet, cx: &mut Context<Self>) {
         let Some(session_id) = self.active_session_id else {
-            self.snippet_message = "There is no active session.".to_owned();
+            self.snippet_message = self.tr("There is no active session.");
             cx.notify();
             return;
         };
         if self.send_command_to_session(session_id, &snippet.command, snippet.send_enter, cx) {
-            self.snippet_message = format!("Sent {} to the active session.", snippet.name);
+            self.snippet_message = self
+                .tr("Sent {name} to the active session.")
+                .replace("{name}", &snippet.name);
         } else {
-            self.snippet_message = "The active session cannot accept commands.".to_owned();
+            self.snippet_message = self.tr("The active session cannot accept commands.");
         }
         cx.notify();
     }
@@ -8202,7 +8818,7 @@ impl AppView {
     fn broadcast_snippet(&mut self, cx: &mut Context<Self>) {
         let command = self.snippet_command.read(cx).value().trim().to_owned();
         if command.is_empty() {
-            self.snippet_message = "Enter a command before broadcasting.".to_owned();
+            self.snippet_message = self.tr("Enter a command before broadcasting.");
             cx.notify();
             return;
         }
@@ -8217,7 +8833,7 @@ impl AppView {
             })
             .collect::<Vec<_>>();
         if targets.is_empty() {
-            self.snippet_message = "Select at least one connected target session.".to_owned();
+            self.snippet_message = self.tr("Select at least one connected target session.");
             cx.notify();
             return;
         }
@@ -8232,9 +8848,10 @@ impl AppView {
             }
         }
         self.snippet_message = if sent_to.is_empty() {
-            "No selected session could accept the command.".to_owned()
+            self.tr("No selected session could accept the command.")
         } else {
-            format!("Sent to: {}.", sent_to.join(", "))
+            self.tr("Sent to: {targets}.")
+                .replace("{targets}", &sent_to.join(", "))
         };
         cx.notify();
     }
@@ -8257,7 +8874,9 @@ impl AppView {
             session_id,
             TerminalRequest::Paste(command.to_owned()),
         ) {
-            self.snippet_message = format!("Could not send the command: {error}");
+            self.snippet_message = self
+                .tr("Could not send the command: {error}")
+                .replace("{error}", &error.to_string());
             return false;
         }
         if send_enter {
@@ -8273,7 +8892,9 @@ impl AppView {
             if let Err(error) =
                 enqueue_session_request(&self.sessions, session_id, TerminalRequest::Key(key))
             {
-                self.snippet_message = format!("Could not send the command: {error}");
+                self.snippet_message = self
+                    .tr("Could not send the command: {error}")
+                    .replace("{error}", &error.to_string());
                 return false;
             }
         }
@@ -8296,8 +8917,8 @@ impl AppView {
         if keywords.is_empty() {
             list = list.child(components::empty_state(
                 &tokens,
-                "No highlighted keywords",
-                "Add literal words such as error, warning or timeout.",
+                self.tr("No highlighted keywords"),
+                self.tr("Add literal words such as error, warning or timeout."),
             ));
         } else {
             for (index, keyword) in keywords.into_iter().enumerate() {
@@ -8334,7 +8955,7 @@ impl AppView {
                                 IconName::Delete,
                                 ButtonKind::Ghost,
                                 ButtonSize::Small,
-                                "Remove keyword",
+                                self.tr("Remove keyword"),
                             )
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
@@ -8359,7 +8980,7 @@ impl AppView {
             .bg(tokens.surface_raised)
             .text_color(tokens.text_primary)
             .child(
-                components::panel_header(&tokens, "Keyword highlights").child(
+                components::panel_header(&tokens, self.tr("Keyword highlights")).child(
                     div()
                         .flex()
                         .items_center()
@@ -8380,9 +9001,9 @@ impl AppView {
                                 },
                                 ButtonSize::Small,
                                 if self.keyword_highlighting_enabled {
-                                    "Disable keyword highlighting"
+                                    self.tr("Disable keyword highlighting")
                                 } else {
-                                    "Enable keyword highlighting"
+                                    self.tr("Enable keyword highlighting")
                                 },
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -8396,7 +9017,7 @@ impl AppView {
                                 IconName::Close,
                                 ButtonKind::Ghost,
                                 ButtonSize::Small,
-                                "Close keyword highlights",
+                                self.tr("Close keyword highlights"),
                             )
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
@@ -8428,7 +9049,7 @@ impl AppView {
                             IconName::Plus,
                             ButtonKind::Primary,
                             ButtonSize::Small,
-                            "Add keyword",
+                            self.tr("Add keyword"),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.add_keyword(window, cx);
@@ -8442,9 +9063,9 @@ impl AppView {
                     .text_size(px(ui_tokens::FONT_CAPTION))
                     .text_color(tokens.text_secondary)
                     .child(if self.keyword_highlighting_enabled {
-                        "Literal matches are highlighted in the terminal."
+                        self.tr("Literal matches are highlighted in the terminal.")
                     } else {
-                        "Highlighting is off until you enable it."
+                        self.tr("Highlighting is off until you enable it.")
                     })
                     .when(!message.is_empty(), |row| {
                         row.child(
@@ -8764,8 +9385,8 @@ impl AppView {
             quick_grid = quick_grid.child(
                 components::empty_state(
                     &tokens,
-                    "No quick commands",
-                    "Create a command tile for the active SSH session.",
+                    self.tr("No quick commands"),
+                    self.tr("Create a command tile for the active SSH session."),
                 )
                 .w_full(),
             );
@@ -8849,7 +9470,7 @@ impl AppView {
                                     IconName::Settings2,
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
-                                    "Edit quick command",
+                                    self.tr("Edit quick command"),
                                 )
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
@@ -8865,7 +9486,7 @@ impl AppView {
                                     IconName::Delete,
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
-                                    "Delete quick command",
+                                    self.tr("Delete quick command"),
                                 )
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
@@ -8890,7 +9511,7 @@ impl AppView {
                 div()
                     .text_size(px(ui_tokens::FONT_CAPTION))
                     .text_color(tokens.text_disabled)
-                    .child("No connected sessions"),
+                    .child(self.tr("No connected sessions")),
             );
         }
         for (session_id, title) in connected_sessions {
@@ -8915,7 +9536,7 @@ impl AppView {
             .bg(tokens.surface_raised)
             .text_color(tokens.text_primary)
             .child(
-                components::panel_header(&tokens, "Quick commands").child(
+                components::panel_header(&tokens, self.tr("Quick commands")).child(
                     div()
                         .flex()
                         .items_center()
@@ -8927,7 +9548,7 @@ impl AppView {
                                 IconName::Plus,
                                 ButtonKind::Ghost,
                                 ButtonSize::Small,
-                                "New quick command",
+                                self.tr("New quick command"),
                             )
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
@@ -8942,7 +9563,7 @@ impl AppView {
                                 IconName::Close,
                                 ButtonKind::Ghost,
                                 ButtonSize::Small,
-                                "Close quick commands",
+                                self.tr("Close quick commands"),
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_snippets(cx))),
                         ),
@@ -8956,13 +9577,13 @@ impl AppView {
                     .p(px(ui_tokens::SPACE_2))
                     .child(components::field(
                         &tokens,
-                        "Name",
+                        self.tr("Name"),
                         &self.snippet_name,
                         false,
                     ))
                     .child(components::field(
                         &tokens,
-                        "Command",
+                        self.tr("Command"),
                         &self.snippet_command,
                         false,
                     ))
@@ -8976,9 +9597,9 @@ impl AppView {
                                     &tokens,
                                     "quick-command-enter",
                                     if self.snippet_send_enter {
-                                        "Send + Enter"
+                                        self.tr("Send + Enter")
                                     } else {
-                                        "Paste only"
+                                        self.tr("Paste only")
                                     },
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
@@ -8994,7 +9615,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "quick-command-save",
-                                    "Save command",
+                                    self.tr("Save command"),
                                     ButtonKind::Primary,
                                     ButtonSize::Small,
                                 )
@@ -9008,9 +9629,9 @@ impl AppView {
                     .text_size(px(ui_tokens::FONT_CAPTION))
                     .text_color(tokens.text_secondary)
                     .child(if let Some(title) = active_session {
-                        format!("Send to {title}")
+                        self.tr("Send to {title}").replace("{title}", &title)
                     } else {
-                        "Open a connected session to run a command.".to_owned()
+                        self.tr("Open a connected session to run a command.")
                     })
                     .when(!message.is_empty(), |row| {
                         row.child(
@@ -9035,14 +9656,15 @@ impl AppView {
                             .text_size(px(ui_tokens::FONT_CAPTION))
                             .font_semibold()
                             .text_color(tokens.text_secondary)
-                            .child("Broadcast targets"),
+                            .child(self.tr("Broadcast targets")),
                     )
                     .child(target_list)
                     .child(
                         components::button(
                             &tokens,
                             "quick-command-broadcast",
-                            format!("Send to {} selected", self.snippet_targets.len()),
+                            self.tr("Send to {count} selected")
+                                .replace("{count}", &self.snippet_targets.len().to_string()),
                             ButtonKind::Secondary,
                             ButtonSize::Small,
                         )
@@ -9372,13 +9994,14 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let history_label = if self.compose_history.is_empty() {
-            "History".to_owned()
+            self.tr("History")
         } else {
-            format!(
-                "History {}/{}",
-                self.compose_recall % self.compose_history.len() + 1,
-                self.compose_history.len()
-            )
+            self.tr("History {current}/{total}")
+                .replace(
+                    "{current}",
+                    &(self.compose_recall % self.compose_history.len() + 1).to_string(),
+                )
+                .replace("{total}", &self.compose_history.len().to_string())
         };
         div()
             .id("compose-bar")
@@ -9413,7 +10036,7 @@ impl AppView {
                     .gap(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        "Compose · Ctrl+Enter sends · Esc closes",
+                        self.tr("Compose · Ctrl+Enter sends · Esc closes"),
                     ))
                     .child(
                         div()
@@ -9438,7 +10061,7 @@ impl AppView {
                                 components::button(
                                     tokens,
                                     "compose-send",
-                                    "Send",
+                                    self.tr("Send"),
                                     ButtonKind::Primary,
                                     ButtonSize::Small,
                                 )
@@ -9455,7 +10078,7 @@ impl AppView {
                                     IconName::Close,
                                     ButtonKind::Ghost,
                                     ButtonSize::Small,
-                                    "Close compose",
+                                    self.tr("Close compose"),
                                 )
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
@@ -10544,20 +11167,23 @@ impl AppView {
     ) {
         if prompts.len() > MAX_AUTH_PROMPTS {
             let _ = respond_to.send(vec![Zeroizing::new(String::new())]);
+            let status = self
+                .tr("The server requested {count} keyboard-interactive prompts; at most {max} are supported.")
+                .replace("{count}", &prompts.len().to_string())
+                .replace("{max}", &MAX_AUTH_PROMPTS.to_string());
             if let Some(session) = self.session_mut(session_id) {
-                session.status = format!(
-                    "The server requested {} keyboard-interactive prompts; at most {MAX_AUTH_PROMPTS} are supported.",
-                    prompts.len()
-                );
+                session.status = status;
             }
             return;
         }
+        let status = if name.trim().is_empty() {
+            self.tr("Waiting for keyboard-interactive input...")
+        } else {
+            self.tr("Keyboard-interactive authentication: {name}")
+                .replace("{name}", &name)
+        };
         if let Some(session) = self.session_mut(session_id) {
-            session.status = if name.trim().is_empty() {
-                "Waiting for keyboard-interactive input...".to_owned()
-            } else {
-                format!("Keyboard-interactive authentication: {name}")
-            };
+            session.status = status;
         }
         self.auth_prompt = Some(AuthPromptState {
             session_id,
@@ -10587,8 +11213,9 @@ impl AppView {
         }
         self.clear_auth_prompt_inputs(window, cx);
         self.auth_prompt_needs_clear = false;
+        let status = self.tr("Submitting authentication response...");
         if let Some(session) = self.session_mut(prompt.session_id) {
-            session.status = "Submitting authentication response...".to_owned();
+            session.status = status;
         }
         self.overlay_focus_pending = false;
         window.focus(&self.terminal_focus);
@@ -10625,9 +11252,10 @@ impl AppView {
             return div().into_any_element();
         };
         let title = if prompt.name.trim().is_empty() {
-            "Keyboard-interactive authentication".to_owned()
+            self.tr("Keyboard-interactive authentication")
         } else {
-            format!("Keyboard-interactive authentication: {}", prompt.name)
+            self.tr("Keyboard-interactive authentication: {name}")
+                .replace("{name}", &prompt.name)
         };
         let instructions = prompt.instructions.trim().to_owned();
         let prompts = prompt.prompts.clone();
@@ -10659,7 +11287,7 @@ impl AppView {
         }
         body = body.child(components::help_text(
             &tokens,
-            "Responses are sent only to the SSH server and are not stored.",
+            self.tr("Responses are sent only to the SSH server and are not stored."),
         ));
 
         components::modal_overlay(&tokens, "auth-prompt-overlay")
@@ -10683,7 +11311,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "auth-prompt-cancel",
-                                    "Cancel",
+                                    self.tr("Cancel"),
                                     ButtonKind::Ghost,
                                     ButtonSize::Regular,
                                 )
@@ -10697,7 +11325,7 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "auth-prompt-submit",
-                                    "Continue",
+                                    self.tr("Continue"),
                                     ButtonKind::Primary,
                                     ButtonSize::Regular,
                                 )
@@ -11390,7 +12018,7 @@ impl AppView {
                     div()
                         .text_size(px(ui_tokens::FONT_CAPTION))
                         .text_color(tokens.text_secondary)
-                        .child("split"),
+                        .child(self.tr("split")),
                 );
             }
             tab = tab.child(
@@ -11400,7 +12028,7 @@ impl AppView {
                     IconName::Close,
                     ButtonKind::Ghost,
                     ButtonSize::Small,
-                    "Close session",
+                    self.tr("Close session"),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
@@ -11434,7 +12062,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Session tab actions",
+                    self.tr("Session tab actions"),
                 )
                 .disabled(self.active_session_id.is_none())
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -11450,7 +12078,7 @@ impl AppView {
                     IconName::Plus,
                     ButtonKind::Ghost,
                     ButtonSize::Small,
-                    "New session",
+                    self.tr("New session"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.new_profile(window, cx))),
             );
@@ -11473,7 +12101,7 @@ impl AppView {
                         IconName::PanelRight,
                         side_by_side,
                         ButtonSize::Small,
-                        "Side by side",
+                        self.tr("Side by side"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.set_split_orientation(SplitOrientation::SideBySide, window, cx);
@@ -11486,7 +12114,7 @@ impl AppView {
                         IconName::PanelBottom,
                         stacked,
                         ButtonSize::Small,
-                        "Stacked",
+                        self.tr("Stacked"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.set_split_orientation(SplitOrientation::Stacked, window, cx);
@@ -11499,7 +12127,7 @@ impl AppView {
                         IconName::Close,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
-                        "Close split",
+                        self.tr("Close split"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.close_split(window, cx))),
                 );
@@ -11852,9 +12480,10 @@ impl AppView {
                     },
                     ButtonSize::Small,
                     format!(
-                        "{} ({} target)",
+                        "{} ({} {})",
                         self.tr("Synchronized input"),
-                        self.sync_target_count()
+                        self.sync_target_count(),
+                        self.tr("target"),
                     ),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_sync_modal(window, cx))),
@@ -11899,7 +12528,7 @@ impl AppView {
                         ButtonKind::Ghost
                     },
                     ButtonSize::Small,
-                    "Menu",
+                    self.tr("Menu"),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_main_menu(window, cx))),
             );
@@ -11980,7 +12609,7 @@ impl AppView {
                     .when(sync_count > 0, |right| {
                         right.child(components::pill(
                             tokens,
-                            format!("Sync {sync_count}"),
+                            format!("{} {sync_count}", self.tr("Sync")),
                             Tone::Accent,
                         ))
                     })
@@ -12017,8 +12646,8 @@ impl AppView {
         if connected.is_empty() {
             list = list.child(components::empty_state(
                 tokens,
-                "No connected sessions",
-                "Connect at least one session before enabling synchronized input.",
+                self.tr("No connected sessions"),
+                self.tr("Connect at least one session before enabling synchronized input."),
             ));
         } else {
             for (id, title, identity, state) in connected {
@@ -12059,7 +12688,11 @@ impl AppView {
                             components::button(
                                 tokens,
                                 ("sync-target", id),
-                                if selected { "Syncing" } else { "Add" },
+                                if selected {
+                                    self.tr("Syncing")
+                                } else {
+                                    self.tr("Add")
+                                },
                                 if selected {
                                     ButtonKind::Secondary
                                 } else {
@@ -12091,10 +12724,11 @@ impl AppView {
                     .max_w(px(480.))
                     .max_h(px(560.))
                     .child(
-                        components::modal_header(tokens, "Synchronized input").child(
+                        components::modal_header(tokens, self.tr("Synchronized input")).child(
                             components::help_text(
                                 tokens,
-                                format!("{sync_count} target(s) selected"),
+                                self.tr("{count} target(s) selected")
+                                    .replace("{count}", &sync_count.to_string()),
                             ),
                         ),
                     )
@@ -12105,7 +12739,7 @@ impl AppView {
                             .pb(px(ui_tokens::SPACE_2))
                             .child(components::help_text(
                                 tokens,
-                                "Keyboard, paste and compose are mirrored; mouse, scrolling and resize stay per-session.",
+                                self.tr("Keyboard, paste and compose are mirrored; mouse, scrolling and resize stay per-session."),
                             )),
                     )
                     .child(
@@ -12114,7 +12748,7 @@ impl AppView {
                                 components::button(
                                     tokens,
                                     "clear-sync-targets",
-                                    "Clear",
+                                    self.tr("Clear"),
                                     ButtonKind::Ghost,
                                     ButtonSize::Regular,
                                 )
@@ -12126,7 +12760,7 @@ impl AppView {
                                 components::button(
                                     tokens,
                                     "close-sync-panel",
-                                    "Done",
+                                    self.tr("Done"),
                                     ButtonKind::Primary,
                                     ButtonSize::Regular,
                                 )
@@ -12185,7 +12819,7 @@ impl AppView {
                         IconName::Close,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
-                        "Close tab actions",
+                        self.tr("Close tab actions"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_tab_menu(window, cx);
@@ -12197,7 +12831,7 @@ impl AppView {
                     tokens,
                     "tab-menu-properties",
                     IconName::Settings2,
-                    "Session properties",
+                    self.tr("Session properties"),
                     "",
                     active,
                     true,
@@ -12216,7 +12850,7 @@ impl AppView {
                     tokens,
                     "tab-menu-split-side",
                     IconName::PanelRight,
-                    "Split side by side",
+                    self.tr("Split side by side"),
                     "",
                     self.split.is_some_and(|split| {
                         split.orientation == SplitOrientation::SideBySide
@@ -12234,7 +12868,7 @@ impl AppView {
                     tokens,
                     "tab-menu-split-stack",
                     IconName::PanelBottom,
-                    "Split stacked",
+                    self.tr("Split stacked"),
                     "",
                     self.split.is_some_and(|split| {
                         split.orientation == SplitOrientation::Stacked && split.contains(session_id)
@@ -12252,9 +12886,9 @@ impl AppView {
                     "tab-menu-disconnect",
                     IconName::CircleX,
                     if session.state == SessionState::Connecting {
-                        "Cancel connection"
+                        self.tr("Cancel connection")
                     } else {
-                        "Disconnect"
+                        self.tr("Disconnect")
                     },
                     "",
                     false,
@@ -12271,7 +12905,7 @@ impl AppView {
                     tokens,
                     "tab-menu-close",
                     IconName::Close,
-                    "Close tab",
+                    self.tr("Close tab"),
                     "Ctrl+Shift+W",
                     active,
                     true,
@@ -12281,13 +12915,13 @@ impl AppView {
                     this.close_session(session_id, window, cx);
                 })),
             )
-            .child(components::section_label(tokens, "TABS"))
+            .child(components::section_label(tokens, self.tr("TABS")))
             .child(
                 menu_item(
                     tokens,
                     "tab-menu-close-others",
                     IconName::PanelLeft,
-                    "Close other tabs",
+                    self.tr("Close other tabs"),
                     "",
                     false,
                     has_other,
@@ -12301,7 +12935,7 @@ impl AppView {
                     tokens,
                     "tab-menu-close-right",
                     IconName::ArrowRight,
-                    "Close tabs to the right",
+                    self.tr("Close tabs to the right"),
                     "",
                     false,
                     has_right,
@@ -13183,7 +13817,7 @@ impl AppView {
             components::collapsible_header(
                 tokens,
                 "inspector-transfers",
-                "Transfers",
+                self.tr("Transfers"),
                 self.inspector_transfers_open,
             )
             .on_click(cx.listener(|this, _, _, cx| {
@@ -13225,7 +13859,7 @@ impl AppView {
                                     .flex_shrink_0()
                                     .text_size(px(ui_tokens::FONT_CAPTION))
                                     .text_color(tokens.text_secondary)
-                                    .child(transfer.kind.label()),
+                                    .child(self.tr(transfer.kind.label())),
                             ),
                     )
                     .child(components::progress_bar(tokens, ratio))
@@ -13248,7 +13882,7 @@ impl AppView {
                         components::button(
                             tokens,
                             ("inspector-cancel-transfer", session_id),
-                            "Cancel transfer",
+                            self.tr("Cancel transfer"),
                             ButtonKind::Ghost,
                             ButtonSize::Small,
                         )
@@ -13260,7 +13894,7 @@ impl AppView {
                 group = group.child(components::help_text(
                     tokens,
                     if transfer_message.is_empty() {
-                        "No active transfer.".to_owned()
+                        self.tr("No active transfer.")
                     } else {
                         transfer_message.clone()
                     },
@@ -13271,9 +13905,9 @@ impl AppView {
                     tokens,
                     "inspector-files",
                     if sftp_visible {
-                        "Close files"
+                        self.tr("Close files")
                     } else {
-                        "Open files"
+                        self.tr("Open files")
                     },
                     ButtonKind::Secondary,
                     ButtonSize::Small,
@@ -13289,7 +13923,7 @@ impl AppView {
             components::collapsible_header(
                 tokens,
                 "inspector-forwards",
-                "Forwards",
+                self.tr("Forwards"),
                 self.inspector_forwards_open,
             )
             .on_click(cx.listener(|this, _, _, cx| {
@@ -13306,7 +13940,10 @@ impl AppView {
                 .border_b_1()
                 .border_color(tokens.border_subtle);
             if rules.is_empty() && stopped_rules.is_empty() {
-                group = group.child(components::help_text(tokens, "No forwarding rules."));
+                group = group.child(components::help_text(
+                    tokens,
+                    self.tr("No forwarding rules."),
+                ));
             } else {
                 for (rule_id, rule) in rules {
                     let target = if rule.spec.kind.needs_target() {
@@ -13336,7 +13973,7 @@ impl AppView {
                                             .text_color(tokens.text_primary)
                                             .child(format!(
                                                 "{} {}:{}",
-                                                rule.spec.kind.label(),
+                                                self.tr(rule.spec.kind.label()),
                                                 rule.spec.listen_host,
                                                 rule.bound_port
                                             )),
@@ -13348,7 +13985,7 @@ impl AppView {
                                             IconName::Close,
                                             ButtonKind::Ghost,
                                             ButtonSize::Small,
-                                            "Stop rule",
+                                            self.tr("Stop rule"),
                                         )
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
@@ -13365,7 +14002,7 @@ impl AppView {
                                     .text_size(px(ui_tokens::FONT_CAPTION))
                                     .text_color(tokens.text_secondary)
                                     .child(target)
-                                    .child(format!("{} active", rule.connections)),
+                                    .child(format!("{} {}", rule.connections, self.tr("active"))),
                             ),
                     );
                 }
@@ -13402,7 +14039,7 @@ impl AppView {
                                             .text_color(tokens.text_disabled)
                                             .child(format!(
                                                 "{} {}:{}",
-                                                spec.kind.label(),
+                                                self.tr(spec.kind.label()),
                                                 spec.listen_host,
                                                 listen_port
                                             )),
@@ -13414,7 +14051,7 @@ impl AppView {
                                             IconName::ArrowRight,
                                             ButtonKind::Ghost,
                                             ButtonSize::Small,
-                                            "Start rule",
+                                            self.tr("Start rule"),
                                         )
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
@@ -13431,7 +14068,7 @@ impl AppView {
                                     .text_size(px(ui_tokens::FONT_CAPTION))
                                     .text_color(tokens.text_secondary)
                                     .child(target)
-                                    .child("Stopped"),
+                                    .child(self.tr("Stopped")),
                             ),
                     );
                 }
@@ -13444,9 +14081,9 @@ impl AppView {
                     tokens,
                     "inspector-tunnels",
                     if forwards_visible {
-                        "Close tunnels"
+                        self.tr("Close tunnels")
                     } else {
-                        "Manage tunnels"
+                        self.tr("Manage tunnels")
                     },
                     ButtonKind::Secondary,
                     ButtonSize::Small,
@@ -13462,7 +14099,7 @@ impl AppView {
             components::collapsible_header(
                 tokens,
                 "inspector-connection",
-                "Connection",
+                self.tr("Connection"),
                 self.inspector_info_open,
             )
             .on_click(cx.listener(|this, _, _, cx| {
@@ -13471,9 +14108,10 @@ impl AppView {
             })),
         );
         if self.inspector_info_open {
-            let auth = profile
-                .as_ref()
-                .map_or("Quick connect", |profile| profile.auth_method.label());
+            let auth = profile.as_ref().map_or_else(
+                || self.tr("Quick connect"),
+                |profile| self.tr(profile.auth_method.label()),
+            );
             let profile_name = profile
                 .as_ref()
                 .map_or_else(|| "Unsaved".to_owned(), |profile| profile.name.clone());
@@ -13481,7 +14119,7 @@ impl AppView {
                 .as_ref()
                 .map(|profile| profile.proxy_jump.clone())
                 .filter(|jump| !jump.is_empty())
-                .unwrap_or_else(|| "None".to_owned());
+                .unwrap_or_else(|| self.tr("None"));
             let keepalive = profile
                 .as_ref()
                 .map(|profile| profile.keepalive_seconds)
@@ -13489,60 +14127,73 @@ impl AppView {
             body = body
                 .child(components::info_row(
                     tokens,
-                    "Host",
+                    self.tr("Host"),
                     format!("{username}@{host}:{port}"),
                 ))
                 .child(components::info_row(
                     tokens,
-                    "State",
+                    self.tr("State"),
                     self.tr(session_state_label(state)),
                 ))
                 .child(components::info_row(
                     tokens,
-                    "Terminal",
+                    self.tr("Terminal"),
                     format!("{} x {}", terminal_size.columns, terminal_size.rows),
                 ))
-                .child(components::info_row(tokens, "Auth", auth))
+                .child(components::info_row(tokens, self.tr("Auth"), auth))
                 .child(components::info_row(
                     tokens,
-                    "Host key",
+                    self.tr("Host key"),
                     connection_info
                         .as_ref()
                         .map(|info| info.host_key_algorithm.clone())
-                        .unwrap_or_else(|| "Pending".to_owned()),
+                        .unwrap_or_else(|| self.tr("Pending")),
                 ))
                 .child(components::info_row(
                     tokens,
-                    "Fingerprint",
+                    self.tr("Fingerprint"),
                     connection_info
                         .as_ref()
                         .map(|info| info.host_key_fingerprint.clone())
-                        .unwrap_or_else(|| "Not reported".to_owned()),
+                        .unwrap_or_else(|| self.tr("Not reported")),
                 ))
-                .child(components::info_row(tokens, "Profile", profile_name))
-                .child(components::info_row(tokens, "Jump host", jump))
                 .child(components::info_row(
                     tokens,
-                    "Keep-alive",
+                    self.tr("Profile"),
+                    profile_name,
+                ))
+                .child(components::info_row(tokens, self.tr("Jump host"), jump))
+                .child(components::info_row(
+                    tokens,
+                    self.tr("Keep-alive"),
                     if keepalive == 0 {
-                        "Off".to_owned()
+                        self.tr("Off")
                     } else {
                         format!("{keepalive}s")
                     },
                 ))
                 .child(components::info_row(
                     tokens,
-                    "Logging",
-                    if log_active { "Recording" } else { "Off" },
+                    self.tr("Logging"),
+                    if log_active {
+                        self.tr("Recording")
+                    } else {
+                        self.tr("Off")
+                    },
                 ));
         }
 
         body = body.child(
-            components::collapsible_header(tokens, "inspector-log", "Log", self.inspector_log_open)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.inspector_log_open = !this.inspector_log_open;
-                    cx.notify();
-                })),
+            components::collapsible_header(
+                tokens,
+                "inspector-log",
+                self.tr("Log"),
+                self.inspector_log_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_log_open = !this.inspector_log_open;
+                cx.notify();
+            })),
         );
         if self.inspector_log_open {
             let mut group = div()
@@ -13554,29 +14205,33 @@ impl AppView {
                 .border_color(tokens.border_subtle)
                 .child(components::info_row(
                     tokens,
-                    "State",
-                    if log_active { "Recording" } else { "Off" },
+                    self.tr("State"),
+                    if log_active {
+                        self.tr("Recording")
+                    } else {
+                        self.tr("Off")
+                    },
                 ));
             if let Some(path) = &log_path {
                 group = group.child(components::info_row(
                     tokens,
-                    "File",
+                    self.tr("File"),
                     path.display().to_string(),
                 ));
             }
             group = group
                 .child(components::help_text(
                     tokens,
-                    "New logs use timestamped records with a replay timeline. Appending to an existing legacy raw log keeps the raw format. Logs may contain sensitive terminal output.",
+                    self.tr("New logs use timestamped records with a replay timeline. Appending to an existing legacy raw log keeps the raw format. Logs may contain sensitive terminal output."),
                 ))
                 .child(
                     components::button(
                         tokens,
                         "inspector-toggle-log",
                         if log_active {
-                            "Stop logging"
+                            self.tr("Stop logging")
                         } else {
-                            "Start logging"
+                            self.tr("Start logging")
                         },
                         ButtonKind::Secondary,
                         ButtonSize::Small,
@@ -13589,7 +14244,7 @@ impl AppView {
                     components::button(
                         tokens,
                         "inspector-open-replay",
-                        "Open replay...",
+                        self.tr("Open replay..."),
                         ButtonKind::Ghost,
                         ButtonSize::Small,
                     )
@@ -13607,14 +14262,14 @@ impl AppView {
             .rounded(px(ui_tokens::RADIUS_PANEL))
             .overflow_hidden()
             .child(
-                components::panel_header(tokens, "Inspector").child(
+                components::panel_header(tokens, self.tr("Inspector")).child(
                     components::icon_button(
                         tokens,
                         "close-inspector",
                         IconName::Close,
                         ButtonKind::Ghost,
                         ButtonSize::Small,
-                        "Close inspector",
+                        self.tr("Close inspector"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx))),
                 ),
@@ -13877,6 +14532,16 @@ impl Render for AppView {
         if std::mem::take(&mut self.overlay_focus_pending) {
             window.focus(&self.overlay_focus);
         }
+        if std::mem::take(&mut self.credential_focus_pending)
+            && (self.session_editor_open || self.credential_prompt_open)
+        {
+            let focus = if self.auth_method == AuthMethod::PublicKey {
+                self.key_passphrase.read(cx).focus_handle(cx)
+            } else {
+                self.password.read(cx).focus_handle(cx)
+            };
+            window.focus(&focus);
+        }
         let tokens = self.tokens();
         let command_bar = self.command_bar(&tokens, cx);
         let sidebar = self.sidebar(&tokens, cx);
@@ -14061,6 +14726,9 @@ impl Render for AppView {
         }
         if self.session_editor_open {
             root = root.child(self.session_editor(cx));
+        }
+        if self.credential_prompt_open {
+            root = root.child(self.credential_prompt_overlay(cx));
         }
         if self.group_editor_open {
             root = root.child(self.group_editor(cx));

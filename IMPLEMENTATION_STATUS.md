@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：保存主机认证流程完成并准备发布 `v0.1.17`。双击或连接图标打开保存主机时，若本次运行没有可复用凭据，只显示认证弹窗；密码、键盘交互密码、私钥口令和跳板机凭据都可在同一弹窗中确认。成功连接后凭据仅以 `Zeroizing` 形式保存在本次进程内存中，下一次连接自动复用；认证失败会清除旧缓存并重新弹出输入，取消会清空输入并结束连接流程。左侧已连接主机继续直接切换会话，不打开属性窗口。新增缓存归一化、空凭据和中文认证文案单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（126 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。新鲜构建中文工作区截图为 `artifacts/dshell-v0.1.17-chinese-workspace.png`；认证输入、DPI、IME、字形像素对齐和连接后的 SFTP/隧道交互仍需手工烟测。
+
+2026-10-25，Windows/MSVC：简体中文覆盖补齐并准备发布 `v0.1.16`。隧道与 SOCKS5、关键词高亮、快捷命令、组合输入、键盘交互认证、同步输入、标签菜单、检查器和连接校验反馈全部接入现有翻译表；用户提供的主机名、命令、远端路径和终端输出保持原样。新增近期面板和认证校验的本地化单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（121 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 已完成。新鲜 Windows 构建的中文工作区截图为 `artifacts/dshell-v0.1.16-chinese-fresh.png`。手工 SSH 服务继续绑定 `127.0.0.1:2222`，真实 DPI、IME、字形像素对齐和连接后的 SFTP/隧道交互仍需用户手工烟测。
+
 2026-10-25，Windows/MSVC：密钥管理补齐完成并准备发布 `v0.1.15`。Keys 面板支持导入 OpenSSH 私钥到 `~/.ssh`、导出经校验的私钥和匹配公钥、修改口令、复制公钥，以及带显式确认的密钥对删除；目标文件不会被覆盖，缺失 `.pub` 时从私钥派生公钥，非普通文件不会被删除。新增密钥传输、删除、格式校验和不覆盖失败路径单测；`cargo fmt --all`、`cargo test --locked --offline`（121 项通过、9 项 Docker 专项跳过）、`cargo check --locked --all-targets --offline`、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。新构建已完成，但真实 Windows Keys 面板的图标点击、文件选择器和删除确认因本轮 Computer Use 被物理 `Esc` 中止，仍待手工验证。
 
 2026-10-25，Windows/MSVC：主机资料备份与迁移完成并准备发布 `v0.1.14`。Session 图标菜单新增 dshell 主机资料 JSON 的导入/导出；导出只包含版本化主机资料，不包含最近连接、密码、口令或私钥材料；导入校验版本和全部资料约束，遇到重复名称时跳过且不覆盖已有资料。新增导入/导出往返、未知版本、重复名称、合并去重和无秘密字段单测；`cargo fmt --all`、`cargo test --locked --offline`（119 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 均已完成。真实 Windows 烟测已完成：中文 More 菜单显示导入/导出入口，原生文件选择器成功导出并重新选择 `artifacts/manual-export.json`，界面和 Toast 均确认导入 0 个、跳过 1 个重复项；证据截图为 `artifacts/dshell-v0.1.14-profile-menu-cn.jpg`。

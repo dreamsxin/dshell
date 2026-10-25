@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.15`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.17`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -43,11 +43,15 @@ private key file (with an optional passphrase), keyboard-interactive
 authentication, or the system SSH agent (Windows OpenSSH named pipe or Pageant;
 `SSH_AUTH_SOCK` on Unix). A plain password prompt in keyboard-interactive mode
 uses the password field; one-time-password or other extra prompts open a masked
-dialog that sends responses only to the SSH server. Each connection opens an independent session tab; switching tabs
+dialog that sends responses only to the SSH server. Double-clicking a saved host
+opens a credential-only dialog when no in-memory credential is available. After
+a successful connection, the password or passphrase is reused for the rest of
+the current dshell run; a rejected credential clears that cache and reopens the
+dialog, while Cancel abandons the connection. Credentials are never written to
+host profiles or settings. Each connection opens an independent session tab; switching tabs
 preserves each session's terminal state, and closing a tab ends only that SSH
 session. The password and key passphrase fields are masked and cleared when
-connection starts. Credentials are used only for the current SSH authentication
-attempt and are not persisted. Click the terminal area to focus it, then use the
+connection starts. Click the terminal area to focus it, then use the
 keyboard as you would in a remote terminal. The terminal grid follows window
 resizing. When the remote application enables mouse tracking, clicks, motion,
 and the wheel are sent to it; otherwise, left-button dragging selects text and
@@ -276,12 +280,21 @@ their icons render in a fresh `cargo run` build. Windows UI evidence:
 
 ![Grouped More menu](artifacts/dshell-v0.1.1-more-menu.png)
 
-The v0.1.2 Simplified Chinese shell and connection form were captured from the
-freshly built Windows binary:
+The Simplified Chinese shell is persisted in `settings.json` and now covers the
+session editor, SFTP, tunnels, quick commands, synchronized input, keyboard-
+interactive authentication, inspector and validation feedback. A fresh
+Windows build was captured while the Chinese language was active:
 
 ![Simplified Chinese shell](artifacts/dshell-v0.1.2-chinese-shell.png)
 
 ![Simplified Chinese SSH connection form](artifacts/dshell-v0.1.2-chinese-connection-form.png)
+
+![Fresh Simplified Chinese workspace](artifacts/dshell-v0.1.16-chinese-fresh.png)
+
+The `v0.1.17` build keeps the Chinese workspace and records the saved-host
+credential flow in memory only:
+
+![v0.1.17 Simplified Chinese workspace](artifacts/dshell-v0.1.17-chinese-workspace.png)
 
 Use the `Keyword highlights` button to keep up to 32 literal keywords in memory.
 Highlighting is disabled by default, case-insensitive, and applies to live

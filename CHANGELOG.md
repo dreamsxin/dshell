@@ -2,6 +2,57 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.17] - 2026-10-25
+
+Improves saved-host authentication so repeated connections do not require
+entering the same secret during one dshell run.
+
+### Added
+
+- Add a credential-only modal for saved-host connections, including password,
+  keyboard-interactive password, private-key passphrase and jump-host inputs.
+- Remember successful passwords and passphrases only in Zeroizing memory for the
+  current run; credentials remain absent from host profiles, settings and logs.
+- Clear a rejected credential from the memory cache and reopen the prompt so the
+  user can retry or cancel without returning to session properties.
+- Add credential-cache unit coverage and a fresh Chinese workspace screenshot.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline`,
+  `cargo test --locked --offline` (126 passed, 9 Docker-only ignored) and
+  `scripts\verify-hard-constraints.ps1` passed.
+- `scripts\test-docker-ssh.ps1` passed all 9 Docker SSH tests.
+- Fresh UI evidence: `artifacts/dshell-v0.1.17-chinese-workspace.png`.
+- Credential entry remains a manual Windows interaction; DPI/IME and glyph-level
+  checks remain manual as required by the repository verification policy.
+
+## [0.1.16] - 2026-10-25
+
+Completes Simplified Chinese coverage for the newer workspace panels and
+records a fresh Windows UI verification for the local manual SSH service.
+
+### Added
+
+- Translate tunnel/SOCKS5 controls, quick commands, keyword highlights,
+  compose, keyboard-interactive authentication, synchronized input, tab menus,
+  inspector labels and connection validation feedback.
+- Keep user-provided host names, commands, remote paths and terminal output
+  unchanged while translating application-owned labels and status text.
+- Document the repeatable local SSH service at `127.0.0.1:2222` and include a
+  fresh Chinese workspace screenshot from the current build.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline`,
+  `cargo test --locked --offline` (121 passed, 9 Docker-only ignored) and
+  `scripts\verify-hard-constraints.ps1` passed.
+- Fresh UI evidence: `artifacts/dshell-v0.1.16-chinese-fresh.png`.
+- Manual SSH container remains bound to `127.0.0.1:2222`; GUI DPI/IME and
+  glyph-level interaction remain manual checks.
+
 ## [0.1.15] - 2026-10-25
 
 Adds OpenSSH key-pair management to the Keys panel.
