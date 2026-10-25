@@ -2,6 +2,25 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.29] - 2026-10-25
+
+Adds remote listening-port inspection to the server inspector.
+
+### Added
+
+- Add a Listening ports group that reads up to 64 TCP/UDP listeners through
+  `ss -H -lntup`, with a `netstat` fallback.
+- Display protocol, local address and process information with loading,
+  empty and failure states; keep results in the current session.
+- Add Simplified Chinese labels and bounded parser/failure-path tests.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets` and
+  `cargo test --locked` (148 passed, 9 Docker-only ignored).
+- Hard-constraint verification passed; Docker SSH integration passed 9/9.
+
 ## [0.1.28] - 2026-10-25
 
 Adds remote storage mount inspection to the server inspector.

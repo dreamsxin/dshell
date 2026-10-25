@@ -178,6 +178,7 @@ pub enum TerminalRequest {
     RefreshServerProcesses,
     RefreshServerNetwork,
     RefreshServerStorage,
+    RefreshServerListeners,
     TerminateServerProcess {
         pid: u32,
     },

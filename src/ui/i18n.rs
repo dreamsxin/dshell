@@ -112,6 +112,12 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Connect to the server before refreshing storage information." => {
             "请先连接服务器，再刷新存储信息。"
         }
+        "Listening ports" => "监听端口",
+        "Collecting listening ports..." => "正在采集监听端口……",
+        "No listening ports reported yet." => "尚未获取监听端口。",
+        "Connect to the server before refreshing listening ports." => {
+            "请先连接服务器，再刷新监听端口。"
+        }
         "Top CPU" => "CPU 占用最高",
         "Services" => "服务",
         "Start service" => "启动服务",
@@ -989,6 +995,10 @@ mod tests {
         assert_eq!(translate(Language::SimplifiedChinese, "Processes"), "进程");
         assert_eq!(translate(Language::SimplifiedChinese, "Network"), "网络");
         assert_eq!(translate(Language::SimplifiedChinese, "Storage"), "存储");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Listening ports"),
+            "监听端口"
+        );
         assert_eq!(translate(Language::SimplifiedChinese, "Used"), "已用");
         assert_eq!(translate(Language::SimplifiedChinese, "Free"), "可用");
         assert_eq!(

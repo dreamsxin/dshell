@@ -53,8 +53,8 @@ use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerMetrics, ServerMount, ServerNetworkInterface, ServerPowerAction,
-    ServerProcess, ServerService, ServerServiceLogs, ServiceAction, UiEvent,
+    ServerDataError, ServerListener, ServerMetrics, ServerMount, ServerNetworkInterface,
+    ServerPowerAction, ServerProcess, ServerService, ServerServiceLogs, ServiceAction, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -964,6 +964,9 @@ struct ServerMetricsViewState {
     storage: Vec<ServerMount>,
     storage_loading: bool,
     storage_message: String,
+    listeners: Vec<ServerListener>,
+    listeners_loading: bool,
+    listeners_message: String,
     service_logs: Option<ServerServiceLogs>,
     service_logs_loading: bool,
     service_logs_message: String,
@@ -1115,6 +1118,11 @@ impl SshSession {
                 self.server_metrics.storage_loading = false;
                 self.server_metrics.storage_message.clear();
             }
+            UiEvent::ServerMetrics(ServerData::Listeners(listeners)) => {
+                self.server_metrics.listeners = listeners;
+                self.server_metrics.listeners_loading = false;
+                self.server_metrics.listeners_message.clear();
+            }
             UiEvent::ServerMetrics(ServerData::ProcessAction(result)) => {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message = result.message;
@@ -1151,6 +1159,10 @@ impl SshSession {
             UiEvent::ServerMetricsError(ServerDataError::Storage(error)) => {
                 self.server_metrics.storage_loading = false;
                 self.server_metrics.storage_message = error;
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Listeners(error)) => {
+                self.server_metrics.listeners_loading = false;
+                self.server_metrics.listeners_message = error;
             }
             UiEvent::ServerMetricsError(ServerDataError::Services(error)) => {
                 self.server_metrics.services_loading = false;
@@ -2282,6 +2294,7 @@ struct AppView {
     inspector_processes_open: bool,
     inspector_network_open: bool,
     inspector_storage_open: bool,
+    inspector_listeners_open: bool,
     pending_process_termination: Option<(u64, u32)>,
     inspector_services_open: bool,
     pending_service_action: Option<(u64, String, ServiceAction)>,
@@ -2601,6 +2614,7 @@ impl AppView {
             inspector_processes_open: true,
             inspector_network_open: true,
             inspector_storage_open: true,
+            inspector_listeners_open: true,
             pending_process_termination: None,
             inspector_services_open: true,
             pending_service_action: None,
@@ -9510,6 +9524,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_server_listeners(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing listening ports.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.listeners_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.listeners_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        if let Err(error) = command_tx.try_send(TerminalRequest::RefreshServerListeners) {
+            session.server_metrics.listeners_message = match error {
+                mpsc::error::TrySendError::Full(_) => queue_full,
+                mpsc::error::TrySendError::Closed(_) => not_accepting,
+            };
+            session.server_metrics.listeners_loading = false;
+        } else {
+            session.server_metrics.listeners_loading = true;
+            session.server_metrics.listeners_message.clear();
+        }
+        cx.notify();
+    }
+
     fn request_process_termination(&mut self, session_id: u64, pid: u32, cx: &mut Context<Self>) {
         let not_connected = self.tr("Connect to the server before terminating a process.");
         if self
@@ -14991,6 +15035,9 @@ impl AppView {
         let storage = server_metrics.storage.clone();
         let storage_loading = server_metrics.storage_loading;
         let storage_message = server_metrics.storage_message.clone();
+        let listeners = server_metrics.listeners.clone();
+        let listeners_loading = server_metrics.listeners_loading;
+        let listeners_message = server_metrics.listeners_message.clone();
         let server_services = server_metrics.services.clone();
         let services_loading = server_metrics.services_loading;
         let services_message = server_metrics.services_message.clone();
@@ -15717,6 +15764,92 @@ impl AppView {
                                         interface.addresses
                                     }),
                             ),
+                    );
+                }
+            }
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-listeners",
+                self.tr("Listening ports"),
+                self.inspector_listeners_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_listeners_open = !this.inspector_listeners_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_listeners_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let refresh_label = if listeners_loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            group = group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-listeners", session_id),
+                    refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(listeners_loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_listeners(session_id, cx);
+                })),
+            );
+            if listeners.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if listeners_loading {
+                        self.tr("Collecting listening ports...")
+                    } else if listeners_message.is_empty() {
+                        self.tr("No listening ports reported yet.")
+                    } else {
+                        self.tr(&listeners_message)
+                    },
+                ));
+            } else {
+                for listener in listeners {
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_primary)
+                                            .child(listener.local_address),
+                                    )
+                                    .child(components::pill(
+                                        tokens,
+                                        listener.protocol,
+                                        Tone::Neutral,
+                                    )),
+                            )
+                            .child(components::help_text(tokens, listener.process)),
                     );
                 }
             }

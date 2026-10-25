@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.28`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.29`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -65,13 +65,16 @@ and prints a generated username, password, SHA256 host-key fingerprint and the
 `known_hosts` line for review. Add that line manually only after checking the
 fingerprint; stop the service with `docker rm --force dshell-ssh-manual`.
 
-The inspector includes `Server health`, `Processes`, `Network`, `Storage` and `Services` groups for
+The inspector includes `Server health`, `Processes`, `Network`, `Storage`,
+`Listening ports` and `Services` groups for
 connected sessions. Press `Refresh` to run short read-only commands through
 separate SSH exec channels and display the remote OS, kernel, load average,
 memory, root filesystem usage, uptime, a bounded process list, and service
 states. The Network group shows interface state and addresses, using `ip` when
 available and `/sys/class/net` as a fallback. The Storage group shows mounted
-filesystem capacity and usage severity through `df -P -k`. Each process row has a confirmed `Terminate` action that sends `SIGTERM`
+filesystem capacity and usage severity through `df -P -k`. The Listening ports
+group shows TCP/UDP local addresses and the reporting process through `ss` or
+`netstat`. Each process row has a confirmed `Terminate` action that sends `SIGTERM`
 to the remote PID and refreshes the list. Each service row can read the latest
 bounded log lines through `journalctl`, with a `service status` fallback when
 systemd is unavailable. Probe and log output stays in the current session
