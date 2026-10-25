@@ -2,6 +2,25 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.20] - 2026-10-25
+
+Adds a bounded read-only process list to the connected-server inspector.
+
+### Added
+
+- Add a Processes inspector group with refresh, loading, empty and error states.
+- Query PID, user, CPU percentage, memory percentage, state and command through
+  a separate SSH exec channel without writing to the terminal or session log.
+- Bound process responses to 64 KiB and three seconds, with parser coverage for
+  valid, missing-marker and malformed rows in English and Simplified Chinese.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (131 passed, 9 Docker-only ignored).
+- Hard-constraint and Docker SSH verification remain part of the release closeout.
+
 ## [0.1.19] - 2026-10-25
 
 Completes the saved-host authentication flow so connecting from the sidebar is

@@ -52,8 +52,8 @@ use sftp::{
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
-    AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerMetrics,
-    UiEvent,
+    AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
+    ServerDataError, ServerMetrics, ServerProcess, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -884,6 +884,9 @@ struct ServerMetricsViewState {
     metrics: Option<ServerMetrics>,
     loading: bool,
     message: String,
+    processes: Vec<ServerProcess>,
+    processes_loading: bool,
+    processes_message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -978,14 +981,23 @@ impl SshSession {
             UiEvent::ConnectionInfo(info) => {
                 self.connection_info = Some(info);
             }
-            UiEvent::ServerMetrics(metrics) => {
+            UiEvent::ServerMetrics(ServerData::Metrics(metrics)) => {
                 self.server_metrics.metrics = Some(metrics);
                 self.server_metrics.loading = false;
                 self.server_metrics.message.clear();
             }
-            UiEvent::ServerMetricsError(error) => {
+            UiEvent::ServerMetrics(ServerData::Processes(processes)) => {
+                self.server_metrics.processes = processes;
+                self.server_metrics.processes_loading = false;
+                self.server_metrics.processes_message.clear();
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Metrics(error)) => {
                 self.server_metrics.loading = false;
                 self.server_metrics.message = error;
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Processes(error)) => {
+                self.server_metrics.processes_loading = false;
+                self.server_metrics.processes_message = error;
             }
             UiEvent::Screen(frame) => {
                 self.frame = Some(frame);
@@ -2022,6 +2034,7 @@ struct AppView {
     inspector_forwards_open: bool,
     inspector_info_open: bool,
     inspector_server_open: bool,
+    inspector_processes_open: bool,
     inspector_log_open: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
@@ -2322,6 +2335,7 @@ impl AppView {
             inspector_forwards_open: true,
             inspector_info_open: true,
             inspector_server_open: true,
+            inspector_processes_open: true,
             inspector_log_open: true,
             profile_name,
             profile_search,
@@ -8993,6 +9007,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_server_processes(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing processes.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.processes_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.processes_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        if let Err(error) = command_tx.try_send(TerminalRequest::RefreshServerProcesses) {
+            session.server_metrics.processes_message = match error {
+                mpsc::error::TrySendError::Full(_) => queue_full,
+                mpsc::error::TrySendError::Closed(_) => not_accepting,
+            };
+            session.server_metrics.processes_loading = false;
+        } else {
+            session.server_metrics.processes_loading = true;
+            session.server_metrics.processes_message.clear();
+        }
+        cx.notify();
+    }
+
     fn keywords_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = self.tokens();
         let keywords = self.keyword_highlights.clone();
@@ -13887,6 +13931,9 @@ impl AppView {
         let log_path = session.log_path.clone();
         let connection_info = session.connection_info.clone();
         let server_metrics = session.server_metrics.clone();
+        let server_processes = server_metrics.processes.clone();
+        let processes_loading = server_metrics.processes_loading;
+        let processes_message = server_metrics.processes_message.clone();
         let profile = session
             .profile_name
             .as_ref()
@@ -14388,6 +14435,123 @@ impl AppView {
                         self.tr(&server_metrics.message)
                     },
                 ));
+            }
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-processes",
+                self.tr("Processes"),
+                self.inspector_processes_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_processes_open = !this.inspector_processes_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_processes_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let refresh_label = if processes_loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            group = group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-processes", session_id),
+                    refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(processes_loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_processes(session_id, cx);
+                })),
+            );
+            if server_processes.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if processes_loading {
+                        self.tr("Collecting process list...")
+                    } else if processes_message.is_empty() {
+                        self.tr("No processes collected yet.")
+                    } else {
+                        self.tr(&processes_message)
+                    },
+                ));
+            } else {
+                group = group.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .text_size(px(ui_tokens::FONT_CAPTION))
+                        .text_color(tokens.text_secondary)
+                        .child(format!(
+                            "{} {}",
+                            server_processes.len(),
+                            self.tr("processes"),
+                        ))
+                        .child(self.tr("Top CPU")),
+                );
+                for process in server_processes {
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_primary)
+                                            .child(format!(
+                                                "{} · {} · {}",
+                                                process.pid, process.user, process.state
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_secondary)
+                                            .child(format!(
+                                                "CPU {:.1}% · {} {:.1}%",
+                                                process.cpu_percent,
+                                                self.tr("Memory"),
+                                                process.memory_percent
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(process.command),
+                            ),
+                    );
+                }
             }
             body = body.child(group);
         }

@@ -105,6 +105,26 @@ pub struct ServerMetrics {
     pub uptime_seconds: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerProcess {
+    pub pid: u32,
+    pub user: String,
+    pub cpu_percent: f32,
+    pub memory_percent: f32,
+    pub state: String,
+    pub command: String,
+}
+
+pub enum ServerData {
+    Metrics(ServerMetrics),
+    Processes(Vec<ServerProcess>),
+}
+
+pub enum ServerDataError {
+    Metrics(String),
+    Processes(String),
+}
+
 fn connection_info_for_key(key: &PublicKey) -> ConnectionInfo {
     ConnectionInfo {
         host_key_algorithm: key.algorithm().as_str().to_owned(),
@@ -119,8 +139,8 @@ pub enum UiEvent {
     Disconnected,
     LogState(Option<PathBuf>),
     ConnectionInfo(ConnectionInfo),
-    ServerMetrics(ServerMetrics),
-    ServerMetricsError(String),
+    ServerMetrics(ServerData),
+    ServerMetricsError(ServerDataError),
     AuthPrompt {
         name: String,
         instructions: String,
@@ -613,6 +633,9 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::RefreshServerMetrics) => {
                         refresh_server_metrics(&mut session, &events).await;
                     }
+                    Some(TerminalRequest::RefreshServerProcesses) => {
+                        refresh_server_processes(&mut session, &events).await;
+                    }
                     None => break,
                 }
             }
@@ -855,6 +878,9 @@ async fn run_connection_with_known_hosts(
 
 const SERVER_METRICS_COMMAND: &str = r##"printf 'DSHELL_METRICS_V1\n'; printf 'OS=%s\n' "$(uname -s 2>/dev/null || printf unknown)"; printf 'KERNEL=%s\n' "$(uname -r 2>/dev/null || printf unknown)"; printf 'LOAD1=%s\n' "$(awk '{print $1}' /proc/loadavg 2>/dev/null)"; printf 'LOAD5=%s\n' "$(awk '{print $2}' /proc/loadavg 2>/dev/null)"; printf 'LOAD15=%s\n' "$(awk '{print $3}' /proc/loadavg 2>/dev/null)"; printf 'MEM_TOTAL_KIB=%s\n' "$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf 'MEM_AVAILABLE_KIB=%s\n' "$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf 'UPTIME_SECONDS=%s\n' "$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"; printf 'DISK_TOTAL_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $2; exit}')"; printf 'DISK_USED_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $3; exit}')"; printf 'DISK_AVAILABLE_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4; exit}')"; printf 'DISK_USE_PERCENT=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5; exit}')"##;
 
+const SERVER_PROCESSES_COMMAND: &str = r##"printf 'DSHELL_PROCESSES_V1\n'; ps -eo pid=,user=,pcpu=,pmem=,stat=,args= --sort=-pcpu 2>/dev/null | head -n 50 | awk '{pid=$1; user=$2; cpu=$3; mem=$4; state=$5; $1=$2=$3=$4=$5=""; sub(/^[ \t]+/, ""); print "PROC\t" pid "\t" user "\t" cpu "\t" mem "\t" state "\t" $0}'"##;
+const MAX_SERVER_PROCESSES: usize = 50;
+
 fn metric_value<'a>(lines: &'a str, key: &str) -> Option<&'a str> {
     lines
         .lines()
@@ -939,18 +965,126 @@ async fn refresh_server_metrics(
 
     match result {
         Ok(Ok(metrics)) => {
-            let _ = events.send(UiEvent::ServerMetrics(metrics)).await;
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::Metrics(metrics)))
+                .await;
         }
         Ok(Err(error)) => {
             let _ = events
-                .send(UiEvent::ServerMetricsError(format!("{error:#}")))
+                .send(UiEvent::ServerMetricsError(ServerDataError::Metrics(
+                    format!("{error:#}"),
+                )))
                 .await;
         }
         Err(_) => {
             let _ = events
-                .send(UiEvent::ServerMetricsError(
+                .send(UiEvent::ServerMetricsError(ServerDataError::Metrics(
                     "Timed out waiting for server metrics.".to_owned(),
-                ))
+                )))
+                .await;
+        }
+    }
+}
+
+fn parse_server_processes(output: &str) -> Result<Vec<ServerProcess>> {
+    if !output
+        .lines()
+        .any(|line| line.trim() == "DSHELL_PROCESSES_V1")
+    {
+        bail!("The remote host did not return a supported process response.");
+    }
+    let mut processes = Vec::new();
+    for line in output.lines() {
+        let Some(fields) = line.strip_prefix("PROC\t") else {
+            continue;
+        };
+        let fields = fields.splitn(6, '\t').collect::<Vec<_>>();
+        if fields.len() != 6 {
+            bail!("The remote host returned a malformed process row.");
+        }
+        let pid = fields[0]
+            .parse::<u32>()
+            .context("The remote host returned an invalid process ID.")?;
+        let cpu_percent = fields[2]
+            .parse::<f32>()
+            .context("The remote host returned an invalid process CPU value.")?;
+        let memory_percent = fields[3]
+            .parse::<f32>()
+            .context("The remote host returned an invalid process memory value.")?;
+        if pid == 0
+            || fields[1].trim().is_empty()
+            || !cpu_percent.is_finite()
+            || cpu_percent < 0.0
+            || !memory_percent.is_finite()
+            || memory_percent < 0.0
+            || fields[4].trim().is_empty()
+            || fields[5].trim().is_empty()
+        {
+            bail!("The remote host returned an invalid process row.");
+        }
+        if processes.len() >= MAX_SERVER_PROCESSES {
+            bail!("The remote host returned too many process rows.");
+        }
+        processes.push(ServerProcess {
+            pid,
+            user: fields[1].trim().to_owned(),
+            cpu_percent,
+            memory_percent,
+            state: fields[4].trim().to_owned(),
+            command: fields[5].trim().to_owned(),
+        });
+    }
+    if processes.is_empty() {
+        bail!("The remote host did not expose any process rows.");
+    }
+    Ok(processes)
+}
+
+async fn refresh_server_processes(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a server process channel")?;
+        channel
+            .exec(true, SERVER_PROCESSES_COMMAND)
+            .await
+            .context("could not start the server process command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the server process response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server process response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_server_processes(&output)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(processes)) => {
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::Processes(processes)))
+                .await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Processes(
+                    format!("{error:#}"),
+                )))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Processes(
+                    "Timed out waiting for server processes.".to_owned(),
+                )))
                 .await;
         }
     }
@@ -1236,7 +1370,7 @@ async fn flush_log(
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, UiEvent, can_answer_with_password,
-        connection_info_for_key, is_known_host_key, parse_server_metrics,
+        connection_info_for_key, is_known_host_key, parse_server_metrics, parse_server_processes,
         run_connection_with_known_hosts,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
@@ -1329,6 +1463,37 @@ mod tests {
     fn server_metrics_parser_rejects_unmarked_or_empty_output() {
         assert!(parse_server_metrics("OS=Linux\n").is_err());
         assert!(parse_server_metrics("DSHELL_METRICS_V1\n").is_err());
+    }
+
+    #[test]
+    fn server_process_parser_reads_bounded_rows() {
+        let processes = parse_server_processes(
+            "DSHELL_PROCESSES_V1\nPROC\t42\troot\t12.5\t1.2\tR\t/usr/bin/example --ready\nPROC\t7\tapp\t0.0\t0.4\tS\tsshd: app@pts/0\n",
+        )
+        .unwrap();
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 42);
+        assert_eq!(processes[0].user, "root");
+        assert_eq!(processes[0].command, "/usr/bin/example --ready");
+        assert_eq!(processes[1].state, "S");
+    }
+
+    #[test]
+    fn server_process_parser_rejects_missing_marker_and_bad_rows() {
+        assert!(parse_server_processes("PROC\t42\troot\t1.0\t1.0\tS\tsh\n").is_err());
+        assert!(
+            parse_server_processes("DSHELL_PROCESSES_V1\nPROC\t0\troot\t1.0\t1.0\tS\tsh\n")
+                .is_err()
+        );
+        assert!(
+            parse_server_processes("DSHELL_PROCESSES_V1\nPROC\t42\troot\tNaN\t1.0\tS\tsh\n")
+                .is_err()
+        );
+        let mut too_many = String::from("DSHELL_PROCESSES_V1\n");
+        for pid in 1..=51 {
+            too_many.push_str(&format!("PROC\t{pid}\troot\t0.0\t0.0\tS\tprocess-{pid}\n"));
+        }
+        assert!(parse_server_processes(&too_many).is_err());
     }
 
     #[test]

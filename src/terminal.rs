@@ -174,6 +174,7 @@ pub enum TerminalRequest {
         direction: SearchDirection,
     },
     RefreshServerMetrics,
+    RefreshServerProcesses,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

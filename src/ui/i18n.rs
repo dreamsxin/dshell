@@ -94,9 +94,14 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "No active sessions" => "没有活动会话",
         "Connection" => "连接",
         "Server health" => "服务器健康",
+        "Processes" => "进程",
+        "processes" => "个进程",
+        "Top CPU" => "CPU 占用最高",
         "Refreshing..." => "刷新中……",
         "Collecting server metrics..." => "正在采集服务器指标……",
         "No server metrics collected yet." => "尚未采集服务器指标。",
+        "Collecting process list..." => "正在采集进程列表……",
+        "No processes collected yet." => "尚未采集进程列表。",
         "Operating system" => "操作系统",
         "Kernel" => "内核",
         "Load average" => "负载均值",
@@ -108,6 +113,23 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "The SSH session is not accepting requests." => "SSH 会话当前不接受请求。",
         "The SSH request queue is full." => "SSH 请求队列已满。",
         "Timed out waiting for server metrics." => "等待服务器指标超时。",
+        "Connect to the server before refreshing processes." => "请先连接服务器，再刷新进程。",
+        "Timed out waiting for server processes." => "等待服务器进程超时。",
+        "The remote host did not return a supported process response." => {
+            "远端主机未返回受支持的进程响应。"
+        }
+        "The remote host did not expose any process rows." => "远端主机未提供进程数据。",
+        "The remote host returned a malformed process row." => "远端主机返回了格式错误的进程行。",
+        "The remote host returned an invalid process ID." => "远端主机返回了无效的进程 ID。",
+        "The remote host returned an invalid process CPU value." => {
+            "远端主机返回了无效的进程 CPU 值。"
+        }
+        "The remote host returned an invalid process memory value." => {
+            "远端主机返回了无效的进程内存值。"
+        }
+        "The remote host returned an invalid process row." => "远端主机返回了无效的进程行。",
+        "The remote host returned too many process rows." => "远端主机返回了过多进程行。",
+        "The server process response was too large." => "服务器进程响应过大。",
         "The remote host did not return a supported metrics response." => {
             "远端主机未返回受支持的指标响应。"
         }
@@ -869,6 +891,18 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Inspector"),
             "检查器"
+        );
+        assert_eq!(translate(Language::SimplifiedChinese, "Processes"), "进程");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Collecting process list..."),
+            "正在采集进程列表……"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "The remote host returned too many process rows."
+            ),
+            "远端主机返回了过多进程行。"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "TABS"), "标签页");
     }
