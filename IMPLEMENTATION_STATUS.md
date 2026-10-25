@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：服务器管理常用功能继续完成并准备发布 `v0.1.21`。检查器新增 Services 分组，优先解析 systemd，缺少 systemd 时回退 `service --status-all`；Settings 新增并持久化 CPU、内存和根分区告警百分比，健康检查会对超过阈值的指标显示警告。服务查询同样使用独立 SSH exec channel，限制 3 秒和 64 KiB，不写入终端、日志或配置。新增服务协议解析、阈值校验、旧 settings.json 默认兼容和中文文案测试；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（134 项通过、9 项 Docker 专项跳过）、硬约束检查和 Docker SSH（9/9）均已通过。服务命令已在 `127.0.0.1:2222` 手工容器中验证；DPI/IME、字形对齐和本轮 Services/告警界面截图仍需隔离 Windows 桌面人工检查。
+
 2026-10-25，Windows/MSVC：服务器检查器进程列表完成并准备发布 `v0.1.20`。新增 Processes 折叠分组和刷新按钮，已连接会话通过独立 SSH exec channel 获取最多 50 条远端进程记录，显示 PID、用户、CPU、内存、状态和命令；响应限制为 64 KiB、3 秒超时，失败、空结果和加载状态均保留在当前会话内存，不混入终端、日志或配置。新增进程协议解析、缺少标记、非法行和边界单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline` 和 `cargo test --locked --offline`（131 项通过、9 项 Docker 专项跳过）已完成。硬约束、Docker SSH 和中文界面截图仍在本切片收尾验证。
 
 2026-10-25，Windows/MSVC：保存主机认证交互修正并准备发布 `v0.1.19`。侧栏主机行点击和连接图标统一进入自动连接流程：本次运行已有凭据时直接复用，没有凭据时只弹出密码、私钥口令或跳板凭据窗口，编辑仍由设置图标进入属性。认证失败会清除错误缓存并重新弹窗，取消会删除失败会话，不再留下“未连接”条目或回到属性窗口。凭据仍只保存在 `Zeroizing` 内存中，不写入主机资料、设置或日志。`cargo fmt --all`、`cargo check --locked --all-targets --offline` 和 `cargo test --locked --offline`（129 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）已完成。新构建中文认证弹窗截图为 `artifacts/dshell-v0.1.19-auth-dialog-cn.png`；密码输入、错误重试和成功后缓存复用仍需用户手工操作，DPI/IME/字形像素对齐继续按策略人工检查。

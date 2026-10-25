@@ -175,6 +175,7 @@ pub enum TerminalRequest {
     },
     RefreshServerMetrics,
     RefreshServerProcesses,
+    RefreshServerServices,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

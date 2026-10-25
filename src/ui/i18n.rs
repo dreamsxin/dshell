@@ -97,6 +97,31 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Processes" => "进程",
         "processes" => "个进程",
         "Top CPU" => "CPU 占用最高",
+        "Services" => "服务",
+        "Collecting service status..." => "正在采集服务状态……",
+        "No services reported yet." => "尚未获取服务状态。",
+        "Connect to the server before refreshing services." => "请先连接服务器，再刷新服务状态。",
+        "Timed out waiting for server services." => "等待服务器服务状态超时。",
+        "The remote host did not return a supported service response." => {
+            "远端主机未返回受支持的服务响应。"
+        }
+        "The remote host returned a malformed service row." => "远端主机返回了格式错误的服务行。",
+        "The remote host returned an invalid service row." => "远端主机返回了无效的服务行。",
+        "The remote host returned too many service rows." => "远端主机返回了过多服务行。",
+        "The server service response was too large." => "服务器服务响应过大。",
+        "Server alerts" => "服务器告警",
+        "CPU alert threshold (%)" => "CPU 告警阈值（%）",
+        "Memory alert threshold (%)" => "内存告警阈值（%）",
+        "Disk alert threshold (%)" => "磁盘告警阈值（%）",
+        "Values at or above a threshold show a warning in the server inspector." => {
+            "达到或超过阈值时，服务器检查器会显示警告。"
+        }
+        "Alert thresholds must be whole percentages from 1 to 100." => {
+            "告警阈值必须是 1 到 100 的整数百分比。"
+        }
+        "CPU threshold exceeded." => "CPU 已超过告警阈值。",
+        "Memory threshold exceeded." => "内存已超过告警阈值。",
+        "Disk threshold exceeded." => "磁盘已超过告警阈值。",
         "Refreshing..." => "刷新中……",
         "Collecting server metrics..." => "正在采集服务器指标……",
         "No server metrics collected yet." => "尚未采集服务器指标。",
@@ -893,6 +918,11 @@ mod tests {
             "检查器"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "Processes"), "进程");
+        assert_eq!(translate(Language::SimplifiedChinese, "Services"), "服务");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Server alerts"),
+            "服务器告警"
+        );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Collecting process list..."),
             "正在采集进程列表……"

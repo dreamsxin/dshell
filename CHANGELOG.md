@@ -2,6 +2,28 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.21] - 2026-10-25
+
+Adds service status and configurable threshold warnings to the server inspector.
+
+### Added
+
+- Add a Services inspector group with systemd parsing and a `service --status-all`
+  fallback for hosts without systemd.
+- Add persisted CPU, memory and root-disk alert thresholds with validation and
+  warning states in the server inspector.
+- Add bounded service parsing, threshold validation, Simplified Chinese labels
+  and malformed-response coverage.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (134 passed, 9 Docker-only ignored).
+- `scripts\verify-hard-constraints.ps1` passed; `scripts\test-docker-ssh.ps1`
+  passed all 9 Docker SSH tests. Services fallback was also exercised in the
+  local `127.0.0.1:2222` container.
+
 ## [0.1.20] - 2026-10-25
 
 Adds a bounded read-only process list to the connected-server inspector.

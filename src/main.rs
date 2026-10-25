@@ -53,7 +53,7 @@ use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerMetrics, ServerProcess, UiEvent,
+    ServerDataError, ServerMetrics, ServerProcess, ServerService, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -673,6 +673,14 @@ fn memory_usage_percent(total_kib: Option<u64>, available_kib: Option<u64>) -> O
     )
 }
 
+fn parse_alert_percent(value: &str) -> Option<u8> {
+    value
+        .trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|value| (1..=100).contains(value))
+}
+
 fn format_unix_timestamp(value: Option<u32>) -> String {
     value.map_or_else(String::new, |value| value.to_string())
 }
@@ -887,6 +895,9 @@ struct ServerMetricsViewState {
     processes: Vec<ServerProcess>,
     processes_loading: bool,
     processes_message: String,
+    services: Vec<ServerService>,
+    services_loading: bool,
+    services_message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -991,6 +1002,11 @@ impl SshSession {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message.clear();
             }
+            UiEvent::ServerMetrics(ServerData::Services(services)) => {
+                self.server_metrics.services = services;
+                self.server_metrics.services_loading = false;
+                self.server_metrics.services_message.clear();
+            }
             UiEvent::ServerMetricsError(ServerDataError::Metrics(error)) => {
                 self.server_metrics.loading = false;
                 self.server_metrics.message = error;
@@ -998,6 +1014,10 @@ impl SshSession {
             UiEvent::ServerMetricsError(ServerDataError::Processes(error)) => {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message = error;
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Services(error)) => {
+                self.server_metrics.services_loading = false;
+                self.server_metrics.services_message = error;
             }
             UiEvent::Screen(frame) => {
                 self.frame = Some(frame);
@@ -1137,11 +1157,12 @@ mod session_tests {
         enqueue_session_request, filesystem_usage_percent, forget_stopped_forward, format_log_time,
         format_rate, is_authentication_failure, is_sftp_transfer_command, keyword_matches,
         memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
-        recall_compose_history, remember_compose_history, remember_stopped_forward,
-        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
-        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
-        session_matches_target, session_terminal_size_for_split, split_panel_terminal_size,
-        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport, watch,
+        parse_alert_percent, recall_compose_history, remember_compose_history,
+        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
+        reorder_group_order, reorder_session_ids, search_result_message, session_editor_escape,
+        session_editor_key, session_matches_target, session_terminal_size_for_split,
+        split_panel_terminal_size, synchronized_targets, take_next_sftp_transfer,
+        terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1252,6 +1273,16 @@ mod session_tests {
         assert!(!is_authentication_failure(
             "Server key is not present in known_hosts"
         ));
+    }
+
+    #[test]
+    fn alert_thresholds_accept_only_integer_percentages() {
+        assert_eq!(parse_alert_percent("80"), Some(80));
+        assert_eq!(parse_alert_percent(" 1 "), Some(1));
+        assert_eq!(parse_alert_percent("100"), Some(100));
+        assert_eq!(parse_alert_percent("0"), None);
+        assert_eq!(parse_alert_percent("101"), None);
+        assert_eq!(parse_alert_percent("80.5"), None);
     }
 
     #[test]
@@ -2035,6 +2066,7 @@ struct AppView {
     inspector_info_open: bool,
     inspector_server_open: bool,
     inspector_processes_open: bool,
+    inspector_services_open: bool,
     inspector_log_open: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
@@ -2127,6 +2159,9 @@ struct AppView {
     settings_store: Option<SettingsStore>,
     settings_font_family: Entity<InputState>,
     settings_font_size: Entity<InputState>,
+    settings_alert_cpu: Entity<InputState>,
+    settings_alert_memory: Entity<InputState>,
+    settings_alert_disk: Entity<InputState>,
     settings_theme: TerminalTheme,
     settings_cursor: CursorStyle,
     settings_language: Language,
@@ -2231,6 +2266,15 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).default_value(settings.font_family.clone()));
         let settings_font_size =
             cx.new(|cx| InputState::new(window, cx).default_value(settings.font_size.to_string()));
+        let settings_alert_cpu = cx.new(|cx| {
+            InputState::new(window, cx).default_value(settings.alert_cpu_percent.to_string())
+        });
+        let settings_alert_memory = cx.new(|cx| {
+            InputState::new(window, cx).default_value(settings.alert_memory_percent.to_string())
+        });
+        let settings_alert_disk = cx.new(|cx| {
+            InputState::new(window, cx).default_value(settings.alert_disk_percent.to_string())
+        });
         let auth_prompt_inputs: Vec<Entity<InputState>> = (0..MAX_AUTH_PROMPTS)
             .map(|index| {
                 let input = cx.new(|cx| {
@@ -2336,6 +2380,7 @@ impl AppView {
             inspector_info_open: true,
             inspector_server_open: true,
             inspector_processes_open: true,
+            inspector_services_open: true,
             inspector_log_open: true,
             profile_name,
             profile_search,
@@ -2432,6 +2477,9 @@ impl AppView {
             settings_store,
             settings_font_family,
             settings_font_size,
+            settings_alert_cpu,
+            settings_alert_memory,
+            settings_alert_disk,
             settings_message,
             settings_visible: false,
             keys_visible: false,
@@ -9037,6 +9085,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_server_services(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing services.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.services_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.services_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        if let Err(error) = command_tx.try_send(TerminalRequest::RefreshServerServices) {
+            session.server_metrics.services_message = match error {
+                mpsc::error::TrySendError::Full(_) => queue_full,
+                mpsc::error::TrySendError::Closed(_) => not_accepting,
+            };
+            session.server_metrics.services_loading = false;
+        } else {
+            session.server_metrics.services_loading = true;
+            session.server_metrics.services_message.clear();
+        }
+        cx.notify();
+    }
+
     fn keywords_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = self.tokens();
         let keywords = self.keyword_highlights.clone();
@@ -11136,6 +11214,30 @@ impl AppView {
             cx.notify();
             return;
         };
+        let Some(alert_cpu_percent) =
+            parse_alert_percent(&self.settings_alert_cpu.read(cx).value())
+        else {
+            self.settings_message =
+                "Alert thresholds must be whole percentages from 1 to 100.".to_owned();
+            cx.notify();
+            return;
+        };
+        let Some(alert_memory_percent) =
+            parse_alert_percent(&self.settings_alert_memory.read(cx).value())
+        else {
+            self.settings_message =
+                "Alert thresholds must be whole percentages from 1 to 100.".to_owned();
+            cx.notify();
+            return;
+        };
+        let Some(alert_disk_percent) =
+            parse_alert_percent(&self.settings_alert_disk.read(cx).value())
+        else {
+            self.settings_message =
+                "Alert thresholds must be whole percentages from 1 to 100.".to_owned();
+            cx.notify();
+            return;
+        };
         let mut shortcuts = ShortcutSettings::default();
         for (index, action) in ShortcutAction::ALL.iter().enumerate() {
             let action = *action;
@@ -11186,6 +11288,9 @@ impl AppView {
             collapsed_groups: self.settings.collapsed_groups.clone(),
             group_order: self.settings.group_order.clone(),
             group_names: self.settings.group_names.clone(),
+            alert_cpu_percent,
+            alert_memory_percent,
+            alert_disk_percent,
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -11223,6 +11328,24 @@ impl AppView {
         Self::set_input_value(
             &self.settings_font_size,
             &self.settings.font_size.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.settings_alert_cpu,
+            &self.settings.alert_cpu_percent.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.settings_alert_memory,
+            &self.settings.alert_memory_percent.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.settings_alert_disk,
+            &self.settings.alert_disk_percent.to_string(),
             window,
             cx,
         );
@@ -11275,6 +11398,24 @@ impl AppView {
         Self::set_input_value(
             &self.settings_font_size,
             &self.settings.font_size.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.settings_alert_cpu,
+            &self.settings.alert_cpu_percent.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.settings_alert_memory,
+            &self.settings.alert_memory_percent.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.settings_alert_disk,
+            &self.settings.alert_disk_percent.to_string(),
             window,
             cx,
         );
@@ -11602,6 +11743,40 @@ impl AppView {
                         &self.settings_font_size,
                         false,
                     ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(components::section_label(
+                                &tokens,
+                                self.tr("Server alerts"),
+                            ))
+                            .child(components::field(
+                                &tokens,
+                                self.tr("CPU alert threshold (%)"),
+                                &self.settings_alert_cpu,
+                                false,
+                            ))
+                            .child(components::field(
+                                &tokens,
+                                self.tr("Memory alert threshold (%)"),
+                                &self.settings_alert_memory,
+                                false,
+                            ))
+                            .child(components::field(
+                                &tokens,
+                                self.tr("Disk alert threshold (%)"),
+                                &self.settings_alert_disk,
+                                false,
+                            ))
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr(
+                                    "Values at or above a threshold show a warning in the server inspector.",
+                                ),
+                            )),
+                    )
                     .child(
                         div()
                             .flex()
@@ -13934,6 +14109,12 @@ impl AppView {
         let server_processes = server_metrics.processes.clone();
         let processes_loading = server_metrics.processes_loading;
         let processes_message = server_metrics.processes_message.clone();
+        let server_services = server_metrics.services.clone();
+        let services_loading = server_metrics.services_loading;
+        let services_message = server_metrics.services_message.clone();
+        let alert_cpu_percent = self.settings.alert_cpu_percent;
+        let alert_memory_percent = self.settings.alert_memory_percent;
+        let alert_disk_percent = self.settings.alert_disk_percent;
         let profile = session
             .profile_name
             .as_ref()
@@ -14421,6 +14602,29 @@ impl AppView {
                             .map(format_uptime)
                             .unwrap_or_else(|| self.tr("Unavailable")),
                     ));
+                let memory_percent =
+                    memory_usage_percent(metrics.memory_total_kib, metrics.memory_available_kib);
+                let mut alerts = Vec::new();
+                if memory_percent.is_some_and(|value| value >= alert_memory_percent) {
+                    alerts.push(self.tr("Memory threshold exceeded."));
+                }
+                if metrics
+                    .disk_use_percent
+                    .is_some_and(|value| value >= alert_disk_percent)
+                {
+                    alerts.push(self.tr("Disk threshold exceeded."));
+                }
+                if let Some(max_cpu) = server_processes
+                    .iter()
+                    .map(|process| process.cpu_percent)
+                    .reduce(f32::max)
+                    && max_cpu >= f32::from(alert_cpu_percent)
+                {
+                    alerts.push(self.tr("CPU threshold exceeded."));
+                }
+                for alert in alerts {
+                    group = group.child(components::warning_text(tokens, alert));
+                }
             } else if server_metrics.loading {
                 group = group.child(components::help_text(
                     tokens,
@@ -14549,6 +14753,104 @@ impl AppView {
                                     .text_size(px(ui_tokens::FONT_CAPTION))
                                     .text_color(tokens.text_secondary)
                                     .child(process.command),
+                            ),
+                    );
+                }
+            }
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-services",
+                self.tr("Services"),
+                self.inspector_services_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_services_open = !this.inspector_services_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_services_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let refresh_label = if services_loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            group = group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-services", session_id),
+                    refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(services_loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_services(session_id, cx);
+                })),
+            );
+            if server_services.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if services_loading {
+                        self.tr("Collecting service status...")
+                    } else if services_message.is_empty() {
+                        self.tr("No services reported yet.")
+                    } else {
+                        self.tr(&services_message)
+                    },
+                ));
+            } else {
+                for service in server_services {
+                    let status = format!("{} / {}", service.active, service.sub);
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_primary)
+                                            .child(service.name),
+                                    )
+                                    .child(components::pill(
+                                        tokens,
+                                        status,
+                                        if service.active == "active" {
+                                            Tone::Success
+                                        } else {
+                                            Tone::Warning
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(service.description),
                             ),
                     );
                 }

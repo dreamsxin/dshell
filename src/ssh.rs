@@ -115,14 +115,25 @@ pub struct ServerProcess {
     pub command: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerService {
+    pub name: String,
+    pub load: String,
+    pub active: String,
+    pub sub: String,
+    pub description: String,
+}
+
 pub enum ServerData {
     Metrics(ServerMetrics),
     Processes(Vec<ServerProcess>),
+    Services(Vec<ServerService>),
 }
 
 pub enum ServerDataError {
     Metrics(String),
     Processes(String),
+    Services(String),
 }
 
 fn connection_info_for_key(key: &PublicKey) -> ConnectionInfo {
@@ -636,6 +647,9 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::RefreshServerProcesses) => {
                         refresh_server_processes(&mut session, &events).await;
                     }
+                    Some(TerminalRequest::RefreshServerServices) => {
+                        refresh_server_services(&mut session, &events).await;
+                    }
                     None => break,
                 }
             }
@@ -881,6 +895,8 @@ const SERVER_METRICS_COMMAND: &str = r##"printf 'DSHELL_METRICS_V1\n'; printf 'O
 const SERVER_PROCESSES_COMMAND: &str = r##"printf 'DSHELL_PROCESSES_V1\n'; ps -eo pid=,user=,pcpu=,pmem=,stat=,args= --sort=-pcpu 2>/dev/null | head -n 50 | awk '{pid=$1; user=$2; cpu=$3; mem=$4; state=$5; $1=$2=$3=$4=$5=""; sub(/^[ \t]+/, ""); print "PROC\t" pid "\t" user "\t" cpu "\t" mem "\t" state "\t" $0}'"##;
 const MAX_SERVER_PROCESSES: usize = 50;
 
+const SERVER_SERVICES_COMMAND: &str = r##"if command -v systemctl >/dev/null 2>&1; then services=$(systemctl list-units --type=service --all --no-legend --no-pager 2>/dev/null); if [ $? -eq 0 ] && [ -n "$services" ]; then printf 'DSHELL_SERVICES_V1\n'; printf '%s\n' "$services" | head -n 50 | awk '{unit=$1; load=$2; active=$3; sub=$4; $1=$2=$3=$4=""; sub(/^[ \t]+/, ""); print "SERVICE\t" unit "\t" load "\t" active "\t" sub "\t" $0}'; exit 0; fi; fi; if command -v service >/dev/null 2>&1; then printf 'DSHELL_SERVICES_V1\n'; service --status-all 2>&1 | head -n 50 | awk '$2 == "+" || $2 == "-" || $2 == "?" {mark=$2; name=$4; active=(mark == "+") ? "active" : ((mark == "-") ? "inactive" : "unknown"); print "SERVICE\t" name "\tloaded\t" active "\t" active "\t" $0}'; exit 0; fi; printf 'DSHELL_SERVICES_V1\n'"##;
+
 fn metric_value<'a>(lines: &'a str, key: &str) -> Option<&'a str> {
     lines
         .lines()
@@ -1040,6 +1056,39 @@ fn parse_server_processes(output: &str) -> Result<Vec<ServerProcess>> {
     Ok(processes)
 }
 
+fn parse_server_services(output: &str) -> Result<Vec<ServerService>> {
+    if !output
+        .lines()
+        .any(|line| line.trim() == "DSHELL_SERVICES_V1")
+    {
+        bail!("The remote host did not return a supported service response.");
+    }
+    let mut services = Vec::new();
+    for line in output.lines() {
+        let Some(fields) = line.strip_prefix("SERVICE\t") else {
+            continue;
+        };
+        let fields = fields.splitn(5, '\t').collect::<Vec<_>>();
+        if fields.len() != 5 {
+            bail!("The remote host returned a malformed service row.");
+        }
+        if fields[..4].iter().any(|field| field.trim().is_empty()) {
+            bail!("The remote host returned an invalid service row.");
+        }
+        if services.len() >= 50 {
+            bail!("The remote host returned too many service rows.");
+        }
+        services.push(ServerService {
+            name: fields[0].trim().to_owned(),
+            load: fields[1].trim().to_owned(),
+            active: fields[2].trim().to_owned(),
+            sub: fields[3].trim().to_owned(),
+            description: fields[4].trim().to_owned(),
+        });
+    }
+    Ok(services)
+}
+
 async fn refresh_server_processes(
     session: &mut client::Handle<KnownHostsHandler>,
     events: &mpsc::Sender<UiEvent>,
@@ -1084,6 +1133,56 @@ async fn refresh_server_processes(
             let _ = events
                 .send(UiEvent::ServerMetricsError(ServerDataError::Processes(
                     "Timed out waiting for server processes.".to_owned(),
+                )))
+                .await;
+        }
+    }
+}
+
+async fn refresh_server_services(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a server service channel")?;
+        channel
+            .exec(true, SERVER_SERVICES_COMMAND)
+            .await
+            .context("could not start the server service command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the server service response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server service response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_server_services(&output)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(services)) => {
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::Services(services)))
+                .await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Services(
+                    format!("{error:#}"),
+                )))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Services(
+                    "Timed out waiting for server services.".to_owned(),
                 )))
                 .await;
         }
@@ -1371,7 +1470,7 @@ mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, UiEvent, can_answer_with_password,
         connection_info_for_key, is_known_host_key, parse_server_metrics, parse_server_processes,
-        run_connection_with_known_hosts,
+        parse_server_services, run_connection_with_known_hosts,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -1494,6 +1593,30 @@ mod tests {
             too_many.push_str(&format!("PROC\t{pid}\troot\t0.0\t0.0\tS\tprocess-{pid}\n"));
         }
         assert!(parse_server_processes(&too_many).is_err());
+    }
+
+    #[test]
+    fn server_service_parser_reads_systemd_and_legacy_rows() {
+        let services = parse_server_services(
+            "DSHELL_SERVICES_V1\nSERVICE\tssh.service\tloaded\tactive\trunning\tOpenSSH server daemon\nSERVICE\tcron\tloaded\tinactive\tinactive\tcron scheduler\n",
+        )
+        .unwrap();
+        assert_eq!(services.len(), 2);
+        assert_eq!(services[0].name, "ssh.service");
+        assert_eq!(services[0].active, "active");
+        assert_eq!(services[1].description, "cron scheduler");
+    }
+
+    #[test]
+    fn server_service_parser_rejects_missing_marker_and_bad_rows() {
+        assert!(parse_server_services("SERVICE\tssh\tloaded\tactive\trunning\tssh\n").is_err());
+        assert!(
+            parse_server_services("DSHELL_SERVICES_V1\nSERVICE\tssh\tloaded\tactive\n").is_err()
+        );
+        assert!(
+            parse_server_services("DSHELL_SERVICES_V1\nSERVICE\t\tloaded\tactive\trunning\tssh\n")
+                .is_err()
+        );
     }
 
     #[test]

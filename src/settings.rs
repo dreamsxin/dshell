@@ -20,6 +20,9 @@ pub const MIN_FONT_SIZE: f32 = 9.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub const DEFAULT_FONT_FAMILY: &str = "monospace";
+pub const DEFAULT_ALERT_CPU_PERCENT: u8 = 80;
+pub const DEFAULT_ALERT_MEMORY_PERCENT: u8 = 80;
+pub const DEFAULT_ALERT_DISK_PERCENT: u8 = 90;
 const MAX_COLLAPSED_GROUPS: usize = 128;
 pub const MAX_GROUP_NAME_CHARS: usize = 120;
 
@@ -52,6 +55,12 @@ pub struct AppSettings {
     pub group_order: Vec<String>,
     #[serde(default)]
     pub group_names: Vec<String>,
+    #[serde(default = "default_alert_cpu_percent")]
+    pub alert_cpu_percent: u8,
+    #[serde(default = "default_alert_memory_percent")]
+    pub alert_memory_percent: u8,
+    #[serde(default = "default_alert_disk_percent")]
+    pub alert_disk_percent: u8,
 }
 
 impl Default for AppSettings {
@@ -70,6 +79,9 @@ impl Default for AppSettings {
             collapsed_groups: Vec::new(),
             group_order: Vec::new(),
             group_names: Vec::new(),
+            alert_cpu_percent: DEFAULT_ALERT_CPU_PERCENT,
+            alert_memory_percent: DEFAULT_ALERT_MEMORY_PERCENT,
+            alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
         }
     }
 }
@@ -105,6 +117,18 @@ impl AppSettings {
             collapsed_groups: normalize_collapsed_groups(self.collapsed_groups),
             group_order: normalize_group_order(self.group_order),
             group_names: normalize_group_names(self.group_names),
+            alert_cpu_percent: normalize_alert_percent(
+                self.alert_cpu_percent,
+                DEFAULT_ALERT_CPU_PERCENT,
+            ),
+            alert_memory_percent: normalize_alert_percent(
+                self.alert_memory_percent,
+                DEFAULT_ALERT_MEMORY_PERCENT,
+            ),
+            alert_disk_percent: normalize_alert_percent(
+                self.alert_disk_percent,
+                DEFAULT_ALERT_DISK_PERCENT,
+            ),
         }
     }
 
@@ -147,6 +171,12 @@ struct SettingsDocument {
     group_order: Vec<String>,
     #[serde(default)]
     group_names: Vec<String>,
+    #[serde(default = "default_alert_cpu_percent")]
+    alert_cpu_percent: u8,
+    #[serde(default = "default_alert_memory_percent")]
+    alert_memory_percent: u8,
+    #[serde(default = "default_alert_disk_percent")]
+    alert_disk_percent: u8,
 }
 
 pub struct SettingsStore {
@@ -222,6 +252,9 @@ impl SettingsStore {
             collapsed_groups: document.collapsed_groups,
             group_order: document.group_order,
             group_names: document.group_names,
+            alert_cpu_percent: document.alert_cpu_percent,
+            alert_memory_percent: document.alert_memory_percent,
+            alert_disk_percent: document.alert_disk_percent,
         }
         .normalized())
     }
@@ -253,6 +286,9 @@ impl SettingsStore {
             collapsed_groups: settings.collapsed_groups,
             group_order: settings.group_order,
             group_names: settings.group_names,
+            alert_cpu_percent: settings.alert_cpu_percent,
+            alert_memory_percent: settings.alert_memory_percent,
+            alert_disk_percent: settings.alert_disk_percent,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -266,6 +302,26 @@ impl SettingsStore {
 
 fn default_font_size() -> f32 {
     DEFAULT_FONT_SIZE
+}
+
+fn default_alert_cpu_percent() -> u8 {
+    DEFAULT_ALERT_CPU_PERCENT
+}
+
+fn default_alert_memory_percent() -> u8 {
+    DEFAULT_ALERT_MEMORY_PERCENT
+}
+
+fn default_alert_disk_percent() -> u8 {
+    DEFAULT_ALERT_DISK_PERCENT
+}
+
+fn normalize_alert_percent(value: u8, default: u8) -> u8 {
+    if value == 0 {
+        default
+    } else {
+        value.clamp(1, 100)
+    }
 }
 
 fn default_font_family() -> String {
@@ -377,6 +433,9 @@ mod tests {
                 "production".to_owned(),
                 "QA".to_owned(),
             ],
+            alert_cpu_percent: 75,
+            alert_memory_percent: 82,
+            alert_disk_percent: 91,
         };
         store.save(&settings).unwrap();
         assert_eq!(
@@ -391,6 +450,10 @@ mod tests {
             store.load().unwrap().group_names,
             vec!["Production".to_owned(), "QA".to_owned()]
         );
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.alert_cpu_percent, 75);
+        assert_eq!(loaded.alert_memory_percent, 82);
+        assert_eq!(loaded.alert_disk_percent, 91);
 
         store
             .save(&AppSettings {
@@ -407,6 +470,9 @@ mod tests {
                 collapsed_groups: Vec::new(),
                 group_order: Vec::new(),
                 group_names: Vec::new(),
+                alert_cpu_percent: 0,
+                alert_memory_percent: 101,
+                alert_disk_percent: 0,
             })
             .unwrap();
         let loaded = store.load().unwrap();
@@ -414,6 +480,9 @@ mod tests {
         assert_eq!(loaded.font_family, DEFAULT_FONT_FAMILY);
         assert_eq!(loaded.sidebar_width, SIDEBAR_MIN_WIDTH);
         assert_eq!(loaded.inspector_width, INSPECTOR_MAX_WIDTH);
+        assert_eq!(loaded.alert_cpu_percent, DEFAULT_ALERT_CPU_PERCENT);
+        assert_eq!(loaded.alert_memory_percent, 100);
+        assert_eq!(loaded.alert_disk_percent, DEFAULT_ALERT_DISK_PERCENT);
     }
 
     #[test]
@@ -436,6 +505,9 @@ mod tests {
         assert!(loaded.collapsed_groups.is_empty());
         assert!(loaded.group_order.is_empty());
         assert!(loaded.group_names.is_empty());
+        assert_eq!(loaded.alert_cpu_percent, DEFAULT_ALERT_CPU_PERCENT);
+        assert_eq!(loaded.alert_memory_percent, DEFAULT_ALERT_MEMORY_PERCENT);
+        assert_eq!(loaded.alert_disk_percent, DEFAULT_ALERT_DISK_PERCENT);
     }
 
     #[test]
@@ -454,6 +526,9 @@ mod tests {
             collapsed_groups: Vec::new(),
             group_order: Vec::new(),
             group_names: Vec::new(),
+            alert_cpu_percent: DEFAULT_ALERT_CPU_PERCENT,
+            alert_memory_percent: DEFAULT_ALERT_MEMORY_PERCENT,
+            alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);

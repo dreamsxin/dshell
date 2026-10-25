@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.20`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.21`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -65,13 +65,15 @@ and prints a generated username, password, SHA256 host-key fingerprint and the
 `known_hosts` line for review. Add that line manually only after checking the
 fingerprint; stop the service with `docker rm --force dshell-ssh-manual`.
 
-The inspector includes `Server health` and `Processes` groups for connected
-sessions. Press `Refresh` to run short read-only commands through separate SSH
-exec channels and display the remote OS, kernel, load average, memory, root
-filesystem usage, uptime and a bounded list of processes with PID, user, CPU,
-memory, state and command. Probe output stays in the current session memory and
-is not added to the terminal stream, session log or host profile. Each probe has
-a three-second timeout and a 64 KiB response limit.
+The inspector includes `Server health`, `Processes` and `Services` groups for
+connected sessions. Press `Refresh` to run short read-only commands through
+separate SSH exec channels and display the remote OS, kernel, load average,
+memory, root filesystem usage, uptime, a bounded process list, and service
+states. Probe output stays in the current session memory and is not added to the
+terminal stream, session log or host profile. Each probe has a three-second
+timeout and a 64 KiB response limit. Server alert thresholds for process CPU,
+memory use and root-disk use are configurable in Settings and persist in the
+versioned settings file.
 
 Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
 active session. Remote exit and connection failure clear the terminal view so a
