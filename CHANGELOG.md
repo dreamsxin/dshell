@@ -2,6 +2,25 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.30] - 2026-10-25
+
+Adds logged-in session inspection to the server inspector.
+
+### Added
+
+- Add a Logged-in sessions group that reads up to 32 rows from the remote
+  `who` command through a bounded SSH exec channel.
+- Display user, terminal, login time and source address with loading, empty
+  and failure states; keep results in the current session.
+- Add Simplified Chinese labels and bounded parser/failure-path tests.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets` and
+  `cargo test --locked` (150 passed, 9 Docker-only ignored).
+- Hard-constraint verification passed; Docker SSH integration passed 9/9.
+
 ## [0.1.29] - 2026-10-25
 
 Adds remote listening-port inspection to the server inspector.

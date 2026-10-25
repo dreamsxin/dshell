@@ -54,7 +54,8 @@ use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
     ServerDataError, ServerListener, ServerMetrics, ServerMount, ServerNetworkInterface,
-    ServerPowerAction, ServerProcess, ServerService, ServerServiceLogs, ServiceAction, UiEvent,
+    ServerPowerAction, ServerProcess, ServerService, ServerServiceLogs, ServerSession,
+    ServiceAction, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -967,6 +968,9 @@ struct ServerMetricsViewState {
     listeners: Vec<ServerListener>,
     listeners_loading: bool,
     listeners_message: String,
+    sessions: Vec<ServerSession>,
+    sessions_loading: bool,
+    sessions_message: String,
     service_logs: Option<ServerServiceLogs>,
     service_logs_loading: bool,
     service_logs_message: String,
@@ -1123,6 +1127,11 @@ impl SshSession {
                 self.server_metrics.listeners_loading = false;
                 self.server_metrics.listeners_message.clear();
             }
+            UiEvent::ServerMetrics(ServerData::Sessions(sessions)) => {
+                self.server_metrics.sessions = sessions;
+                self.server_metrics.sessions_loading = false;
+                self.server_metrics.sessions_message.clear();
+            }
             UiEvent::ServerMetrics(ServerData::ProcessAction(result)) => {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message = result.message;
@@ -1163,6 +1172,10 @@ impl SshSession {
             UiEvent::ServerMetricsError(ServerDataError::Listeners(error)) => {
                 self.server_metrics.listeners_loading = false;
                 self.server_metrics.listeners_message = error;
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Sessions(error)) => {
+                self.server_metrics.sessions_loading = false;
+                self.server_metrics.sessions_message = error;
             }
             UiEvent::ServerMetricsError(ServerDataError::Services(error)) => {
                 self.server_metrics.services_loading = false;
@@ -2295,6 +2308,7 @@ struct AppView {
     inspector_network_open: bool,
     inspector_storage_open: bool,
     inspector_listeners_open: bool,
+    inspector_sessions_open: bool,
     pending_process_termination: Option<(u64, u32)>,
     inspector_services_open: bool,
     pending_service_action: Option<(u64, String, ServiceAction)>,
@@ -2615,6 +2629,7 @@ impl AppView {
             inspector_network_open: true,
             inspector_storage_open: true,
             inspector_listeners_open: true,
+            inspector_sessions_open: true,
             pending_process_termination: None,
             inspector_services_open: true,
             pending_service_action: None,
@@ -9554,6 +9569,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_server_sessions(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing logged-in sessions.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.sessions_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.sessions_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        if let Err(error) = command_tx.try_send(TerminalRequest::RefreshServerSessions) {
+            session.server_metrics.sessions_message = match error {
+                mpsc::error::TrySendError::Full(_) => queue_full,
+                mpsc::error::TrySendError::Closed(_) => not_accepting,
+            };
+            session.server_metrics.sessions_loading = false;
+        } else {
+            session.server_metrics.sessions_loading = true;
+            session.server_metrics.sessions_message.clear();
+        }
+        cx.notify();
+    }
+
     fn request_process_termination(&mut self, session_id: u64, pid: u32, cx: &mut Context<Self>) {
         let not_connected = self.tr("Connect to the server before terminating a process.");
         if self
@@ -15038,6 +15083,9 @@ impl AppView {
         let listeners = server_metrics.listeners.clone();
         let listeners_loading = server_metrics.listeners_loading;
         let listeners_message = server_metrics.listeners_message.clone();
+        let sessions = server_metrics.sessions.clone();
+        let sessions_loading = server_metrics.sessions_loading;
+        let sessions_message = server_metrics.sessions_message.clone();
         let server_services = server_metrics.services.clone();
         let services_loading = server_metrics.services_loading;
         let services_message = server_metrics.services_message.clone();
@@ -15850,6 +15898,95 @@ impl AppView {
                                     )),
                             )
                             .child(components::help_text(tokens, listener.process)),
+                    );
+                }
+            }
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-sessions",
+                self.tr("Logged-in sessions"),
+                self.inspector_sessions_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_sessions_open = !this.inspector_sessions_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_sessions_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let refresh_label = if sessions_loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            group = group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-sessions", session_id),
+                    refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(sessions_loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_sessions(session_id, cx);
+                })),
+            );
+            if sessions.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if sessions_loading {
+                        self.tr("Collecting logged-in sessions...")
+                    } else if sessions_message.is_empty() {
+                        self.tr("No logged-in sessions reported yet.")
+                    } else {
+                        self.tr(&sessions_message)
+                    },
+                ));
+            } else {
+                for logged_in in sessions {
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_primary)
+                                            .child(logged_in.user),
+                                    )
+                                    .child(components::pill(
+                                        tokens,
+                                        logged_in.terminal,
+                                        Tone::Neutral,
+                                    )),
+                            )
+                            .child(components::help_text(
+                                tokens,
+                                format!("{} · {}", logged_in.login_time, logged_in.source),
+                            )),
                     );
                 }
             }

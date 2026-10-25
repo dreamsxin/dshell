@@ -140,6 +140,14 @@ pub struct ServerListener {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ServerSession {
+    pub user: String,
+    pub terminal: String,
+    pub login_time: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerProcessActionResult {
     pub pid: u32,
     pub success: bool,
@@ -222,6 +230,7 @@ pub enum ServerData {
     Network(Vec<ServerNetworkInterface>),
     Storage(Vec<ServerMount>),
     Listeners(Vec<ServerListener>),
+    Sessions(Vec<ServerSession>),
     ProcessAction(ServerProcessActionResult),
     Services(Vec<ServerService>),
     ServiceAction(ServerServiceActionResult),
@@ -235,6 +244,7 @@ pub enum ServerDataError {
     Network(String),
     Storage(String),
     Listeners(String),
+    Sessions(String),
     Services(String),
     ServiceLogs(String),
 }
@@ -759,6 +769,9 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::RefreshServerListeners) => {
                         refresh_server_listeners(&mut session, &events).await;
                     }
+                    Some(TerminalRequest::RefreshServerSessions) => {
+                        refresh_server_sessions(&mut session, &events).await;
+                    }
                     Some(TerminalRequest::TerminateServerProcess { pid }) => {
                         terminate_server_process(&mut session, &events, pid).await;
                     }
@@ -1027,6 +1040,9 @@ const MAX_SERVER_MOUNTS: usize = 32;
 
 const SERVER_LISTENERS_COMMAND: &str = r##"printf 'DSHELL_LISTENERS_V1\n'; if command -v ss >/dev/null 2>&1; then ss -H -lntup 2>/dev/null | head -n 64 | awk '{process=$7; if (process == "") process="process unavailable"; print "LISTENER\t" $1 "\t" $5 "\t" process}'; elif command -v netstat >/dev/null 2>&1; then netstat -lntup 2>/dev/null | tail -n +3 | head -n 64 | awk '{process=$7; if (process == "") process="process unavailable"; print "LISTENER\t" $1 "\t" $4 "\t" process}'; fi"##;
 const MAX_SERVER_LISTENERS: usize = 64;
+
+const SERVER_SESSIONS_COMMAND: &str = r##"printf 'DSHELL_SESSIONS_V1\n'; if command -v who >/dev/null 2>&1; then who 2>/dev/null | head -n 32 | awk '{login=$3 " " $4; source=$5; for (i=6; i<=NF; i++) source=source " " $i; if (source == "") source="local"; print "SESSION\t" $1 "\t" $2 "\t" login "\t" source}'; fi"##;
+const MAX_SERVER_SESSIONS: usize = 32;
 
 const SERVER_SERVICES_COMMAND: &str = r##"if command -v systemctl >/dev/null 2>&1; then services=$(systemctl list-units --type=service --all --no-legend --no-pager 2>/dev/null); if [ $? -eq 0 ] && [ -n "$services" ]; then printf 'DSHELL_SERVICES_V1\n'; printf '%s\n' "$services" | head -n 50 | awk '{unit=$1; load=$2; active=$3; sub=$4; $1=$2=$3=$4=""; sub(/^[ \t]+/, ""); print "SERVICE\t" unit "\t" load "\t" active "\t" sub "\t" $0}'; exit 0; fi; fi; if command -v service >/dev/null 2>&1; then printf 'DSHELL_SERVICES_V1\n'; service --status-all 2>&1 | head -n 50 | awk '$2 == "+" || $2 == "-" || $2 == "?" {mark=$2; name=$4; active=(mark == "+") ? "active" : ((mark == "-") ? "inactive" : "unknown"); print "SERVICE\t" name "\tloaded\t" active "\t" active "\t" $0}'; exit 0; fi; printf 'DSHELL_SERVICES_V1\n'"##;
 const SERVER_SERVICE_LOG_LINES: usize = 80;
@@ -1309,6 +1325,41 @@ fn parse_server_listeners(output: &str) -> Result<Vec<ServerListener>> {
     Ok(listeners)
 }
 
+fn parse_server_sessions(output: &str) -> Result<Vec<ServerSession>> {
+    if !output
+        .lines()
+        .any(|line| line.trim() == "DSHELL_SESSIONS_V1")
+    {
+        bail!("The remote host did not return a supported session response.");
+    }
+    let mut sessions = Vec::new();
+    for line in output.lines() {
+        let Some(fields) = line.strip_prefix("SESSION\t") else {
+            continue;
+        };
+        let fields = fields.splitn(4, '\t').collect::<Vec<_>>();
+        if fields.len() != 4 {
+            bail!("The remote host returned a malformed session row.");
+        }
+        if fields.iter().any(|field| field.trim().is_empty()) {
+            bail!("The remote host returned an invalid session row.");
+        }
+        if sessions.len() >= MAX_SERVER_SESSIONS {
+            bail!("The remote host returned too many session rows.");
+        }
+        sessions.push(ServerSession {
+            user: fields[0].trim().to_owned(),
+            terminal: fields[1].trim().to_owned(),
+            login_time: fields[2].trim().to_owned(),
+            source: fields[3].trim().to_owned(),
+        });
+    }
+    if sessions.is_empty() {
+        bail!("The remote host did not expose any logged-in sessions.");
+    }
+    Ok(sessions)
+}
+
 fn parse_server_services(output: &str) -> Result<Vec<ServerService>> {
     if !output
         .lines()
@@ -1584,6 +1635,55 @@ async fn refresh_server_listeners(
             let _ = events
                 .send(UiEvent::ServerMetricsError(ServerDataError::Listeners(
                     "Timed out waiting for server listener information.".to_owned(),
+                )))
+                .await;
+        }
+    }
+}
+
+async fn refresh_server_sessions(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a server session channel")?;
+        channel
+            .exec(true, SERVER_SESSIONS_COMMAND)
+            .await
+            .context("could not start the server session command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the server session response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server session response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_server_sessions(&output)
+    })
+    .await;
+    match result {
+        Ok(Ok(sessions)) => {
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::Sessions(sessions)))
+                .await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Sessions(
+                    format!("{error:#}"),
+                )))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Sessions(
+                    "Timed out waiting for server session information.".to_owned(),
                 )))
                 .await;
         }
@@ -2281,12 +2381,13 @@ async fn flush_log(
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, MAX_SERVER_LISTENERS, MAX_SERVER_MOUNTS,
-        ServerPowerAction, ServiceAction, UiEvent, can_answer_with_password,
+        MAX_SERVER_SESSIONS, ServerPowerAction, ServiceAction, UiEvent, can_answer_with_password,
         connection_info_for_key, is_known_host_key, parse_power_action, parse_process_action,
         parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
-        parse_server_services, parse_server_storage, parse_service_action, parse_service_logs,
-        power_action_command, process_termination_command, run_connection_with_known_hosts,
-        service_action_command, service_logs_command, valid_process_pid, valid_service_name,
+        parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
+        parse_service_logs, power_action_command, process_termination_command,
+        run_connection_with_known_hosts, service_action_command, service_logs_command,
+        valid_process_pid, valid_service_name,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -2477,6 +2578,32 @@ mod tests {
             too_many.push_str(&format!("LISTENER\ttcp\t127.0.0.1:{index}\tproc-{index}\n"));
         }
         assert!(parse_server_listeners(&too_many).is_err());
+    }
+
+    #[test]
+    fn server_session_parser_reads_bounded_rows() {
+        let sessions = parse_server_sessions(
+            "DSHELL_SESSIONS_V1\nSESSION\troot\tpts/0\t2026-10-25 10:20\t(192.0.2.10)\nSESSION\tapp\tpts/1\t2026-10-25 10:21\tlocal\n",
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].user, "root");
+        assert_eq!(sessions[0].terminal, "pts/0");
+        assert!(sessions[0].source.contains("192.0.2.10"));
+    }
+
+    #[test]
+    fn server_session_parser_rejects_missing_marker_and_bad_rows() {
+        assert!(parse_server_sessions("SESSION\troot\tpts/0\ttime\tlocal\n").is_err());
+        assert!(
+            parse_server_sessions("DSHELL_SESSIONS_V1\nSESSION\t\tpts/0\ttime\tlocal\n").is_err()
+        );
+        assert!(parse_server_sessions("DSHELL_SESSIONS_V1\nSESSION\troot\tpts/0\n").is_err());
+        let mut too_many = String::from("DSHELL_SESSIONS_V1\n");
+        for index in 0..=MAX_SERVER_SESSIONS {
+            too_many.push_str(&format!("SESSION\tuser{index}\tpts/{index}\ttime\tlocal\n"));
+        }
+        assert!(parse_server_sessions(&too_many).is_err());
     }
 
     #[test]

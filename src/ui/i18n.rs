@@ -118,6 +118,12 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Connect to the server before refreshing listening ports." => {
             "请先连接服务器，再刷新监听端口。"
         }
+        "Logged-in sessions" => "登录会话",
+        "Collecting logged-in sessions..." => "正在采集登录会话……",
+        "No logged-in sessions reported yet." => "尚未获取登录会话。",
+        "Connect to the server before refreshing logged-in sessions." => {
+            "请先连接服务器，再刷新登录会话。"
+        }
         "Top CPU" => "CPU 占用最高",
         "Services" => "服务",
         "Start service" => "启动服务",
@@ -998,6 +1004,10 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Listening ports"),
             "监听端口"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Logged-in sessions"),
+            "登录会话"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "Used"), "已用");
         assert_eq!(translate(Language::SimplifiedChinese, "Free"), "可用");
