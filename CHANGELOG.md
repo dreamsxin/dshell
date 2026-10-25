@@ -2,6 +2,24 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.9] - 2026-10-25
+
+Adds persistent collapsing for host groups in the server sidebar.
+
+### Added
+
+- Collapse or expand each host group from its chevron header.
+- Persist collapsed group keys in versioned UI settings without storing credentials.
+- Load older settings files with all groups expanded and normalize group keys case-insensitively.
+- Add Simplified Chinese documentation for the new sidebar behavior.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, offline `cargo check --locked`, and `cargo test --locked --offline` (113 passed, 9 ignored) passed.
+- `scripts\test-docker-ssh.ps1`: 9 integration tests passed.
+- Real Windows DPI, Chinese IME, and sidebar interaction remain manual checks.
+
 ## [0.1.8] - 2026-10-25
 
 Adds remote filesystem capacity visibility to the SFTP workflow.

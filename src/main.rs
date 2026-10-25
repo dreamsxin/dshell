@@ -378,6 +378,10 @@ fn move_profile_to_group(profiles: &mut [HostProfile], name: &str, group: &str) 
     true
 }
 
+fn collapsed_group_key(group: &str) -> String {
+    group.trim().to_lowercase()
+}
+
 fn sort_profiles(profiles: &mut [HostProfile]) {
     profiles.sort_by(|left, right| {
         left.group
@@ -885,11 +889,11 @@ mod session_tests {
         AppShortcut, ForwardViewState, LayoutDragTarget, MouseTrackingMode, SessionEditorEscape,
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
-        dragged_panel_width, enqueue_session_request, filesystem_usage_percent,
-        forget_stopped_forward, format_log_time, format_rate, is_sftp_transfer_command,
-        keyword_matches, move_profile_to_group, mpsc, recall_compose_history,
-        remember_compose_history, remember_stopped_forward, remove_session, reorder_session_ids,
-        search_result_message, session_editor_escape, session_editor_key,
+        collapsed_group_key, dragged_panel_width, enqueue_session_request,
+        filesystem_usage_percent, forget_stopped_forward, format_log_time, format_rate,
+        is_sftp_transfer_command, keyword_matches, move_profile_to_group, mpsc,
+        recall_compose_history, remember_compose_history, remember_stopped_forward, remove_session,
+        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
         take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
@@ -1402,6 +1406,12 @@ mod session_tests {
     }
 
     #[test]
+    fn collapsed_group_keys_are_case_insensitive_and_trimmed() {
+        assert_eq!(collapsed_group_key("  Production "), "production");
+        assert_eq!(collapsed_group_key(""), "");
+    }
+
+    #[test]
     fn compose_history_is_deduplicated_bounded_and_recalled_in_order() {
         let mut history = Vec::new();
         remember_compose_history(&mut history, "one".to_owned());
@@ -1649,6 +1659,7 @@ struct AppView {
     stacked_state: Entity<ResizableState>,
     profiles: Vec<HostProfile>,
     recent: Vec<RecentConnection>,
+    collapsed_groups: HashSet<String>,
     profile_store: Option<ProfileStore>,
     profiles_ready: bool,
     selected_profile: Option<String>,
@@ -1777,6 +1788,7 @@ impl AppView {
             },
             Err(error) => (None, AppSettings::default(), error),
         };
+        let collapsed_groups = settings.collapsed_groups.iter().cloned().collect();
         ui::theme::install(cx, settings.ui_theme);
         let settings_font_family =
             cx.new(|cx| InputState::new(window, cx).default_value(settings.font_family.clone()));
@@ -1932,6 +1944,7 @@ impl AppView {
             stacked_state,
             profiles: data.profiles,
             recent: data.recent,
+            collapsed_groups,
             profile_store,
             profiles_ready,
             selected_profile: None,
@@ -3088,22 +3101,33 @@ impl AppView {
         }
     }
 
+    fn toggle_group_collapsed(&mut self, group: &str, cx: &mut Context<Self>) {
+        let key = collapsed_group_key(group);
+        if !self.collapsed_groups.insert(key.clone()) {
+            self.collapsed_groups.remove(&key);
+        }
+        self.persist_ui_preferences(cx);
+    }
+
     fn group_drop_header(
         &self,
         tokens: &ThemeTokens,
         label: impl Into<SharedString>,
         group: String,
+        open: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let drop_id: SharedString = format!("host-group-drop-{group}").into();
-        div()
-            .id(drop_id)
+        let toggle_group = group.clone();
+        components::collapsible_header(tokens, drop_id, label, open)
             .rounded(px(ui_tokens::RADIUS_CONTROL))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_group_collapsed(&toggle_group, cx);
+            }))
             .on_drop(cx.listener(move |this, data: &HostDragData, _, cx| {
                 this.move_host_to_group(&data.name, &group, cx);
             }))
             .hover(|style| style.bg(tokens.surface_overlay))
-            .child(components::section_header(tokens, label))
             .into_any_element()
     }
 
@@ -8794,6 +8818,8 @@ impl AppView {
             ui_tokens::INSPECTOR_MIN_WIDTH,
             ui_tokens::INSPECTOR_MAX_WIDTH,
         );
+        self.settings.collapsed_groups = self.collapsed_groups.iter().cloned().collect();
+        self.settings.collapsed_groups.sort();
         if let Some(store) = self.settings_store.as_ref()
             && let Err(error) = store.save(&self.settings)
         {
@@ -9427,6 +9453,7 @@ impl AppView {
             sidebar_collapsed: self.sidebar_collapsed,
             sidebar_width: self.settings.sidebar_width,
             inspector_width: self.settings.inspector_width,
+            collapsed_groups: self.settings.collapsed_groups.clone(),
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -9490,6 +9517,7 @@ impl AppView {
             cx.notify();
             return;
         }
+        self.collapsed_groups.clear();
         self.settings = settings;
         self.settings_theme = self.settings.theme;
         self.settings_cursor = self.settings.cursor_style;
@@ -10069,17 +10097,27 @@ impl AppView {
                 } else {
                     display.clone()
                 };
-                profile_list =
-                    profile_list.child(self.group_drop_header(tokens, display, group_value, cx));
-                for index in indexes {
-                    let profile = &self.profiles[index];
-                    profile_list = profile_list.child(self.saved_host_row(
-                        tokens,
-                        "group-host",
-                        index,
-                        profile,
-                        cx,
-                    ));
+                let collapsed = self
+                    .collapsed_groups
+                    .contains(&collapsed_group_key(&group_value));
+                profile_list = profile_list.child(self.group_drop_header(
+                    tokens,
+                    display,
+                    group_value,
+                    !collapsed,
+                    cx,
+                ));
+                if !collapsed {
+                    for index in indexes {
+                        let profile = &self.profiles[index];
+                        profile_list = profile_list.child(self.saved_host_row(
+                            tokens,
+                            "group-host",
+                            index,
+                            profile,
+                            cx,
+                        ));
+                    }
                 }
                 matching_profiles += 1;
             }
@@ -12021,7 +12059,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.8 · native GPUI · Esc closes"),
+                        self.tr("dshell 0.1.9 · native GPUI · Esc closes"),
                     )),
             );
 

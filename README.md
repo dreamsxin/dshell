@@ -2,13 +2,17 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.8`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.9`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
 choose a language, and press `Apply`; the choice is saved in
 `%APPDATA%\dshell\settings.json` on Windows. Terminal content and remote
 command output remain unchanged.
+
+Host groups in the sidebar can be collapsed with their chevron header. The
+collapsed state is saved with the UI settings and older settings files load
+with all groups expanded.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;

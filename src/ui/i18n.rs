@@ -336,7 +336,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Stop logging" => "停止记录",
         "Quick commands (Ctrl+Shift+S)" => "快捷命令 (Ctrl+Shift+S)",
         "Settings (Ctrl+Shift+O)" => "设置 (Ctrl+Shift+O)",
-        "dshell 0.1.8 · native GPUI · Esc closes" => "dshell 0.1.8 · 原生 GPUI · 按 Esc 关闭",
+        "dshell 0.1.9 · native GPUI · Esc closes" => "dshell 0.1.9 · 原生 GPUI · 按 Esc 关闭",
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",

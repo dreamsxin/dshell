@@ -1,4 +1,4 @@
-use std::{env, fs, io::ErrorKind, path::PathBuf};
+use std::{collections::BTreeSet, env, fs, io::ErrorKind, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,8 @@ pub const MIN_FONT_SIZE: f32 = 9.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub const DEFAULT_FONT_FAMILY: &str = "monospace";
+const MAX_COLLAPSED_GROUPS: usize = 128;
+const MAX_GROUP_KEY_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +46,8 @@ pub struct AppSettings {
     pub sidebar_width: f32,
     #[serde(default = "default_inspector_width")]
     pub inspector_width: f32,
+    #[serde(default)]
+    pub collapsed_groups: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -59,6 +63,7 @@ impl Default for AppSettings {
             sidebar_collapsed: false,
             sidebar_width: SIDEBAR_WIDTH,
             inspector_width: INSPECTOR_WIDTH,
+            collapsed_groups: Vec::new(),
         }
     }
 }
@@ -91,6 +96,7 @@ impl AppSettings {
                 INSPECTOR_MIN_WIDTH,
                 INSPECTOR_MAX_WIDTH,
             ),
+            collapsed_groups: normalize_collapsed_groups(self.collapsed_groups),
         }
     }
 
@@ -127,6 +133,8 @@ struct SettingsDocument {
     sidebar_width: f32,
     #[serde(default = "default_inspector_width")]
     inspector_width: f32,
+    #[serde(default)]
+    collapsed_groups: Vec<String>,
 }
 
 pub struct SettingsStore {
@@ -199,6 +207,7 @@ impl SettingsStore {
             sidebar_collapsed: document.sidebar_collapsed,
             sidebar_width: document.sidebar_width,
             inspector_width: document.inspector_width,
+            collapsed_groups: document.collapsed_groups,
         }
         .normalized())
     }
@@ -227,6 +236,7 @@ impl SettingsStore {
             sidebar_collapsed: settings.sidebar_collapsed,
             sidebar_width: settings.sidebar_width,
             inspector_width: settings.inspector_width,
+            collapsed_groups: settings.collapsed_groups,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -262,6 +272,19 @@ fn normalize_width(value: f32, default: f32, minimum: f32, maximum: f32) -> f32 
     }
 }
 
+fn normalize_collapsed_groups(groups: Vec<String>) -> Vec<String> {
+    let mut normalized = BTreeSet::new();
+    for group in groups {
+        let key = group.trim().to_lowercase();
+        if key.chars().count() <= MAX_GROUP_KEY_CHARS {
+            normalized.insert(key);
+        } else {
+            normalized.insert(key.chars().take(MAX_GROUP_KEY_CHARS).collect());
+        }
+    }
+    normalized.into_iter().take(MAX_COLLAPSED_GROUPS).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,9 +314,13 @@ mod tests {
             sidebar_collapsed: true,
             sidebar_width: 312.0,
             inspector_width: 460.0,
+            collapsed_groups: vec!["Production".to_owned(), "production".to_owned()],
         };
         store.save(&settings).unwrap();
-        assert_eq!(store.load().unwrap(), settings);
+        assert_eq!(
+            store.load().unwrap().collapsed_groups,
+            vec!["production".to_owned()]
+        );
 
         store
             .save(&AppSettings {
@@ -307,6 +334,7 @@ mod tests {
                 sidebar_collapsed: false,
                 sidebar_width: 10.0,
                 inspector_width: 10_000.0,
+                collapsed_groups: Vec::new(),
             })
             .unwrap();
         let loaded = store.load().unwrap();
@@ -333,6 +361,7 @@ mod tests {
         assert_eq!(loaded.sidebar_width, SIDEBAR_WIDTH);
         assert_eq!(loaded.inspector_width, INSPECTOR_WIDTH);
         assert_eq!(loaded.shortcuts, ShortcutSettings::default());
+        assert!(loaded.collapsed_groups.is_empty());
     }
 
     #[test]
@@ -348,6 +377,7 @@ mod tests {
             sidebar_collapsed: false,
             sidebar_width: SIDEBAR_WIDTH,
             inspector_width: INSPECTOR_WIDTH,
+            collapsed_groups: Vec::new(),
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);
