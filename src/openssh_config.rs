@@ -363,6 +363,10 @@ fn build_profile(
         proxy_jump: String::new(),
         forwards,
         keepalive_seconds,
+        password: String::new(),
+        passphrase: String::new(),
+        jump_password: String::new(),
+        jump_passphrase: String::new(),
     })
 }
 

@@ -53,7 +53,7 @@ use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerMetrics, ServerProcess, ServerService, UiEvent,
+    ServerDataError, ServerMetrics, ServerProcess, ServerService, ServiceAction, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -1002,10 +1002,17 @@ impl SshSession {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message.clear();
             }
+            UiEvent::ServerMetrics(ServerData::ProcessAction(result)) => {
+                self.server_metrics.processes_loading = false;
+                self.server_metrics.processes_message = result.message;
+            }
             UiEvent::ServerMetrics(ServerData::Services(services)) => {
                 self.server_metrics.services = services;
                 self.server_metrics.services_loading = false;
                 self.server_metrics.services_message.clear();
+            }
+            UiEvent::ServerMetrics(ServerData::ServiceAction(result)) => {
+                self.server_metrics.services_message = result.message;
             }
             UiEvent::ServerMetricsError(ServerDataError::Metrics(error)) => {
                 self.server_metrics.loading = false;
@@ -1732,6 +1739,10 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
             }
         }
 
@@ -1773,6 +1784,10 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
             }
         }
 
@@ -1815,6 +1830,10 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
             },
             HostProfile {
                 name: "prod-b".to_owned(),
@@ -1828,6 +1847,10 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
             },
         ];
         assert_eq!(
@@ -1851,6 +1874,10 @@ mod session_tests {
             proxy_jump: String::new(),
             forwards: Vec::new(),
             keepalive_seconds: 0,
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
         }];
         assert_eq!(remove_profile_group(&mut profiles, "production"), 1);
         assert!(profiles[0].group.is_empty());
@@ -2066,7 +2093,9 @@ struct AppView {
     inspector_info_open: bool,
     inspector_server_open: bool,
     inspector_processes_open: bool,
+    pending_process_termination: Option<(u64, u32)>,
     inspector_services_open: bool,
+    pending_service_action: Option<(u64, String, ServiceAction)>,
     inspector_log_open: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
@@ -2380,7 +2409,9 @@ impl AppView {
             inspector_info_open: true,
             inspector_server_open: true,
             inspector_processes_open: true,
+            pending_process_termination: None,
             inspector_services_open: true,
+            pending_service_action: None,
             inspector_log_open: true,
             profile_name,
             profile_search,
@@ -2729,18 +2760,20 @@ impl AppView {
     }
 
     fn profile_needs_credential_prompt(&self, profile: &HostProfile) -> bool {
-        matches!(
+        let target_needs = matches!(
             profile.auth_method,
             AuthMethod::Password | AuthMethod::KeyboardInteractive
-        ) || (!profile.proxy_jump.trim().is_empty()
-            && self
-                .saved_jump_profile(&profile.proxy_jump)
-                .is_some_and(|jump| {
-                    matches!(
-                        jump.auth_method,
-                        AuthMethod::Password | AuthMethod::KeyboardInteractive
-                    )
-                }))
+        ) && profile.password.is_empty();
+        let jump_needs = self
+            .saved_jump_profile(&profile.proxy_jump)
+            .is_some_and(|jump| {
+                matches!(
+                    jump.auth_method,
+                    AuthMethod::Password | AuthMethod::KeyboardInteractive
+                ) && profile.jump_password.is_empty()
+                    && jump.password.is_empty()
+            });
+        target_needs || jump_needs
     }
 
     fn apply_cached_credentials(
@@ -2856,7 +2889,7 @@ impl AppView {
             self.connect(window, cx);
         } else if self.profile_needs_credential_prompt(profile) {
             let message = self
-                .tr("Enter credentials for {name}. They will be remembered in memory for this run.")
+                .tr("Enter credentials for {name}. They will be saved with this host profile after a successful connection.")
                 .replace("{name}", &profile.name);
             self.open_credential_prompt(message, cx);
         } else {
@@ -3721,12 +3754,23 @@ impl AppView {
         Self::set_input_value(&self.host, &profile.host, window, cx);
         Self::set_input_value(&self.port, &profile.port.to_string(), window, cx);
         Self::set_input_value(&self.username, &profile.username, window, cx);
-        Self::set_input_value(&self.password, "", window, cx);
-        Self::set_input_value(&self.key_passphrase, "", window, cx);
+        Self::set_input_value(&self.password, &profile.password, window, cx);
+        Self::set_input_value(&self.key_passphrase, &profile.passphrase, window, cx);
         Self::set_input_value(&self.identity_file, &profile.identity_file, window, cx);
         Self::set_input_value(&self.jump_profile, &profile.proxy_jump, window, cx);
-        Self::set_input_value(&self.jump_password, "", window, cx);
-        Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        let jump_profile = self.saved_jump_profile(&profile.proxy_jump);
+        let jump_password = if profile.jump_password.is_empty() {
+            jump_profile.map_or("", |jump| jump.password.as_str())
+        } else {
+            profile.jump_password.as_str()
+        };
+        let jump_passphrase = if profile.jump_passphrase.is_empty() {
+            jump_profile.map_or("", |jump| jump.passphrase.as_str())
+        } else {
+            profile.jump_passphrase.as_str()
+        };
+        Self::set_input_value(&self.jump_password, jump_password, window, cx);
+        Self::set_input_value(&self.jump_passphrase, jump_passphrase, window, cx);
         Self::set_input_value(
             &self.keepalive_seconds,
             &profile.keepalive_seconds.to_string(),
@@ -3744,7 +3788,7 @@ impl AppView {
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message = self
-            .tr("Loaded {name}. Enter the credentials to connect.")
+            .tr("Loaded {name}. Saved credentials will be used when you connect.")
             .replace("{name}", &profile.name);
         cx.notify();
     }
@@ -4468,6 +4512,10 @@ impl AppView {
         let host = self.host.read(cx).value().trim().to_owned();
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().trim().to_owned();
+        let password = Zeroizing::new(self.password.read(cx).text().to_string());
+        let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
+        let jump_password = Zeroizing::new(self.jump_password.read(cx).text().to_string());
+        let jump_passphrase = Zeroizing::new(self.jump_passphrase.read(cx).text().to_string());
         let identity_file = self.identity_file.read(cx).value().trim().to_owned();
         let proxy_jump = self.jump_profile.read(cx).value().trim().to_owned();
         let keepalive_seconds = self
@@ -4563,6 +4611,10 @@ impl AppView {
             proxy_jump,
             forwards: existing_forwards,
             keepalive_seconds,
+            password: password.to_string(),
+            passphrase: passphrase.to_string(),
+            jump_password: jump_password.to_string(),
+            jump_passphrase: jump_passphrase.to_string(),
         };
         let mut profiles = self.profiles.clone();
         if let Some(selected) = &self.selected_profile {
@@ -4639,6 +4691,37 @@ impl AppView {
         }
         window.focus(&self.terminal_focus);
         cx.notify();
+    }
+
+    fn persist_credentials_for_session(
+        &mut self,
+        session_id: u64,
+        credentials: &CachedCredentials,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile_name) = self
+            .session(session_id)
+            .and_then(|session| session.profile_name.clone())
+        else {
+            return;
+        };
+        let mut profiles = self.profiles.clone();
+        let Some(profile) = profiles
+            .iter_mut()
+            .find(|profile| profile.name.eq_ignore_ascii_case(&profile_name))
+        else {
+            return;
+        };
+        profile.password = credentials.password.to_string();
+        profile.passphrase = credentials.passphrase.to_string();
+        profile.jump_password = credentials.jump_password.to_string();
+        profile.jump_passphrase = credentials.jump_passphrase.to_string();
+        if let Err(error) = self.save_workspace(profiles, self.recent.clone()) {
+            self.profile_message = self
+                .tr("Connected, but credentials could not be saved: {error}")
+                .replace("{error}", &error);
+            self.show_toast(self.profile_message.clone(), Tone::Warning, cx);
+        }
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4955,7 +5038,35 @@ impl AppView {
                                 UiEvent::Failed(error) => Some(error.clone()),
                                 _ => None,
                             };
+                            let service_action = match &event {
+                                UiEvent::ServerMetrics(ServerData::ServiceAction(result)) => {
+                                    Some(result.clone())
+                                }
+                                _ => None,
+                            };
+                            let process_action = match &event {
+                                UiEvent::ServerMetrics(ServerData::ProcessAction(result)) => {
+                                    Some(result.clone())
+                                }
+                                _ => None,
+                            };
                             if apply_session_event(&mut view.sessions, id, event) {
+                                cx.notify();
+                            }
+                            if let Some(result) = process_action {
+                                if result.success {
+                                    view.refresh_server_processes(id, cx);
+                                } else if let Some(session) = view.session_mut(id) {
+                                    session.server_metrics.processes_loading = false;
+                                }
+                                cx.notify();
+                            }
+                            if let Some(result) = service_action {
+                                if result.success {
+                                    view.refresh_server_services(id, cx);
+                                } else if let Some(session) = view.session_mut(id) {
+                                    session.server_metrics.services_loading = false;
+                                }
                                 cx.notify();
                             }
                             if connection_established
@@ -4966,6 +5077,7 @@ impl AppView {
                                     view.pending_credentials.remove(&id)
                                 && credentials.contains_secret()
                             {
+                                view.persist_credentials_for_session(id, &credentials, cx);
                                 view.credential_cache.insert(key, credentials);
                             }
                             if failure.is_some() {
@@ -6282,7 +6394,7 @@ impl AppView {
                     )
                     .child(components::help_text(
                         &tokens,
-                        self.tr("Templates store the method, identity file path, jump-host reference and keep-alive only. Passwords, passphrases and key material are never saved; applying a template clears secret inputs."),
+                        self.tr("Templates store the method, identity file path, jump-host reference and keep-alive only. Applying a template clears secret inputs; saved host profiles keep their own credentials."),
                     ))
                     .when(!self.auth_profile_message.is_empty(), |panel| {
                         panel.child(components::help_text(
@@ -6325,7 +6437,7 @@ impl AppView {
                                 if self.auth_method == AuthMethod::KeyboardInteractive {
                                     self.tr("Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet.")
                                 } else {
-                        self.tr("Passwords are remembered only in memory for this run and are never saved with host profiles.")
+                        self.tr("Passwords and passphrases are saved with host profiles and reused on the next connection.")
                                 },
                             ))
                     })
@@ -6345,7 +6457,7 @@ impl AppView {
                             ))
                             .child(components::help_text(
                                 &tokens,
-                                self.tr("The identity file path is saved with the host. Passphrases and key material are never saved."),
+                                self.tr("The identity file path and passphrase are saved with the host. Private key material is never copied."),
                             ))
                     })
                     .when(self.auth_method == AuthMethod::Agent, |panel| {
@@ -6376,7 +6488,7 @@ impl AppView {
                             })
                             .child(components::help_text(
                                 &tokens,
-                                self.tr("Jump credentials are used only for the jump host and are never saved."),
+                                    self.tr("Jump credentials are saved with this host profile and reused for its jump host."),
                             ))
                     })
             }
@@ -6392,7 +6504,7 @@ impl AppView {
                 .child(components::subheading(&tokens, self.tr("Credential handling")))
                 .child(components::help_text(
                     &tokens,
-                    self.tr("Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles contain connection details, an optional identity file path, and a jump host reference, never passwords, passphrases, or key material."),
+                    self.tr("Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles also keep the credentials needed for the next connection; private key material is never copied."),
                 )),
         };
 
@@ -6619,7 +6731,7 @@ impl AppView {
                     if self.auth_method == AuthMethod::KeyboardInteractive {
                         self.tr("Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet.")
                     } else {
-                        self.tr("The password is remembered only in memory for this run and is never written to the host profile.")
+                        self.tr("The password is saved with this host profile after a successful connection and reused next time.")
                     },
                 ));
         }
@@ -6633,7 +6745,7 @@ impl AppView {
                 ))
                 .child(components::help_text(
                     &tokens,
-                    self.tr("Leave the passphrase empty when the private key is not encrypted. It is remembered only in memory for this run."),
+                    self.tr("Leave the passphrase empty when the private key is not encrypted. A supplied passphrase is saved with this host profile."),
                 ));
         }
         if self.auth_method == AuthMethod::Agent {
@@ -6704,7 +6816,7 @@ impl AppView {
         }
         body = body.child(components::help_text(
             &tokens,
-            self.tr("Credentials are cleared from the form after connecting or cancelling. A successful connection can reuse them during this run; they are never written to host profiles."),
+            self.tr("Credentials are cleared from the form after connecting or cancelling. A successful connection saves them with the host profile for the next connection."),
         ));
 
         components::modal_overlay(&tokens, "credential-prompt-overlay")
@@ -9085,6 +9197,148 @@ impl AppView {
         cx.notify();
     }
 
+    fn request_process_termination(&mut self, session_id: u64, pid: u32, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before terminating a process.");
+        if self
+            .session(session_id)
+            .is_none_or(|session| session.state != SessionState::Connected)
+        {
+            if let Some(session) = self.session_mut(session_id) {
+                session.server_metrics.processes_message = not_connected;
+            }
+            cx.notify();
+            return;
+        }
+        self.pending_process_termination = Some((session_id, pid));
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn cancel_process_termination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_process_termination = None;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn submit_process_termination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((session_id, pid)) = self.pending_process_termination.take() else {
+            return;
+        };
+        let not_connected = self.tr("Connect to the server before terminating a process.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let applying = self.tr("Requesting process termination...");
+        let Some(session) = self.session_mut(session_id) else {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.processes_message = not_connected;
+        } else if let Some(command_tx) = &session.command_tx {
+            match command_tx.try_send(TerminalRequest::TerminateServerProcess { pid }) {
+                Ok(()) => {
+                    session.server_metrics.processes_loading = true;
+                    session.server_metrics.processes_message = applying;
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    session.server_metrics.processes_message = queue_full;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    session.server_metrics.processes_message = not_accepting;
+                }
+            }
+        } else {
+            session.server_metrics.processes_message = not_accepting;
+        }
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn process_termination_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let Some((_, pid)) = self.pending_process_termination else {
+            return div().into_any_element();
+        };
+        components::modal_overlay(&tokens, "process-termination-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.cancel_process_termination(window, cx);
+                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
+                    cx.stop_propagation();
+                    this.submit_process_termination(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "process-termination-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .child(
+                        components::modal_header(&tokens, self.tr("Terminate process")).child(
+                            components::icon_button(
+                                &tokens,
+                                "process-termination-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close"),
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.cancel_process_termination(window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .child(components::warning_text(
+                        &tokens,
+                        self.tr(
+                            "This sends SIGTERM to the remote process. Confirm before continuing.",
+                        ),
+                    ))
+                    .child(components::info_row(
+                        &tokens,
+                        self.tr("PID"),
+                        pid.to_string(),
+                    ))
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "process-termination-cancel",
+                                    self.tr("Cancel"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.cancel_process_termination(window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "process-termination-confirm",
+                                    self.tr("Terminate"),
+                                    ButtonKind::Danger,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.submit_process_termination(window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn refresh_server_services(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let not_connected = self.tr("Connect to the server before refreshing services.");
         let not_accepting = self.tr("The SSH session is not accepting requests.");
@@ -9113,6 +9367,145 @@ impl AppView {
             session.server_metrics.services_message.clear();
         }
         cx.notify();
+    }
+
+    fn request_service_action(
+        &mut self,
+        session_id: u64,
+        name: String,
+        action: ServiceAction,
+        cx: &mut Context<Self>,
+    ) {
+        let not_connected = self.tr("Connect to the server before changing services.");
+        if self
+            .session(session_id)
+            .is_none_or(|session| session.state != SessionState::Connected)
+        {
+            if let Some(session) = self.session_mut(session_id) {
+                session.server_metrics.services_message = not_connected;
+            }
+            cx.notify();
+            return;
+        }
+        self.pending_service_action = Some((session_id, name, action));
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn cancel_service_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_service_action = None;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn submit_service_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((session_id, name, action)) = self.pending_service_action.take() else {
+            return;
+        };
+        let not_connected = self.tr("Connect to the server before changing services.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let applying = self.tr("Applying service action...");
+        let Some(session) = self.session_mut(session_id) else {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.services_message = not_connected;
+        } else if let Some(command_tx) = &session.command_tx {
+            match command_tx.try_send(TerminalRequest::ControlServerService { name, action }) {
+                Ok(()) => {
+                    session.server_metrics.services_loading = true;
+                    session.server_metrics.services_message = applying;
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    session.server_metrics.services_message = queue_full;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    session.server_metrics.services_message = not_accepting;
+                }
+            }
+        } else {
+            session.server_metrics.services_message = not_accepting;
+        }
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn service_action_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let Some((_, name, action)) = self.pending_service_action.clone() else {
+            return div().into_any_element();
+        };
+        let action_label = self.tr(action.label());
+        components::modal_overlay(&tokens, "service-action-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.cancel_service_action(window, cx);
+                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
+                    cx.stop_propagation();
+                    this.submit_service_action(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "service-action-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .child(components::modal_header(&tokens, action_label.clone()).child(
+                        components::icon_button(
+                            &tokens,
+                            "service-action-close",
+                            IconName::Close,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            self.tr("Close"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.cancel_service_action(window, cx);
+                        })),
+                    ))
+                    .child(components::warning_text(
+                        &tokens,
+                        self.tr("Changing a service affects the remote server immediately. Confirm before continuing."),
+                    ))
+                    .child(components::info_row(&tokens, self.tr("Service"), name))
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "service-action-cancel",
+                                    self.tr("Cancel"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_service_action(window, cx);
+                                })),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "service-action-confirm",
+                                    action_label,
+                                    if action == ServiceAction::Stop {
+                                        ButtonKind::Danger
+                                    } else {
+                                        ButtonKind::Primary
+                                    },
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_service_action(window, cx);
+                                })),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn keywords_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -14707,7 +15100,20 @@ impl AppView {
                         ))
                         .child(self.tr("Top CPU")),
                 );
-                for process in server_processes {
+                for (process_index, process) in server_processes.into_iter().enumerate() {
+                    let pid = process.pid;
+                    let terminate_button = components::icon_button(
+                        tokens,
+                        ("process-terminate", process_index),
+                        IconName::CircleX,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Terminate process"),
+                    )
+                    .disabled(state != SessionState::Connected || processes_loading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_process_termination(session_id, pid, cx);
+                    }));
                     group = group.child(
                         div()
                             .flex()
@@ -14735,15 +15141,22 @@ impl AppView {
                                     )
                                     .child(
                                         div()
-                                            .flex_shrink_0()
-                                            .text_size(px(ui_tokens::FONT_CAPTION))
-                                            .text_color(tokens.text_secondary)
-                                            .child(format!(
-                                                "CPU {:.1}% · {} {:.1}%",
-                                                process.cpu_percent,
-                                                self.tr("Memory"),
-                                                process.memory_percent
-                                            )),
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(ui_tokens::SPACE_1))
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                                    .text_color(tokens.text_secondary)
+                                                    .child(format!(
+                                                        "CPU {:.1}% · {} {:.1}%",
+                                                        process.cpu_percent,
+                                                        self.tr("Memory"),
+                                                        process.memory_percent
+                                                    )),
+                                            )
+                                            .child(terminate_button),
                                     ),
                             )
                             .child(
@@ -14810,8 +15223,76 @@ impl AppView {
                     },
                 ));
             } else {
-                for service in server_services {
+                for (service_index, service) in server_services.into_iter().enumerate() {
                     let status = format!("{} / {}", service.active, service.sub);
+                    let service_name = service.name.clone();
+                    let start_name = service.name.clone();
+                    let stop_name = service.name.clone();
+                    let restart_name = service.name.clone();
+                    let service_actions = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .child(
+                            components::icon_button(
+                                tokens,
+                                ("service-start", service_index),
+                                IconName::ArrowRight,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Start service"),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.request_service_action(
+                                        session_id,
+                                        start_name.clone(),
+                                        ServiceAction::Start,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                        .child(
+                            components::icon_button(
+                                tokens,
+                                ("service-stop", service_index),
+                                IconName::CircleX,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Stop service"),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.request_service_action(
+                                        session_id,
+                                        stop_name.clone(),
+                                        ServiceAction::Stop,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                        .child(
+                            components::icon_button(
+                                tokens,
+                                ("service-restart", service_index),
+                                IconName::Replace,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Restart service"),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.request_service_action(
+                                        session_id,
+                                        restart_name.clone(),
+                                        ServiceAction::Restart,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        );
                     group = group.child(
                         div()
                             .flex()
@@ -14832,17 +15313,24 @@ impl AppView {
                                             .overflow_hidden()
                                             .text_size(px(ui_tokens::FONT_CAPTION))
                                             .text_color(tokens.text_primary)
-                                            .child(service.name),
+                                            .child(service_name),
                                     )
-                                    .child(components::pill(
-                                        tokens,
-                                        status,
-                                        if service.active == "active" {
-                                            Tone::Success
-                                        } else {
-                                            Tone::Warning
-                                        },
-                                    )),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(ui_tokens::SPACE_1))
+                                            .child(components::pill(
+                                                tokens,
+                                                status,
+                                                if service.active == "active" {
+                                                    Tone::Success
+                                                } else {
+                                                    Tone::Warning
+                                                },
+                                            ))
+                                            .child(service_actions),
+                                    ),
                             )
                             .child(
                                 div()
@@ -15404,6 +15892,12 @@ impl Render for AppView {
         }
         if self.credential_prompt_open {
             root = root.child(self.credential_prompt_overlay(cx));
+        }
+        if self.pending_service_action.is_some() {
+            root = root.child(self.service_action_overlay(cx));
+        }
+        if self.pending_process_termination.is_some() {
+            root = root.child(self.process_termination_overlay(cx));
         }
         if self.group_editor_open {
             root = root.child(self.group_editor(cx));

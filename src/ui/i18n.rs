@@ -98,6 +98,23 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "processes" => "个进程",
         "Top CPU" => "CPU 占用最高",
         "Services" => "服务",
+        "Start service" => "启动服务",
+        "Stop service" => "停止服务",
+        "Restart service" => "重启服务",
+        "Terminate process" => "终止进程",
+        "Terminate" => "终止",
+        "PID" => "进程号",
+        "This sends SIGTERM to the remote process. Confirm before continuing." => {
+            "这会向远程进程发送 SIGTERM。请确认后继续。"
+        }
+        "Connect to the server before terminating a process." => "终止进程前请先连接服务器。",
+        "Requesting process termination..." => "正在请求终止进程……",
+        "Changing a service affects the remote server immediately. Confirm before continuing." => {
+            "更改服务会立即影响远程服务器。请确认后继续。"
+        }
+        "Service" => "服务",
+        "Applying service action..." => "正在执行服务操作……",
+        "Connect to the server before changing services." => "更改服务前请先连接服务器。",
         "Collecting service status..." => "正在采集服务状态……",
         "No services reported yet." => "尚未获取服务状态。",
         "Connect to the server before refreshing services." => "请先连接服务器，再刷新服务状态。",
@@ -187,11 +204,11 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Group renamed." => "分组已重命名。",
         "Group deleted; hosts moved to Ungrouped." => "分组已删除，主机已移至未分组。",
         "Loaded {name}. Enter the credentials to connect." => "已载入{name}。请输入凭据以连接。",
-        "Loaded {name}. Passwords are never saved; enter the password to connect." => {
-            "已载入{name}。密码不会保存，请输入密码后连接。"
+        "Loaded {name}. Saved credentials will be used when you connect." => {
+            "已载入{name}。连接时会使用已保存的凭据。"
         }
-        "Enter credentials for {name}. They will be remembered in memory for this run." => {
-            "请输入{name}的认证信息。本次运行期间会在内存中记住。"
+        "Enter credentials for {name}. They will be saved with this host profile after a successful connection." => {
+            "请输入{name}的认证信息。连接成功后会保存到该主机资料。"
         }
         "Authenticate {name}" => "认证{name}",
         "Authenticate {target}" => "认证{target}",
@@ -199,15 +216,15 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Enter the authentication information and confirm to connect." => {
             "请输入认证信息，然后确认连接。"
         }
-        "The password is remembered only in memory for this run and is never written to the host profile." => {
-            "密码只会在本次运行的内存中记住，不会写入主机资料。"
+        "The password is saved with this host profile after a successful connection and reused next time." => {
+            "连接成功后会将密码保存到该主机资料，下次连接时自动使用。"
         }
-        "Leave the passphrase empty when the private key is not encrypted. It is remembered only in memory for this run." => {
-            "如果私钥未加密，可将口令留空。口令只会在本次运行的内存中记住。"
+        "Leave the passphrase empty when the private key is not encrypted. A supplied passphrase is saved with this host profile." => {
+            "如果私钥未加密，可将口令留空。填写的口令会保存到该主机资料。"
         }
         "Uses the SSH agent; no password is required." => "使用 SSH agent，无需密码。",
-        "Credentials are cleared from the form after connecting or cancelling. A successful connection can reuse them during this run; they are never written to host profiles." => {
-            "连接或取消后会清空表单中的凭据。连接成功后，本次运行期间可以复用凭据；凭据不会写入主机资料。"
+        "Credentials are cleared from the form after connecting or cancelling. A successful connection saves them with the host profile for the next connection." => {
+            "连接或取消后会清空表单中的凭据。连接成功后会将凭据保存到主机资料，下次连接时自动使用。"
         }
         "Loaded {name} from recent connections." => "已从最近连接载入{name}。",
         "Loaded a recent connection. Save it as a host profile if you want to keep it." => {
@@ -289,8 +306,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Username" => "用户名",
         "Authentication method" => "认证方式",
         "Password" => "密码",
-        "Passwords are remembered only in memory for this run and are never saved with host profiles." => {
-            "密码只会在本次运行的内存中记住，不会随主机资料保存。"
+        "Passwords and passphrases are saved with host profiles and reused on the next connection." => {
+            "密码和口令会随主机资料保存，下次连接时自动使用。"
         }
         "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet." => {
             "隐藏的键盘交互提示会使用此密码回答。一次性验证码和明文提示暂不支持。"
@@ -314,20 +331,20 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "No saved templates. Save the current method as a reusable template." => {
             "没有已保存的模板。保存当前认证方式即可重复使用。"
         }
-        "Templates store the method, identity file path, jump-host reference and keep-alive only. Passwords, passphrases and key material are never saved; applying a template clears secret inputs." => {
-            "模板只保存认证方式、身份文件路径、跳板机引用和保活设置。密码、口令和密钥材料不会保存；应用模板会清空秘密输入。"
+        "Templates store the method, identity file path, jump-host reference and keep-alive only. Applying a template clears secret inputs; saved host profiles keep their own credentials." => {
+            "模板只保存认证方式、身份文件路径、跳板机引用和保活设置。应用模板会清空秘密输入；主机资料会保存自己的认证信息。"
         }
-        "The identity file path is saved with the host. Passphrases and key material are never saved." => {
-            "身份文件路径会随主机保存。口令和密钥材料不会保存。"
+        "The identity file path and passphrase are saved with the host. Private key material is never copied." => {
+            "身份文件路径和口令会随主机保存。不会复制私钥材料。"
         }
-        "Jump credentials are used only for the jump host and are never saved." => {
-            "跳板机凭据只用于跳板机连接，不会保存。"
+        "Jump credentials are saved with this host profile and reused for its jump host." => {
+            "跳板机凭据会随该主机资料保存，并在连接跳板机时自动使用。"
         }
         "Host keys must already match an entry in the user's OpenSSH known_hosts file. Unknown and changed keys are rejected. When a jump host is used, both the jump host and the target are verified independently." => {
             "主机密钥必须已匹配用户 OpenSSH known_hosts 中的条目。未知或变更的密钥会被拒绝。使用跳板机时，跳板机和目标主机会分别验证。"
         }
-        "Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles contain connection details, an optional identity file path, and a jump host reference, never passwords, passphrases, or key material." => {
-            "连接或取消时会清空密码和密钥口令。已保存的主机资料只包含连接信息、可选身份文件路径和跳板机引用，不包含密码、口令或密钥材料。"
+        "Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles also keep the credentials needed for the next connection; private key material is never copied." => {
+            "连接或取消时会清空密码和密钥口令。已保存的主机资料也会保留下次连接所需的凭据；不会复制私钥材料。"
         }
         "Save" => "保存",
         "Cancel" => "取消",
@@ -771,9 +788,9 @@ mod tests {
         assert_eq!(
             translate(
                 Language::SimplifiedChinese,
-                "Passwords are remembered only in memory for this run and are never saved with host profiles."
+                "Passwords and passphrases are saved with host profiles and reused on the next connection."
             ),
-            "密码只会在本次运行的内存中记住，不会随主机资料保存。"
+            "密码和口令会随主机资料保存，下次连接时自动使用。"
         );
         assert_eq!(
             translate(
@@ -834,16 +851,9 @@ mod tests {
         assert_eq!(
             translate(
                 Language::SimplifiedChinese,
-                "Loaded {name}. Passwords are never saved; enter the password to connect."
+                "Enter credentials for {name}. They will be saved with this host profile after a successful connection."
             ),
-            "已载入{name}。密码不会保存，请输入密码后连接。"
-        );
-        assert_eq!(
-            translate(
-                Language::SimplifiedChinese,
-                "Enter credentials for {name}. They will be remembered in memory for this run."
-            ),
-            "请输入{name}的认证信息。本次运行期间会在内存中记住。"
+            "请输入{name}的认证信息。连接成功后会保存到该主机资料。"
         );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Authenticate {name}"),

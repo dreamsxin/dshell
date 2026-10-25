@@ -116,6 +116,13 @@ pub struct ServerProcess {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ServerProcessActionResult {
+    pub pid: u32,
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerService {
     pub name: String,
     pub load: String,
@@ -124,10 +131,45 @@ pub struct ServerService {
     pub description: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ServiceAction {
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start service",
+            Self::Stop => "Stop service",
+            Self::Restart => "Restart service",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerServiceActionResult {
+    pub name: String,
+    pub action: ServiceAction,
+    pub success: bool,
+    pub message: String,
+}
+
 pub enum ServerData {
     Metrics(ServerMetrics),
     Processes(Vec<ServerProcess>),
+    ProcessAction(ServerProcessActionResult),
     Services(Vec<ServerService>),
+    ServiceAction(ServerServiceActionResult),
 }
 
 pub enum ServerDataError {
@@ -647,8 +689,14 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::RefreshServerProcesses) => {
                         refresh_server_processes(&mut session, &events).await;
                     }
+                    Some(TerminalRequest::TerminateServerProcess { pid }) => {
+                        terminate_server_process(&mut session, &events, pid).await;
+                    }
                     Some(TerminalRequest::RefreshServerServices) => {
                         refresh_server_services(&mut session, &events).await;
+                    }
+                    Some(TerminalRequest::ControlServerService { name, action }) => {
+                        control_server_service(&mut session, &events, name, action).await;
                     }
                     None => break,
                 }
@@ -1139,6 +1187,105 @@ async fn refresh_server_processes(
     }
 }
 
+fn valid_process_pid(pid: u32) -> bool {
+    pid > 1
+}
+
+fn process_termination_command(pid: u32) -> String {
+    format!("kill -TERM {pid}; status=$?; printf 'DSHELL_PROCESS_ACTION_V1\\t%d\\n' \"$status\"")
+}
+
+fn parse_process_action(output: &str) -> Result<(bool, String)> {
+    let marker = output
+        .lines()
+        .find_map(|line| line.strip_prefix("DSHELL_PROCESS_ACTION_V1\t"))
+        .ok_or_else(|| {
+            anyhow!("The remote host did not return a supported process action response.")
+        })?;
+    let status = marker
+        .trim()
+        .parse::<u8>()
+        .context("The remote host returned an invalid process action status.")?;
+    let detail = output
+        .lines()
+        .filter(|line| !line.starts_with("DSHELL_PROCESS_ACTION_V1\t"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("; ");
+    Ok((status == 0, detail))
+}
+
+async fn terminate_server_process(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+    pid: u32,
+) {
+    if !valid_process_pid(pid) {
+        let _ = events
+            .send(UiEvent::ServerMetrics(ServerData::ProcessAction(
+                ServerProcessActionResult {
+                    pid,
+                    success: false,
+                    message: "The process ID is not valid for termination.".to_owned(),
+                },
+            )))
+            .await;
+        return;
+    }
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a process action channel")?;
+        channel
+            .exec(true, process_termination_command(pid))
+            .await
+            .context("could not start the process termination command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the process action response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The process action response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_process_action(&output)
+    })
+    .await;
+    let (success, detail) = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => (false, format!("{error:#}")),
+        Err(_) => (
+            false,
+            "Timed out waiting for the process action.".to_owned(),
+        ),
+    };
+    let message = if success {
+        if detail.is_empty() {
+            "Process termination requested.".to_owned()
+        } else {
+            detail
+        }
+    } else if detail.is_empty() {
+        "Process termination failed.".to_owned()
+    } else {
+        detail
+    };
+    let _ = events
+        .send(UiEvent::ServerMetrics(ServerData::ProcessAction(
+            ServerProcessActionResult {
+                pid,
+                success,
+                message,
+            },
+        )))
+        .await;
+}
+
 async fn refresh_server_services(
     session: &mut client::Handle<KnownHostsHandler>,
     events: &mpsc::Sender<UiEvent>,
@@ -1187,6 +1334,119 @@ async fn refresh_server_services(
                 .await;
         }
     }
+}
+
+fn valid_service_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'@' | b':' | b'+' | b'-')
+        })
+}
+
+fn service_action_command(name: &str, action: ServiceAction) -> String {
+    format!(
+        "if command -v systemctl >/dev/null 2>&1; then systemctl {} {}; status=$?; else if command -v service >/dev/null 2>&1; then service {} {}; status=$?; else status=127; fi; fi; printf 'DSHELL_SERVICE_ACTION_V1\\t%d\\n' \"$status\"",
+        action.command(),
+        name,
+        name,
+        action.command(),
+    )
+}
+
+fn parse_service_action(output: &str) -> Result<(bool, String)> {
+    let marker = output
+        .lines()
+        .find_map(|line| line.strip_prefix("DSHELL_SERVICE_ACTION_V1\t"))
+        .ok_or_else(|| {
+            anyhow!("The remote host did not return a supported service action response.")
+        })?;
+    let status = marker
+        .trim()
+        .parse::<u8>()
+        .context("The remote host returned an invalid service action status.")?;
+    let detail = output
+        .lines()
+        .filter(|line| !line.starts_with("DSHELL_SERVICE_ACTION_V1\t"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("; ");
+    Ok((status == 0, detail))
+}
+
+async fn control_server_service(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+    name: String,
+    action: ServiceAction,
+) {
+    let name = name.trim().to_owned();
+    if !valid_service_name(&name) {
+        let _ = events
+            .send(UiEvent::ServerMetrics(ServerData::ServiceAction(
+                ServerServiceActionResult {
+                    name,
+                    action,
+                    success: false,
+                    message: "The service name contains unsupported characters.".to_owned(),
+                },
+            )))
+            .await;
+        return;
+    }
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a service action channel")?;
+        channel
+            .exec(true, service_action_command(&name, action))
+            .await
+            .context("could not start the service action command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the service action response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The service action response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_service_action(&output)
+    })
+    .await;
+    let (success, detail) = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => (false, format!("{error:#}")),
+        Err(_) => (
+            false,
+            "Timed out waiting for the service action.".to_owned(),
+        ),
+    };
+    let message = if success {
+        if detail.is_empty() {
+            format!("{} completed.", action.label())
+        } else {
+            detail
+        }
+    } else if detail.is_empty() {
+        format!("{} failed.", action.label())
+    } else {
+        detail
+    };
+    let _ = events
+        .send(UiEvent::ServerMetrics(ServerData::ServiceAction(
+            ServerServiceActionResult {
+                name,
+                action,
+                success,
+                message,
+            },
+        )))
+        .await;
 }
 
 fn can_answer_with_password(prompts: &[Prompt], password_used: bool) -> bool {
@@ -1468,9 +1728,11 @@ async fn flush_log(
 #[cfg(test)]
 mod tests {
     use super::{
-        Authentication, ConnectionSpec, JumpSpec, UiEvent, can_answer_with_password,
-        connection_info_for_key, is_known_host_key, parse_server_metrics, parse_server_processes,
-        parse_server_services, run_connection_with_known_hosts,
+        Authentication, ConnectionSpec, JumpSpec, ServiceAction, UiEvent, can_answer_with_password,
+        connection_info_for_key, is_known_host_key, parse_process_action, parse_server_metrics,
+        parse_server_processes, parse_server_services, parse_service_action,
+        process_termination_command, run_connection_with_known_hosts, service_action_command,
+        valid_process_pid, valid_service_name,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -1617,6 +1879,47 @@ mod tests {
             parse_server_services("DSHELL_SERVICES_V1\nSERVICE\t\tloaded\tactive\trunning\tssh\n")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn service_actions_validate_names_and_parse_status() {
+        assert!(valid_service_name("ssh.service"));
+        assert!(valid_service_name("serial-getty@ttyS0"));
+        assert!(!valid_service_name("ssh; reboot"));
+        assert!(!valid_service_name(""));
+        assert!(
+            service_action_command("ssh.service", ServiceAction::Restart)
+                .contains("systemctl restart ssh.service")
+        );
+        assert_eq!(
+            parse_service_action("stopped\nDSHELL_SERVICE_ACTION_V1\t0\n").unwrap(),
+            (true, "stopped".to_owned())
+        );
+        assert_eq!(
+            parse_service_action("failed\nDSHELL_SERVICE_ACTION_V1\t1\n").unwrap(),
+            (false, "failed".to_owned())
+        );
+        assert!(parse_service_action("no marker").is_err());
+    }
+
+    #[test]
+    fn process_termination_validates_pid_and_parses_status() {
+        assert!(valid_process_pid(2));
+        assert!(!valid_process_pid(0));
+        assert!(!valid_process_pid(1));
+        assert_eq!(
+            process_termination_command(42),
+            "kill -TERM 42; status=$?; printf 'DSHELL_PROCESS_ACTION_V1\\t%d\\n' \"$status\""
+        );
+        assert_eq!(
+            parse_process_action("terminated\nDSHELL_PROCESS_ACTION_V1\t0\n").unwrap(),
+            (true, "terminated".to_owned())
+        );
+        assert_eq!(
+            parse_process_action("permission denied\nDSHELL_PROCESS_ACTION_V1\t1\n").unwrap(),
+            (false, "permission denied".to_owned())
+        );
+        assert!(parse_process_action("no marker").is_err());
     }
 
     #[test]

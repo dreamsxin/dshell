@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.21`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.23`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -25,7 +25,8 @@ The Keys panel can discover existing OpenSSH identities, import a private key
 into `~/.ssh`, export a key pair to a user-selected path, change a passphrase,
 copy a public key, and delete a key pair after an explicit confirmation. Key
 files are parsed before transfer, existing destinations are never overwritten,
-and passwords or passphrases are never persisted.
+and passwords or passphrases are stored with saved host profiles for direct
+reconnection. Exported profile backups still omit all credentials.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;
@@ -45,11 +46,10 @@ authentication, or the system SSH agent (Windows OpenSSH named pipe or Pageant;
 uses the password field; one-time-password or other extra prompts open a masked
 dialog that sends responses only to the SSH server. Clicking a saved host row or
 its connect icon opens a credential-only dialog when no in-memory credential is
-available; the edit icon opens the session properties. After a successful
-connection, the password or passphrase is reused for the rest of the current
-dshell run. A rejected credential clears that cache and reopens the dialog, while
-Cancel abandons and removes the failed connection. Credentials are never written to
-host profiles or settings. Each connection opens an independent session tab; switching tabs
+available in the saved profile or current run; the edit icon opens the session properties. After a successful
+connection, the password or passphrase is saved to the host profile and reused
+on the next connection. A rejected credential clears that cache and reopens the
+dialog, while Cancel abandons and removes the failed connection. Each connection opens an independent session tab; switching tabs
 preserves each session's terminal state, and closing a tab ends only that SSH
 session. The password and key passphrase fields are masked and cleared when
 connection starts. Click the terminal area to focus it, then use the
@@ -69,7 +69,8 @@ The inspector includes `Server health`, `Processes` and `Services` groups for
 connected sessions. Press `Refresh` to run short read-only commands through
 separate SSH exec channels and display the remote OS, kernel, load average,
 memory, root filesystem usage, uptime, a bounded process list, and service
-states. Probe output stays in the current session memory and is not added to the
+states. Each process row has a confirmed `Terminate` action that sends `SIGTERM`
+to the remote PID and refreshes the list. Probe output stays in the current session memory and is not added to the
 terminal stream, session log or host profile. Each probe has a three-second
 timeout and a 64 KiB response limit. Server alert thresholds for process CPU,
 memory use and root-disk use are configurable in Settings and persist in the
@@ -95,17 +96,19 @@ mapped safely — such as ProxyJump, ProxyCommand, StrictHostKeyChecking,
 Match blocks, agent/X11 forwarding or connection multiplexing — are skipped or
 reported rather than silently imported. Imported hosts are placed in the
 `Imported` group.
-The profile file stores only the display name, host, port, username, group,
-favorite flag, authentication method, optional identity file path, and optional
-jump host name, plus the recent connection history. On Windows it is stored at
-`%APPDATA%\dshell\hosts.json`; passwords, passphrases, and key material are
-never written to the profile file.
+The profile file stores the display name, host, port, username, group, favorite
+flag, authentication method, optional identity file path, optional jump host
+name and saved credentials, plus the recent connection history. On Windows it
+is stored at `%APPDATA%\dshell\hosts.json`; the private key itself is never
+copied, and exported profile backups omit all credentials.
 
 To connect through another saved host, enter its name in the `Jump host` field
 of the session properties. The jump host and the target authenticate
 separately, and both server keys must already be present in known_hosts.
-Jump-host passwords and key passphrases are requested in their own fields and
-cleared when the connection starts.
+Jump-host passwords and key passphrases are requested in their own fields,
+saved with the target host profile after a successful connection and cleared
+from the form when the connection starts. The Services inspector also exposes
+confirmed Start, Stop and Restart actions for supported remote service managers.
 
 The Authentication section can save reusable templates in
 `%APPDATA%\dshell\auth_profiles.json`. A template stores the authentication
@@ -303,7 +306,7 @@ Windows build was captured while the Chinese language was active:
 ![Fresh Simplified Chinese workspace](artifacts/dshell-v0.1.16-chinese-fresh.png)
 
 The `v0.1.17` build keeps the Chinese workspace and records the saved-host
-credential flow in memory only:
+credential flow:
 
 ![v0.1.17 Simplified Chinese workspace](artifacts/dshell-v0.1.17-chinese-workspace.png)
 

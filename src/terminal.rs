@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::ssh::ServiceAction;
 use alacritty_terminal::{
     event::VoidListener,
     grid::{Dimensions, Scroll},
@@ -175,7 +176,14 @@ pub enum TerminalRequest {
     },
     RefreshServerMetrics,
     RefreshServerProcesses,
+    TerminateServerProcess {
+        pid: u32,
+    },
     RefreshServerServices,
+    ControlServerService {
+        name: String,
+        action: ServiceAction,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

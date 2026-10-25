@@ -2,6 +2,50 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.23] - 2026-10-25
+
+Adds confirmed remote process termination to the server inspector.
+
+### Added
+
+- Add a per-process Terminate action that validates the PID, sends `SIGTERM`
+  through a separate SSH exec channel, reports failures and refreshes the list
+  after success.
+- Add confirmation UI, Simplified Chinese labels and parser coverage for
+  process action responses.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (136 passed, 9 Docker-only ignored).
+- Hard-constraint and Docker SSH verification remain part of the release
+  closeout.
+
+## [0.1.22] - 2026-10-25
+
+Adds reusable saved credentials and guarded service controls to the server
+inspector.
+
+### Added
+
+- Save host passwords, key passphrases and jump-host credentials in the local
+  host profile so saved-host connections can proceed without a repeated prompt.
+- Persist credentials after a successful authentication, reopen the credential
+  dialog after a rejection, and keep profile exports credential-free.
+- Add Start, Stop and Restart service actions with service-name validation,
+  confirmation UI, systemd/service fallback execution and automatic refresh.
+- Add parser and validation coverage for service action responses and saved
+  credential round trips.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (135 passed, 9 Docker-only ignored).
+- Hard-constraint and Docker SSH verification remain part of the release
+  closeout.
+
 ## [0.1.21] - 2026-10-25
 
 Adds service status and configurable threshold warnings to the server inspector.

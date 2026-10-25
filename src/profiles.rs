@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::forward::ForwardRuleSpec;
 
-const DOCUMENT_VERSION: u8 = 2;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 2] = [1, 2];
+const DOCUMENT_VERSION: u8 = 3;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 3] = [1, 2, 3];
 const EXPORT_DOCUMENT_VERSION: u8 = 1;
 const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 1] = [EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
@@ -73,6 +73,14 @@ pub struct HostProfile {
     pub forwards: Vec<ForwardRuleSpec>,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub keepalive_seconds: u16,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub password: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub passphrase: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub jump_password: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub jump_passphrase: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -214,9 +222,20 @@ pub fn export_profiles(path: &Path, profiles: &[HostProfile]) -> Result<(), Stri
             parent.display()
         )
     })?;
+    let profiles = profiles
+        .iter()
+        .cloned()
+        .map(|mut profile| {
+            profile.password.clear();
+            profile.passphrase.clear();
+            profile.jump_password.clear();
+            profile.jump_passphrase.clear();
+            profile
+        })
+        .collect();
     let contents = serde_json::to_vec_pretty(&ProfileExportDocument {
         version: EXPORT_DOCUMENT_VERSION,
-        profiles: profiles.to_vec(),
+        profiles,
     })
     .map_err(|error| format!("Could not serialize host profile export: {error}"))?;
     fs::write(path, contents).map_err(|error| {
@@ -359,6 +378,10 @@ mod tests {
             proxy_jump: String::new(),
             forwards: Vec::new(),
             keepalive_seconds: 0,
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
         }
     }
 
@@ -373,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn profiles_round_trip_without_credentials() {
+    fn profiles_round_trip_with_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProfileStore::at(directory.path().join("hosts.json"));
         let data = HostData {
@@ -389,6 +412,10 @@ mod tests {
                     target_port: 5432,
                 }],
                 keepalive_seconds: 30,
+                password: "secret".to_owned(),
+                passphrase: "key-secret".to_owned(),
+                jump_password: "jump-secret".to_owned(),
+                jump_passphrase: "jump-key-secret".to_owned(),
                 ..profile("staging")
             }],
             recent: vec![recent("server.example.com", 2222)],
@@ -397,7 +424,7 @@ mod tests {
         store.save(&data).unwrap();
         assert_eq!(store.load().unwrap(), data);
         let contents = fs::read_to_string(&store.path).unwrap();
-        assert!(!contents.to_lowercase().contains("password"));
+        assert!(contents.contains("secret"));
     }
 
     #[test]
@@ -416,16 +443,26 @@ mod tests {
                 target_port: 5432,
             }],
             keepalive_seconds: 30,
+            password: "secret".to_owned(),
+            passphrase: "key-secret".to_owned(),
+            jump_password: "jump-secret".to_owned(),
+            jump_passphrase: "jump-key-secret".to_owned(),
             ..profile("staging")
         }];
 
         export_profiles(&path, &profiles).unwrap();
-        assert_eq!(import_profiles(&path).unwrap(), profiles);
+        let mut expected = profiles.clone();
+        expected[0].password.clear();
+        expected[0].passphrase.clear();
+        expected[0].jump_password.clear();
+        expected[0].jump_passphrase.clear();
+        assert_eq!(import_profiles(&path).unwrap(), expected);
         let contents = fs::read_to_string(path).unwrap();
         assert!(!contents.contains("recent"));
         assert!(!contents.to_lowercase().contains("password"));
         assert!(!contents.to_lowercase().contains("passphrase"));
         assert!(!contents.to_lowercase().contains("private_key"));
+        assert!(!contents.contains("secret"));
     }
 
     #[test]
@@ -493,6 +530,10 @@ mod tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
             }]
         );
         assert!(data.recent.is_empty());
