@@ -2,7 +2,7 @@
 
 ## 当前切片
 
-2026-10-25，Windows/MSVC：服务器进程管理补齐并准备发布 `v0.1.23`。Processes 分组每行新增 Terminate 图标和确认弹窗，远端只接受大于 1 的数字 PID，通过独立 SSH exec channel 发送 `SIGTERM`，成功后自动刷新进程列表，失败、拒绝和超时会保留在检查器消息中。新增进程动作协议解析、PID 边界和结果处理单测；当前单元测试为 136 项通过、9 项 Docker 专项跳过。硬约束、Docker SSH 和本轮 Windows 界面截图仍需收尾验证。
+2026-10-25，Windows/MSVC：服务器进程管理补齐并发布 `v0.1.23`。Processes 分组每行新增 Terminate 图标和确认弹窗，远端只接受大于 1 的数字 PID，通过独立 SSH exec channel 发送 `SIGTERM`，成功后自动刷新进程列表，失败、拒绝和超时会保留在检查器消息中。新增进程动作协议解析、PID 边界和结果处理单测；当前单元测试为 136 项通过、9 项 Docker 专项通过。已完成 `cargo fmt --all`、`cargo build --locked --offline`、`cargo check --locked --all-targets --offline`、硬约束检查和 Docker SSH 验证；Windows 手工界面验证确认中文检查器、9 条远端进程记录、每行终止图标，以及保存口令后的侧栏直接连接流程。
 
 ## 当前切片
 
