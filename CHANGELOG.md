@@ -2,6 +2,25 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.28] - 2026-10-25
+
+Adds remote storage mount inspection to the server inspector.
+
+### Added
+
+- Add a Storage group that reads up to 32 mounted filesystems through a
+  bounded SSH exec channel using POSIX `df -P -k`.
+- Display mount point, filesystem, used/total capacity, available capacity
+  and usage severity with loading, empty and failure states.
+- Add Simplified Chinese labels and parser, limit and formatting tests.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets` and
+  `cargo test --locked` (146 passed, 9 Docker-only ignored).
+- Hard-constraint verification passed; Docker SSH integration passed 9/9.
+
 ## [0.1.27] - 2026-10-25
 
 Adds remote network interface inspection to the server inspector.

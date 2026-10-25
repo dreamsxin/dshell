@@ -104,6 +104,14 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         }
         "Timed out waiting for server network information." => "等待服务器网络信息超时。",
         "Addresses unavailable" => "地址不可用",
+        "Storage" => "存储",
+        "Used" => "已用",
+        "Free" => "可用",
+        "Collecting storage information..." => "正在采集存储信息……",
+        "No storage mounts reported yet." => "尚未获取存储挂载点。",
+        "Connect to the server before refreshing storage information." => {
+            "请先连接服务器，再刷新存储信息。"
+        }
         "Top CPU" => "CPU 占用最高",
         "Services" => "服务",
         "Start service" => "启动服务",
@@ -980,6 +988,9 @@ mod tests {
         );
         assert_eq!(translate(Language::SimplifiedChinese, "Processes"), "进程");
         assert_eq!(translate(Language::SimplifiedChinese, "Network"), "网络");
+        assert_eq!(translate(Language::SimplifiedChinese, "Storage"), "存储");
+        assert_eq!(translate(Language::SimplifiedChinese, "Used"), "已用");
+        assert_eq!(translate(Language::SimplifiedChinese, "Free"), "可用");
         assert_eq!(
             translate(Language::SimplifiedChinese, "Addresses unavailable"),
             "地址不可用"

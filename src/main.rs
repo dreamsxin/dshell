@@ -53,8 +53,8 @@ use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerMetrics, ServerNetworkInterface, ServerPowerAction, ServerProcess,
-    ServerService, ServerServiceLogs, ServiceAction, UiEvent,
+    ServerDataError, ServerMetrics, ServerMount, ServerNetworkInterface, ServerPowerAction,
+    ServerProcess, ServerService, ServerServiceLogs, ServiceAction, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -661,6 +661,10 @@ fn format_kib(kib: Option<u64>) -> String {
     )
 }
 
+fn format_storage_kib(kib: u64) -> String {
+    format_size(kib.saturating_mul(1024))
+}
+
 fn memory_usage_percent(total_kib: Option<u64>, available_kib: Option<u64>) -> Option<u8> {
     let (total, available) = (total_kib?, available_kib?);
     if total == 0 {
@@ -957,6 +961,9 @@ struct ServerMetricsViewState {
     network: Vec<ServerNetworkInterface>,
     network_loading: bool,
     network_message: String,
+    storage: Vec<ServerMount>,
+    storage_loading: bool,
+    storage_message: String,
     service_logs: Option<ServerServiceLogs>,
     service_logs_loading: bool,
     service_logs_message: String,
@@ -1103,6 +1110,11 @@ impl SshSession {
                 self.server_metrics.network_loading = false;
                 self.server_metrics.network_message.clear();
             }
+            UiEvent::ServerMetrics(ServerData::Storage(storage)) => {
+                self.server_metrics.storage = storage;
+                self.server_metrics.storage_loading = false;
+                self.server_metrics.storage_message.clear();
+            }
             UiEvent::ServerMetrics(ServerData::ProcessAction(result)) => {
                 self.server_metrics.processes_loading = false;
                 self.server_metrics.processes_message = result.message;
@@ -1135,6 +1147,10 @@ impl SshSession {
             UiEvent::ServerMetricsError(ServerDataError::Network(error)) => {
                 self.server_metrics.network_loading = false;
                 self.server_metrics.network_message = error;
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Storage(error)) => {
+                self.server_metrics.storage_loading = false;
+                self.server_metrics.storage_message = error;
             }
             UiEvent::ServerMetricsError(ServerDataError::Services(error)) => {
                 self.server_metrics.services_loading = false;
@@ -1280,14 +1296,15 @@ mod session_tests {
         SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
         UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
         enqueue_session_request, filesystem_usage_percent, forget_stopped_forward,
-        format_alert_time, format_log_time, format_rate, is_authentication_failure,
-        is_sftp_transfer_command, keyword_matches, memory_usage_percent, merge_unique_profiles,
-        move_profile_to_group, mpsc, parse_alert_percent, recall_compose_history,
-        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
-        rename_profile_group, reorder_group_order, reorder_session_ids, search_result_message,
-        server_alert_observations, session_editor_escape, session_editor_key,
-        session_matches_target, session_terminal_size_for_split, split_panel_terminal_size,
-        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport, watch,
+        format_alert_time, format_log_time, format_rate, format_storage_kib,
+        is_authentication_failure, is_sftp_transfer_command, keyword_matches, memory_usage_percent,
+        merge_unique_profiles, move_profile_to_group, mpsc, parse_alert_percent,
+        recall_compose_history, remember_compose_history, remember_stopped_forward,
+        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
+        reorder_session_ids, search_result_message, server_alert_observations,
+        session_editor_escape, session_editor_key, session_matches_target,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
+        take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1765,6 +1782,12 @@ mod session_tests {
         assert_eq!(format_rate(0.0), "0 B/s");
         assert_eq!(format_rate(f64::NAN), "0 B/s");
         assert!(format_rate(1536.0).ends_with("/s"));
+    }
+
+    #[test]
+    fn storage_sizes_are_formatted_from_kib() {
+        assert_eq!(format_storage_kib(0), "0 B");
+        assert_eq!(format_storage_kib(1024), "1.0 MiB");
     }
 
     #[test]
@@ -2258,6 +2281,7 @@ struct AppView {
     inspector_server_open: bool,
     inspector_processes_open: bool,
     inspector_network_open: bool,
+    inspector_storage_open: bool,
     pending_process_termination: Option<(u64, u32)>,
     inspector_services_open: bool,
     pending_service_action: Option<(u64, String, ServiceAction)>,
@@ -2576,6 +2600,7 @@ impl AppView {
             inspector_server_open: true,
             inspector_processes_open: true,
             inspector_network_open: true,
+            inspector_storage_open: true,
             pending_process_termination: None,
             inspector_services_open: true,
             pending_service_action: None,
@@ -9455,6 +9480,36 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_server_storage(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing storage information.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.storage_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.storage_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        if let Err(error) = command_tx.try_send(TerminalRequest::RefreshServerStorage) {
+            session.server_metrics.storage_message = match error {
+                mpsc::error::TrySendError::Full(_) => queue_full,
+                mpsc::error::TrySendError::Closed(_) => not_accepting,
+            };
+            session.server_metrics.storage_loading = false;
+        } else {
+            session.server_metrics.storage_loading = true;
+            session.server_metrics.storage_message.clear();
+        }
+        cx.notify();
+    }
+
     fn request_process_termination(&mut self, session_id: u64, pid: u32, cx: &mut Context<Self>) {
         let not_connected = self.tr("Connect to the server before terminating a process.");
         if self
@@ -14933,6 +14988,9 @@ impl AppView {
         let network = server_metrics.network.clone();
         let network_loading = server_metrics.network_loading;
         let network_message = server_metrics.network_message.clone();
+        let storage = server_metrics.storage.clone();
+        let storage_loading = server_metrics.storage_loading;
+        let storage_message = server_metrics.storage_message.clone();
         let server_services = server_metrics.services.clone();
         let services_loading = server_metrics.services_loading;
         let services_message = server_metrics.services_message.clone();
@@ -15659,6 +15717,110 @@ impl AppView {
                                         interface.addresses
                                     }),
                             ),
+                    );
+                }
+            }
+            body = body.child(group);
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-storage",
+                self.tr("Storage"),
+                self.inspector_storage_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_storage_open = !this.inspector_storage_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_storage_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let refresh_label = if storage_loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            group = group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-storage", session_id),
+                    refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(storage_loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_storage(session_id, cx);
+                })),
+            );
+            if storage.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if storage_loading {
+                        self.tr("Collecting storage information...")
+                    } else if storage_message.is_empty() {
+                        self.tr("No storage mounts reported yet.")
+                    } else {
+                        self.tr(&storage_message)
+                    },
+                ));
+            } else {
+                for mount in storage {
+                    let tone = if mount.use_percent >= 90 {
+                        Tone::Danger
+                    } else if mount.use_percent >= 75 {
+                        Tone::Warning
+                    } else {
+                        Tone::Success
+                    };
+                    group = group.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .bg(tokens.surface)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_primary)
+                                            .child(mount.mount_point),
+                                    )
+                                    .child(components::pill(
+                                        tokens,
+                                        format!("{}%", mount.use_percent),
+                                        tone,
+                                    )),
+                            )
+                            .child(components::help_text(
+                                tokens,
+                                format!(
+                                    "{} · {}: {} / {} · {}: {}",
+                                    mount.filesystem,
+                                    self.tr("Used"),
+                                    format_storage_kib(mount.used_kib),
+                                    format_storage_kib(mount.total_kib),
+                                    self.tr("Free"),
+                                    format_storage_kib(mount.available_kib),
+                                ),
+                            )),
                     );
                 }
             }

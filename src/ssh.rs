@@ -123,6 +123,16 @@ pub struct ServerNetworkInterface {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ServerMount {
+    pub filesystem: String,
+    pub total_kib: u64,
+    pub used_kib: u64,
+    pub available_kib: u64,
+    pub use_percent: u8,
+    pub mount_point: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerProcessActionResult {
     pub pid: u32,
     pub success: bool,
@@ -203,6 +213,7 @@ pub enum ServerData {
     Metrics(ServerMetrics),
     Processes(Vec<ServerProcess>),
     Network(Vec<ServerNetworkInterface>),
+    Storage(Vec<ServerMount>),
     ProcessAction(ServerProcessActionResult),
     Services(Vec<ServerService>),
     ServiceAction(ServerServiceActionResult),
@@ -214,6 +225,7 @@ pub enum ServerDataError {
     Metrics(String),
     Processes(String),
     Network(String),
+    Storage(String),
     Services(String),
     ServiceLogs(String),
 }
@@ -732,6 +744,9 @@ async fn run_connection_with_known_hosts(
                     Some(TerminalRequest::RefreshServerNetwork) => {
                         refresh_server_network(&mut session, &events).await;
                     }
+                    Some(TerminalRequest::RefreshServerStorage) => {
+                        refresh_server_storage(&mut session, &events).await;
+                    }
                     Some(TerminalRequest::TerminateServerProcess { pid }) => {
                         terminate_server_process(&mut session, &events, pid).await;
                     }
@@ -995,6 +1010,9 @@ const MAX_SERVER_PROCESSES: usize = 50;
 const SERVER_NETWORK_COMMAND: &str = r##"printf 'DSHELL_NETWORK_V1\n'; if command -v ip >/dev/null 2>&1; then ip -o -brief addr show 2>/dev/null | head -n 32 | awk '{name=$1; state=$2; $1=$2=""; sub(/^[ \t]+/, ""); print "IFACE\t" name "\t" state "\t" $0}'; else for path in /sys/class/net/*; do [ -e "$path" ] || continue; name=${path##*/}; state=$(cat "$path/operstate" 2>/dev/null || printf unknown); printf 'IFACE\t%s\t%s\t%s\n' "$name" "$state" 'addresses unavailable'; done | head -n 32; fi"##;
 const MAX_SERVER_NETWORK_INTERFACES: usize = 32;
 
+const SERVER_STORAGE_COMMAND: &str = r##"printf 'DSHELL_STORAGE_V1\n'; df -P -k 2>/dev/null | awk 'NR > 1 && NF >= 6 { mount=$6; for (i=7; i<=NF; i++) mount=mount" " $i; use=$5; gsub(/%/,"",use); print "MOUNT\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" use "\t" mount }' | head -n 32"##;
+const MAX_SERVER_MOUNTS: usize = 32;
+
 const SERVER_SERVICES_COMMAND: &str = r##"if command -v systemctl >/dev/null 2>&1; then services=$(systemctl list-units --type=service --all --no-legend --no-pager 2>/dev/null); if [ $? -eq 0 ] && [ -n "$services" ]; then printf 'DSHELL_SERVICES_V1\n'; printf '%s\n' "$services" | head -n 50 | awk '{unit=$1; load=$2; active=$3; sub=$4; $1=$2=$3=$4=""; sub(/^[ \t]+/, ""); print "SERVICE\t" unit "\t" load "\t" active "\t" sub "\t" $0}'; exit 0; fi; fi; if command -v service >/dev/null 2>&1; then printf 'DSHELL_SERVICES_V1\n'; service --status-all 2>&1 | head -n 50 | awk '$2 == "+" || $2 == "-" || $2 == "?" {mark=$2; name=$4; active=(mark == "+") ? "active" : ((mark == "-") ? "inactive" : "unknown"); print "SERVICE\t" name "\tloaded\t" active "\t" active "\t" $0}'; exit 0; fi; printf 'DSHELL_SERVICES_V1\n'"##;
 const SERVER_SERVICE_LOG_LINES: usize = 80;
 
@@ -1188,6 +1206,60 @@ fn parse_server_network(output: &str) -> Result<Vec<ServerNetworkInterface>> {
     Ok(interfaces)
 }
 
+fn parse_server_storage(output: &str) -> Result<Vec<ServerMount>> {
+    if !output
+        .lines()
+        .any(|line| line.trim() == "DSHELL_STORAGE_V1")
+    {
+        bail!("The remote host did not return a supported storage response.");
+    }
+    let mut mounts = Vec::new();
+    for line in output.lines() {
+        let Some(fields) = line.strip_prefix("MOUNT\t") else {
+            continue;
+        };
+        let fields = fields.splitn(6, '\t').collect::<Vec<_>>();
+        if fields.len() != 6 {
+            bail!("The remote host returned a malformed storage mount row.");
+        }
+        let total_kib = fields[1]
+            .parse::<u64>()
+            .context("The remote host returned an invalid storage total.")?;
+        let used_kib = fields[2]
+            .parse::<u64>()
+            .context("The remote host returned an invalid storage usage.")?;
+        let available_kib = fields[3]
+            .parse::<u64>()
+            .context("The remote host returned an invalid storage availability.")?;
+        let use_percent = fields[4]
+            .parse::<u8>()
+            .context("The remote host returned an invalid storage percentage.")?;
+        if fields[0].trim().is_empty()
+            || fields[5].trim().is_empty()
+            || use_percent > 100
+            || used_kib > total_kib
+            || available_kib > total_kib
+        {
+            bail!("The remote host returned an invalid storage mount row.");
+        }
+        if mounts.len() >= MAX_SERVER_MOUNTS {
+            bail!("The remote host returned too many storage mount rows.");
+        }
+        mounts.push(ServerMount {
+            filesystem: fields[0].trim().to_owned(),
+            total_kib,
+            used_kib,
+            available_kib,
+            use_percent,
+            mount_point: fields[5].trim().to_owned(),
+        });
+    }
+    if mounts.is_empty() {
+        bail!("The remote host did not expose any storage mount rows.");
+    }
+    Ok(mounts)
+}
+
 fn parse_server_services(output: &str) -> Result<Vec<ServerService>> {
     if !output
         .lines()
@@ -1365,6 +1437,55 @@ async fn refresh_server_network(
             let _ = events
                 .send(UiEvent::ServerMetricsError(ServerDataError::Network(
                     "Timed out waiting for server network information.".to_owned(),
+                )))
+                .await;
+        }
+    }
+}
+
+async fn refresh_server_storage(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a server storage channel")?;
+        channel
+            .exec(true, SERVER_STORAGE_COMMAND)
+            .await
+            .context("could not start the server storage command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the server storage response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server storage response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_server_storage(&output)
+    })
+    .await;
+    match result {
+        Ok(Ok(storage)) => {
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::Storage(storage)))
+                .await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Storage(
+                    format!("{error:#}"),
+                )))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Storage(
+                    "Timed out waiting for server storage information.".to_owned(),
                 )))
                 .await;
         }
@@ -2061,10 +2182,11 @@ async fn flush_log(
 #[cfg(test)]
 mod tests {
     use super::{
-        Authentication, ConnectionSpec, JumpSpec, ServerPowerAction, ServiceAction, UiEvent,
-        can_answer_with_password, connection_info_for_key, is_known_host_key, parse_power_action,
-        parse_process_action, parse_server_metrics, parse_server_network, parse_server_processes,
-        parse_server_services, parse_service_action, parse_service_logs, power_action_command,
+        Authentication, ConnectionSpec, JumpSpec, MAX_SERVER_MOUNTS, ServerPowerAction,
+        ServiceAction, UiEvent, can_answer_with_password, connection_info_for_key,
+        is_known_host_key, parse_power_action, parse_process_action, parse_server_metrics,
+        parse_server_network, parse_server_processes, parse_server_services, parse_server_storage,
+        parse_service_action, parse_service_logs, power_action_command,
         process_termination_command, run_connection_with_known_hosts, service_action_command,
         service_logs_command, valid_process_pid, valid_service_name,
     };
@@ -2208,6 +2330,31 @@ mod tests {
         assert!(parse_server_network("IFACE\teth0\tUP\taddress\n").is_err());
         assert!(parse_server_network("DSHELL_NETWORK_V1\nIFACE\t\tUP\taddress\n").is_err());
         assert!(parse_server_network("DSHELL_NETWORK_V1\nIFACE\teth0\tUP\n").is_err());
+    }
+
+    #[test]
+    fn server_storage_parser_reads_bounded_mounts() {
+        let mounts = parse_server_storage(
+            "DSHELL_STORAGE_V1\nMOUNT\t/dev/sda1\t1024\t400\t624\t39\t/\nMOUNT\toverlay\t2048\t1024\t1024\t50\t/var/lib/docker\n",
+        )
+        .unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].filesystem, "/dev/sda1");
+        assert_eq!(mounts[0].mount_point, "/");
+        assert_eq!(mounts[1].use_percent, 50);
+    }
+
+    #[test]
+    fn server_storage_parser_rejects_missing_marker_and_bad_rows() {
+        assert!(parse_server_storage("MOUNT\t/dev/sda1\t1\t1\t0\t0\t/\n").is_err());
+        assert!(parse_server_storage("DSHELL_STORAGE_V1\nMOUNT\t\t1\t1\t0\t0\t/\n").is_err());
+        assert!(parse_server_storage("DSHELL_STORAGE_V1\nMOUNT\t/dev\t2\t3\t0\t80\t/\n").is_err());
+        assert!(parse_server_storage("DSHELL_STORAGE_V1\nMOUNT\t/dev\t1\t0\t1\t101\t/\n").is_err());
+        let mut too_many = String::from("DSHELL_STORAGE_V1\n");
+        for index in 0..=MAX_SERVER_MOUNTS {
+            too_many.push_str(&format!("MOUNT\t/dev/{index}\t1\t0\t1\t0\t/mnt/{index}\n"));
+        }
+        assert!(parse_server_storage(&too_many).is_err());
     }
 
     #[test]
