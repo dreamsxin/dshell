@@ -374,6 +374,17 @@ pub fn collapsible_header(
     label: impl Into<SharedString>,
     open: bool,
 ) -> Stateful<Div> {
+    collapsible_header_with_actions(tokens, id, label, open, div())
+}
+
+/// Collapsible header with an optional trailing action cluster.
+pub fn collapsible_header_with_actions(
+    tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    open: bool,
+    actions: impl IntoElement,
+) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -390,13 +401,20 @@ pub fn collapsible_header(
         .text_color(tokens.text_primary)
         .child(label.into())
         .child(
-            Icon::new(if open {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .with_size(Size::Small)
-            .text_color(tokens.text_secondary),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(tokens::SPACE_1))
+                .child(actions)
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .with_size(Size::Small)
+                    .text_color(tokens.text_secondary),
+                ),
         )
 }
 

@@ -21,7 +21,7 @@ pub const MAX_FONT_SIZE: f32 = 32.0;
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub const DEFAULT_FONT_FAMILY: &str = "monospace";
 const MAX_COLLAPSED_GROUPS: usize = 128;
-const MAX_GROUP_KEY_CHARS: usize = 120;
+pub const MAX_GROUP_NAME_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +50,8 @@ pub struct AppSettings {
     pub collapsed_groups: Vec<String>,
     #[serde(default)]
     pub group_order: Vec<String>,
+    #[serde(default)]
+    pub group_names: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -67,6 +69,7 @@ impl Default for AppSettings {
             inspector_width: INSPECTOR_WIDTH,
             collapsed_groups: Vec::new(),
             group_order: Vec::new(),
+            group_names: Vec::new(),
         }
     }
 }
@@ -101,6 +104,7 @@ impl AppSettings {
             ),
             collapsed_groups: normalize_collapsed_groups(self.collapsed_groups),
             group_order: normalize_group_order(self.group_order),
+            group_names: normalize_group_names(self.group_names),
         }
     }
 
@@ -141,6 +145,8 @@ struct SettingsDocument {
     collapsed_groups: Vec<String>,
     #[serde(default)]
     group_order: Vec<String>,
+    #[serde(default)]
+    group_names: Vec<String>,
 }
 
 pub struct SettingsStore {
@@ -215,6 +221,7 @@ impl SettingsStore {
             inspector_width: document.inspector_width,
             collapsed_groups: document.collapsed_groups,
             group_order: document.group_order,
+            group_names: document.group_names,
         }
         .normalized())
     }
@@ -245,6 +252,7 @@ impl SettingsStore {
             inspector_width: settings.inspector_width,
             collapsed_groups: settings.collapsed_groups,
             group_order: settings.group_order,
+            group_names: settings.group_names,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -284,10 +292,10 @@ fn normalize_collapsed_groups(groups: Vec<String>) -> Vec<String> {
     let mut normalized = BTreeSet::new();
     for group in groups {
         let key = group.trim().to_lowercase();
-        if key.chars().count() <= MAX_GROUP_KEY_CHARS {
+        if key.chars().count() <= MAX_GROUP_NAME_CHARS {
             normalized.insert(key);
         } else {
-            normalized.insert(key.chars().take(MAX_GROUP_KEY_CHARS).collect());
+            normalized.insert(key.chars().take(MAX_GROUP_NAME_CHARS).collect());
         }
     }
     normalized.into_iter().take(MAX_COLLAPSED_GROUPS).collect()
@@ -298,13 +306,33 @@ fn normalize_group_order(groups: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::new();
     for group in groups {
         let key = group.trim().to_lowercase();
-        let key = if key.chars().count() <= MAX_GROUP_KEY_CHARS {
+        let key = if key.chars().count() <= MAX_GROUP_NAME_CHARS {
             key
         } else {
-            key.chars().take(MAX_GROUP_KEY_CHARS).collect()
+            key.chars().take(MAX_GROUP_NAME_CHARS).collect()
         };
         if seen.insert(key.clone()) {
             normalized.push(key);
+            if normalized.len() == MAX_COLLAPSED_GROUPS {
+                break;
+            }
+        }
+    }
+    normalized
+}
+
+fn normalize_group_names(groups: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for group in groups {
+        let name = group.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let name = name.chars().take(MAX_GROUP_NAME_CHARS).collect::<String>();
+        let key = name.to_lowercase();
+        if seen.insert(key) {
+            normalized.push(name);
             if normalized.len() == MAX_COLLAPSED_GROUPS {
                 break;
             }
@@ -344,6 +372,11 @@ mod tests {
             inspector_width: 460.0,
             collapsed_groups: vec!["Production".to_owned(), "production".to_owned()],
             group_order: vec![" Gamma ".to_owned(), "alpha".to_owned(), "gamma".to_owned()],
+            group_names: vec![
+                " Production ".to_owned(),
+                "production".to_owned(),
+                "QA".to_owned(),
+            ],
         };
         store.save(&settings).unwrap();
         assert_eq!(
@@ -353,6 +386,10 @@ mod tests {
         assert_eq!(
             store.load().unwrap().group_order,
             vec!["gamma".to_owned(), "alpha".to_owned()]
+        );
+        assert_eq!(
+            store.load().unwrap().group_names,
+            vec!["Production".to_owned(), "QA".to_owned()]
         );
 
         store
@@ -369,6 +406,7 @@ mod tests {
                 inspector_width: 10_000.0,
                 collapsed_groups: Vec::new(),
                 group_order: Vec::new(),
+                group_names: Vec::new(),
             })
             .unwrap();
         let loaded = store.load().unwrap();
@@ -397,6 +435,7 @@ mod tests {
         assert_eq!(loaded.shortcuts, ShortcutSettings::default());
         assert!(loaded.collapsed_groups.is_empty());
         assert!(loaded.group_order.is_empty());
+        assert!(loaded.group_names.is_empty());
     }
 
     #[test]
@@ -414,6 +453,7 @@ mod tests {
             inspector_width: INSPECTOR_WIDTH,
             collapsed_groups: Vec::new(),
             group_order: Vec::new(),
+            group_names: Vec::new(),
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);

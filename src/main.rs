@@ -39,7 +39,10 @@ use profiles::{
     AuthMethod, HostData, HostProfile, MAX_FORWARD_RULES, ProfileStore, RecentConnection,
     record_recent,
 };
-use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
+use settings::{
+    AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MAX_GROUP_NAME_CHARS, MIN_FONT_SIZE,
+    SettingsStore,
+};
 use sftp::{
     RemoteEntry, RemoteFilesystemInfo, SftpCommand, SftpEvent, TransferKind,
     format_permission_mode, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
@@ -273,6 +276,13 @@ enum SessionEditorSection {
     Security,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupEditorMode {
+    Create,
+    Rename,
+    Delete,
+}
+
 impl SessionEditorSection {
     const ALL: [Self; 3] = [Self::Connection, Self::Authentication, Self::Security];
 
@@ -376,6 +386,36 @@ fn move_profile_to_group(profiles: &mut [HostProfile], name: &str, group: &str) 
     profile.group = group.to_owned();
     sort_profiles(profiles);
     true
+}
+
+fn rename_profile_group(profiles: &mut [HostProfile], old_group: &str, new_group: &str) -> usize {
+    let old_key = collapsed_group_key(old_group);
+    let mut renamed = 0;
+    for profile in &mut *profiles {
+        if collapsed_group_key(&profile.group) == old_key {
+            profile.group = new_group.to_owned();
+            renamed += 1;
+        }
+    }
+    if renamed > 0 {
+        sort_profiles(profiles);
+    }
+    renamed
+}
+
+fn remove_profile_group(profiles: &mut [HostProfile], group: &str) -> usize {
+    let group_key = collapsed_group_key(group);
+    let mut removed = 0;
+    for profile in &mut *profiles {
+        if collapsed_group_key(&profile.group) == group_key {
+            profile.group.clear();
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        sort_profiles(profiles);
+    }
+    removed
 }
 
 fn reorder_group_order(order: &mut Vec<String>, dragged: &str, target: &str) -> bool {
@@ -915,10 +955,11 @@ mod session_tests {
         collapsed_group_key, dragged_panel_width, enqueue_session_request,
         filesystem_usage_percent, forget_stopped_forward, format_log_time, format_rate,
         is_sftp_transfer_command, keyword_matches, move_profile_to_group, mpsc,
-        recall_compose_history, remember_compose_history, remember_stopped_forward, remove_session,
-        reorder_group_order, reorder_session_ids, search_result_message, session_editor_escape,
-        session_editor_key, session_terminal_size_for_split, split_panel_terminal_size,
-        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport, watch,
+        recall_compose_history, remember_compose_history, remember_stopped_forward,
+        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
+        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
+        take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1438,6 +1479,63 @@ mod session_tests {
     }
 
     #[test]
+    fn renaming_a_group_updates_matching_profiles_case_insensitively() {
+        let mut profiles = vec![
+            HostProfile {
+                name: "prod-a".to_owned(),
+                host: "a.example.com".to_owned(),
+                port: 22,
+                username: "ops".to_owned(),
+                group: "Production".to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Password,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+            },
+            HostProfile {
+                name: "prod-b".to_owned(),
+                host: "b.example.com".to_owned(),
+                port: 22,
+                username: "ops".to_owned(),
+                group: "production".to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Password,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+            },
+        ];
+        assert_eq!(
+            rename_profile_group(&mut profiles, " PRODUCTION ", "Live"),
+            2
+        );
+        assert!(profiles.iter().all(|profile| profile.group == "Live"));
+    }
+
+    #[test]
+    fn deleting_a_group_moves_profiles_to_ungrouped() {
+        let mut profiles = vec![HostProfile {
+            name: "prod".to_owned(),
+            host: "prod.example.com".to_owned(),
+            port: 22,
+            username: "ops".to_owned(),
+            group: "Production".to_owned(),
+            favorite: false,
+            auth_method: AuthMethod::Password,
+            identity_file: String::new(),
+            proxy_jump: String::new(),
+            forwards: Vec::new(),
+            keepalive_seconds: 0,
+        }];
+        assert_eq!(remove_profile_group(&mut profiles, "production"), 1);
+        assert!(profiles[0].group.is_empty());
+        assert_eq!(remove_profile_group(&mut profiles, "production"), 0);
+    }
+
+    #[test]
     fn collapsed_group_keys_are_case_insensitive_and_trimmed() {
         assert_eq!(collapsed_group_key("  Production "), "production");
         assert_eq!(collapsed_group_key(""), "");
@@ -1692,6 +1790,11 @@ struct AppView {
     profiles: Vec<HostProfile>,
     recent: Vec<RecentConnection>,
     collapsed_groups: HashSet<String>,
+    group_editor_name: Entity<InputState>,
+    group_editor_open: bool,
+    group_editor_mode: GroupEditorMode,
+    group_editor_source: Option<String>,
+    group_editor_message: String,
     profile_store: Option<ProfileStore>,
     profiles_ready: bool,
     selected_profile: Option<String>,
@@ -1780,6 +1883,7 @@ impl AppView {
         let profile_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search saved hosts"));
         let profile_group = cx.new(|cx| InputState::new(window, cx).placeholder("Ungrouped"));
+        let group_editor_name = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let identity_file =
             cx.new(|cx| InputState::new(window, cx).placeholder("~/.ssh/id_ed25519"));
         let key_passphrase = cx.new(|cx| InputState::new(window, cx).placeholder("Key passphrase"));
@@ -1977,6 +2081,11 @@ impl AppView {
             profiles: data.profiles,
             recent: data.recent,
             collapsed_groups,
+            group_editor_name,
+            group_editor_open: false,
+            group_editor_mode: GroupEditorMode::Create,
+            group_editor_source: None,
+            group_editor_message: String::new(),
             profile_store,
             profiles_ready,
             selected_profile: None,
@@ -2068,6 +2177,7 @@ impl AppView {
             (&self.profile_name, "Production"),
             (&self.profile_search, "Search saved hosts"),
             (&self.profile_group, "Ungrouped"),
+            (&self.group_editor_name, "Group name"),
             (&self.key_passphrase, "Key passphrase"),
             (&self.jump_profile, "Saved jump host name"),
             (&self.jump_password, "Jump host password"),
@@ -3155,6 +3265,158 @@ impl AppView {
         }
     }
 
+    fn open_group_editor(
+        &mut self,
+        mode: GroupEditorMode,
+        group: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.group_editor_mode = mode;
+        self.group_editor_source = group.map(str::to_owned);
+        Self::set_input_value(
+            &self.group_editor_name,
+            group.unwrap_or_default(),
+            window,
+            cx,
+        );
+        self.group_editor_message.clear();
+        self.group_editor_open = true;
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn close_group_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_editor_open = false;
+        self.group_editor_source = None;
+        self.group_editor_message.clear();
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn validate_group_name(&self, raw: &str, source: Option<&str>) -> Result<String, String> {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err(self.tr("Group name is required."));
+        }
+        if name.chars().count() > MAX_GROUP_NAME_CHARS {
+            return Err(self.tr("Group name is too long."));
+        }
+        let key = collapsed_group_key(name);
+        if key == collapsed_group_key("UNGROUPED") {
+            return Err(self.tr("UNGROUPED is reserved."));
+        }
+        let source_key = source.map(collapsed_group_key);
+        let duplicate = self.settings.group_names.iter().any(|existing| {
+            collapsed_group_key(existing) == key && source_key.as_deref() != Some(key.as_str())
+        }) || self.profiles.iter().any(|profile| {
+            collapsed_group_key(&profile.group) == key
+                && source_key.as_deref() != Some(key.as_str())
+        });
+        if duplicate {
+            return Err(self.tr("A group with this name already exists."));
+        }
+        Ok(name.to_owned())
+    }
+
+    fn submit_group_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group_editor_mode == GroupEditorMode::Delete {
+            self.delete_group(window, cx);
+            return;
+        }
+        let raw = self.group_editor_name.read(cx).value();
+        let source = self.group_editor_source.clone();
+        let name = match self.validate_group_name(&raw, source.as_deref()) {
+            Ok(name) => name,
+            Err(error) => {
+                self.group_editor_message = error;
+                cx.notify();
+                return;
+            }
+        };
+        let key = collapsed_group_key(&name);
+        match self.group_editor_mode {
+            GroupEditorMode::Create => {
+                self.settings.group_names.push(name.clone());
+                self.settings.group_order.push(key);
+                self.persist_ui_preferences(cx);
+                self.close_group_editor(window, cx);
+                self.show_toast(self.tr("Group created."), Tone::Success, cx);
+            }
+            GroupEditorMode::Rename => {
+                let Some(source) = self.group_editor_source.clone() else {
+                    self.group_editor_message = self.tr("The group to rename is unavailable.");
+                    cx.notify();
+                    return;
+                };
+                let old_key = collapsed_group_key(&source);
+                let mut profiles = self.profiles.clone();
+                if rename_profile_group(&mut profiles, &source, &name) > 0
+                    && let Err(error) = self.save_workspace(profiles, self.recent.clone())
+                {
+                    self.group_editor_message = error;
+                    cx.notify();
+                    return;
+                }
+                let mut found = false;
+                for existing in &mut self.settings.group_names {
+                    if collapsed_group_key(existing) == old_key {
+                        *existing = name.clone();
+                        found = true;
+                    }
+                }
+                if !found {
+                    self.settings.group_names.push(name.clone());
+                }
+                for existing in &mut self.settings.group_order {
+                    if existing == &old_key {
+                        *existing = key.clone();
+                    }
+                }
+                if !self.settings.group_order.iter().any(|entry| entry == &key) {
+                    self.settings.group_order.push(key.clone());
+                }
+                if self.collapsed_groups.remove(&old_key) {
+                    self.collapsed_groups.insert(key);
+                }
+                self.persist_ui_preferences(cx);
+                self.close_group_editor(window, cx);
+                self.show_toast(self.tr("Group renamed."), Tone::Success, cx);
+            }
+            GroupEditorMode::Delete => unreachable!(),
+        }
+    }
+
+    fn delete_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.group_editor_source.clone() else {
+            self.group_editor_message = self.tr("The group to delete is unavailable.");
+            cx.notify();
+            return;
+        };
+        let mut profiles = self.profiles.clone();
+        if remove_profile_group(&mut profiles, &source) > 0
+            && let Err(error) = self.save_workspace(profiles, self.recent.clone())
+        {
+            self.group_editor_message = error;
+            cx.notify();
+            return;
+        }
+        let key = collapsed_group_key(&source);
+        self.settings
+            .group_names
+            .retain(|group| collapsed_group_key(group) != key);
+        self.settings.group_order.retain(|group| group != &key);
+        self.collapsed_groups.remove(&key);
+        self.persist_ui_preferences(cx);
+        self.close_group_editor(window, cx);
+        self.show_toast(
+            self.tr("Group deleted; hosts moved to Ungrouped."),
+            Tone::Success,
+            cx,
+        );
+    }
+
     fn toggle_group_collapsed(&mut self, group: &str, cx: &mut Context<Self>) {
         let key = collapsed_group_key(group);
         if !self.collapsed_groups.insert(key.clone()) {
@@ -3196,7 +3458,51 @@ impl AppView {
         let target_group = collapsed_group_key(&group);
         let host_group = group.clone();
         let preview_tokens = *tokens;
-        components::collapsible_header(tokens, drop_id, label.clone(), open)
+        let mut actions = div().flex().items_center().gap(px(ui_tokens::SPACE_1));
+        if !group.is_empty() {
+            let rename_group = group.clone();
+            let delete_group = group.clone();
+            actions = actions
+                .child(
+                    components::icon_button(
+                        tokens,
+                        SharedString::from(format!("rename-group-{target_group}")),
+                        IconName::Settings2,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Rename group"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_group_editor(
+                            GroupEditorMode::Rename,
+                            Some(&rename_group),
+                            window,
+                            cx,
+                        );
+                    })),
+                )
+                .child(
+                    components::icon_button(
+                        tokens,
+                        SharedString::from(format!("delete-group-{target_group}")),
+                        IconName::Delete,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Delete group"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_group_editor(
+                            GroupEditorMode::Delete,
+                            Some(&delete_group),
+                            window,
+                            cx,
+                        );
+                    })),
+                );
+        }
+        components::collapsible_header_with_actions(tokens, drop_id, label.clone(), open, actions)
             .rounded(px(ui_tokens::RADIUS_CONTROL))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_group_collapsed(&toggle_group, cx);
@@ -3228,6 +3534,126 @@ impl AppView {
                 }),
             )
             .hover(|style| style.bg(tokens.surface_overlay))
+            .into_any_element()
+    }
+
+    fn group_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let mode = self.group_editor_mode;
+        let source = self.group_editor_source.clone().unwrap_or_default();
+        let title = match mode {
+            GroupEditorMode::Create => self.tr("New group"),
+            GroupEditorMode::Rename => self.tr("Rename group"),
+            GroupEditorMode::Delete => self.tr("Delete group"),
+        };
+        let mut body = div()
+            .id("group-editor-body")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_3))
+            .p(px(ui_tokens::SPACE_4));
+        match mode {
+            GroupEditorMode::Delete => {
+                body = body
+                    .child(components::help_text(
+                        &tokens,
+                        format!("{}: {source}", self.tr("Group")),
+                    ))
+                    .child(components::warning_text(
+                        &tokens,
+                        self.tr("The group will be removed and its hosts moved to Ungrouped."),
+                    ));
+            }
+            GroupEditorMode::Create | GroupEditorMode::Rename => {
+                body = body.child(components::field(
+                    &tokens,
+                    self.tr("Group name"),
+                    &self.group_editor_name,
+                    false,
+                ));
+            }
+        }
+        if !self.group_editor_message.is_empty() {
+            body = body.child(components::warning_text(
+                &tokens,
+                self.group_editor_message.clone(),
+            ));
+        }
+        let action_label = match mode {
+            GroupEditorMode::Delete => self.tr("Delete"),
+            GroupEditorMode::Create | GroupEditorMode::Rename => self.tr("Save"),
+        };
+        let action_kind = if mode == GroupEditorMode::Delete {
+            ButtonKind::Danger
+        } else {
+            ButtonKind::Primary
+        };
+        components::modal_overlay(&tokens, "group-editor-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_group_editor(window, cx);
+                } else if event.keystroke.key.eq_ignore_ascii_case("enter")
+                    && (event.keystroke.modifiers.control || event.keystroke.modifiers.platform)
+                {
+                    cx.stop_propagation();
+                    this.submit_group_editor(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "group-editor-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .child(
+                        components::modal_header(&tokens, title).child(
+                            components::icon_button(
+                                &tokens,
+                                "group-editor-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close"),
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.close_group_editor(window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .child(body)
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "group-editor-cancel",
+                                    self.tr("Cancel"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.close_group_editor(window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "group-editor-submit",
+                                    action_label,
+                                    action_kind,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.submit_group_editor(window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -9569,6 +9995,7 @@ impl AppView {
             inspector_width: self.settings.inspector_width,
             collapsed_groups: self.settings.collapsed_groups.clone(),
             group_order: self.settings.group_order.clone(),
+            group_names: self.settings.group_names.clone(),
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -10186,19 +10613,34 @@ impl AppView {
                 matching_profiles += 1;
             }
 
+            let managed_group_names = self
+                .settings
+                .group_names
+                .iter()
+                .map(|name| (collapsed_group_key(name), name.clone()))
+                .collect::<BTreeMap<_, _>>();
             let mut groups: BTreeMap<String, (String, Vec<usize>)> = BTreeMap::new();
             for (index, profile) in self.profiles.iter().enumerate() {
                 let key = collapsed_group_key(&profile.group);
                 let display = if profile.group.is_empty() {
                     self.tr("UNGROUPED")
                 } else {
-                    profile.group.clone()
+                    managed_group_names
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| profile.group.clone())
                 };
                 groups
                     .entry(key)
                     .or_insert_with(|| (display, Vec::new()))
                     .1
                     .push(index);
+            }
+            for name in &self.settings.group_names {
+                let key = collapsed_group_key(name);
+                groups
+                    .entry(key)
+                    .or_insert_with(|| (name.clone(), Vec::new()));
             }
             if !self.profiles.is_empty() {
                 groups
@@ -10394,6 +10836,19 @@ impl AppView {
                     .p(px(ui_tokens::SPACE_2))
                     .border_t_1()
                     .border_color(tokens.border_subtle)
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "new-group",
+                            IconName::Folder,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            self.tr("New group"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_group_editor(GroupEditorMode::Create, None, window, cx);
+                        })),
+                    )
                     .child(
                         components::button(
                             tokens,
@@ -13139,6 +13594,9 @@ impl Render for AppView {
         }
         if self.session_editor_open {
             root = root.child(self.session_editor(cx));
+        }
+        if self.group_editor_open {
+            root = root.child(self.group_editor(cx));
         }
         if self.auth_prompt.is_some() {
             root = root.child(self.auth_prompt_overlay(cx));

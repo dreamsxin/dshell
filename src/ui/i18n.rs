@@ -100,6 +100,22 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Port" => "端口",
         "Group" => "分组",
         "Group order updated." => "分组顺序已更新。",
+        "New group" => "新建分组",
+        "Rename group" => "重命名分组",
+        "Delete group" => "删除分组",
+        "Group name" => "分组名称",
+        "Group name is required." => "请输入分组名称。",
+        "Group name is too long." => "分组名称过长。",
+        "UNGROUPED is reserved." => "未分组是保留名称。",
+        "A group with this name already exists." => "已存在同名分组。",
+        "The group to rename is unavailable." => "要重命名的分组不可用。",
+        "The group to delete is unavailable." => "要删除的分组不可用。",
+        "The group will be removed and its hosts moved to Ungrouped." => {
+            "该分组将被删除，其中的主机将移至未分组。"
+        }
+        "Group created." => "分组已创建。",
+        "Group renamed." => "分组已重命名。",
+        "Group deleted; hosts moved to Ungrouped." => "分组已删除，主机已移至未分组。",
         "Loaded {name}. Enter the credentials to connect." => "已载入{name}。请输入凭据以连接。",
         "Loaded {name} from recent connections." => "已从最近连接载入{name}。",
         "Loaded a recent connection. Save it as a host profile if you want to keep it." => {

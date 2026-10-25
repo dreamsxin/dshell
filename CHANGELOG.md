@@ -2,6 +2,26 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.13] - 2026-10-25
+
+Adds persistent host-group management to the server sidebar.
+
+### Added
+
+- Create empty groups from the sidebar and persist their display names.
+- Rename groups from the header actions; matching hosts and saved order update together.
+- Delete groups with an explicit confirmation; their hosts move to `UNGROUPED`.
+- Keep older `settings.json` files compatible through optional normalized group metadata.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo test --locked --offline` and
+  `scripts\verify-hard-constraints.ps1` passed (116 unit tests passed, 9
+  Docker-only tests ignored by the unit-test run).
+- The previous Docker SSH integration suite remains green; this milestone only
+  changes group metadata, sidebar UI and settings persistence.
+
 ## [0.1.12] - 2026-10-25
 
 Completes the visible Simplified Chinese feedback for host profiles and the
