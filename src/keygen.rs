@@ -32,6 +32,21 @@ pub struct ExistingKey {
     pub algorithm: String,
 }
 
+/// A key pair copied into or out of the user's SSH directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferredKey {
+    pub private_path: PathBuf,
+    pub public_path: PathBuf,
+    pub public_key: String,
+}
+
+/// The files removed by a key-pair deletion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeletedKeyPair {
+    pub private_removed: bool,
+    pub public_removed: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeyAlgorithm {
     #[default]
@@ -247,6 +262,200 @@ pub fn change_passphrase(path: &Path, old_passphrase: &str, new_passphrase: &str
     result
 }
 
+/// Import an existing OpenSSH private key into the user's SSH directory.
+///
+/// The source is parsed before any write. The destination is derived from the
+/// source filename and neither the private key nor its `.pub` companion is
+/// overwritten. When the source has no public-key file, the public key is
+/// derived from the private-key envelope.
+pub fn import_key(source: &Path, directory: &Path) -> Result<TransferredKey> {
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("The key filename is not valid UTF-8."))?;
+    validate_transfer_name(file_name)?;
+    fs::create_dir_all(directory)
+        .with_context(|| format!("Could not create the key directory {}", directory.display()))?;
+    let destination = directory.join(file_name);
+    if source == destination {
+        bail!("The selected key is already in {}.", directory.display());
+    }
+    copy_key_pair(source, &destination)
+}
+
+/// Export an existing OpenSSH private key and its public key companion to a
+/// user-selected destination. Existing files are never overwritten.
+pub fn export_key(source: &Path, destination: &Path) -> Result<TransferredKey> {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("The export filename is not valid UTF-8."))?;
+    validate_transfer_name(file_name)?;
+    copy_key_pair(source, destination)
+}
+
+/// Delete an existing private key and, when present, its regular `.pub`
+/// companion. The private key is removed first so a failure cannot leave the
+/// secret material behind while reporting success.
+pub fn delete_key_pair(path: &Path) -> Result<DeletedKeyPair> {
+    ensure_regular_file(path)?;
+    let public_path = public_key_path(path);
+    let public_exists = match fs::symlink_metadata(&public_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                bail!(
+                    "Refusing to remove non-regular public key file {}.",
+                    public_path.display()
+                );
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Could not inspect {}", public_path.display()));
+        }
+    };
+
+    fs::remove_file(path)
+        .with_context(|| format!("Could not remove private key {}", path.display()))?;
+    let public_removed = if public_exists {
+        fs::remove_file(&public_path)
+            .with_context(|| format!("Could not remove public key {}", public_path.display()))?;
+        true
+    } else {
+        false
+    };
+    Ok(DeletedKeyPair {
+        private_removed: true,
+        public_removed,
+    })
+}
+
+fn copy_key_pair(source: &Path, destination: &Path) -> Result<TransferredKey> {
+    let pem = read_private_key(source)?;
+    let key = PrivateKey::from_openssh(&*pem)
+        .with_context(|| format!("Could not parse private key {}", source.display()))?;
+    let derived_public_key = key
+        .public_key()
+        .to_openssh()
+        .context("Could not encode the public key")?;
+    let public_key =
+        read_matching_public_key(source, &derived_public_key).unwrap_or(derived_public_key);
+    let public_path = public_key_path(destination);
+    if path_exists(destination) {
+        bail!("{} already exists.", destination.display());
+    }
+    if path_exists(&public_path) {
+        bail!("{} already exists.", public_path.display());
+    }
+    if let Some(parent) = destination.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Could not create the key directory {}", parent.display()))?;
+    }
+
+    if let Err(error) = write_private_key(destination, &pem) {
+        return Err(error);
+    }
+    if let Err(error) = write_public_key(&public_path, &public_key) {
+        let _ = fs::remove_file(destination);
+        return Err(error);
+    }
+
+    Ok(TransferredKey {
+        private_path: destination.to_owned(),
+        public_path,
+        public_key,
+    })
+}
+
+fn read_private_key(path: &Path) -> Result<Zeroizing<String>> {
+    ensure_regular_file(path)?;
+    Ok(Zeroizing::new(fs::read_to_string(path).with_context(
+        || format!("Could not read private key {}", path.display()),
+    )?))
+}
+
+fn read_matching_public_key(source: &Path, derived: &str) -> Option<String> {
+    let public_path = public_key_path(source);
+    let contents = fs::read_to_string(public_path).ok()?;
+    let candidate = contents
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
+    (public_key_material(candidate) == public_key_material(derived)).then(|| candidate.to_owned())
+}
+
+fn public_key_material(key: &str) -> (&str, &str) {
+    let mut fields = key.split_whitespace();
+    (
+        fields.next().unwrap_or_default(),
+        fields.next().unwrap_or_default(),
+    )
+}
+
+fn ensure_regular_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("Could not inspect key file {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("{} is not a regular file.", path.display());
+    }
+    Ok(())
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn validate_transfer_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || matches!(
+            name,
+            "config" | "known_hosts" | "known_hosts.old" | "authorized_keys"
+        )
+        || name.ends_with(".pub")
+        || name.ends_with("-cert.pub")
+    {
+        bail!("The selected filename is not a private-key filename.");
+    }
+    Ok(())
+}
+
+fn write_private_key(path: &Path, contents: &str) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("Could not create private key {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("Could not write private key {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Could not flush private key {}", path.display()))?;
+    Ok(())
+}
+
+fn write_public_key(path: &Path, public_key: &str) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("Could not create public key {}", path.display()))?;
+    file.write_all(format!("{public_key}\n").as_bytes())
+        .with_context(|| format!("Could not write public key {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Could not flush public key {}", path.display()))?;
+    Ok(())
+}
+
 fn temporary_key_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
@@ -388,7 +597,10 @@ fn public_key_path(path: &Path) -> PathBuf {
 mod tests {
     use std::fs;
 
-    use super::{KeyAlgorithm, change_passphrase, discover, generate};
+    use super::{
+        KeyAlgorithm, change_passphrase, delete_key_pair, discover, export_key, generate,
+        import_key,
+    };
     use russh::keys::PrivateKey;
 
     #[test]
@@ -596,5 +808,70 @@ mod tests {
         let file = directory.path().join("id_ed25519");
         fs::write(&file, "private key\n").unwrap();
         assert!(discover(&file).is_err());
+    }
+
+    #[test]
+    fn imports_exports_and_deletes_key_pairs_without_overwriting() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("operator_key");
+        let generated = generate(
+            &source,
+            "import passphrase",
+            "operator@dshell",
+            KeyAlgorithm::Ed25519,
+        )
+        .unwrap();
+        fs::remove_file(&generated.public_path).unwrap();
+        let expected_public_key = PrivateKey::from_openssh(&fs::read_to_string(&source).unwrap())
+            .unwrap()
+            .public_key()
+            .to_openssh()
+            .unwrap();
+
+        let import_dir = tempfile::tempdir().unwrap();
+        let imported = import_key(&source, import_dir.path()).unwrap();
+        assert_eq!(imported.public_key, expected_public_key);
+        assert!(imported.private_path.exists());
+        assert!(imported.public_path.exists());
+        assert!(
+            russh::keys::load_secret_key(&imported.private_path, Some("import passphrase")).is_ok()
+        );
+        assert!(import_key(&source, import_dir.path()).is_err());
+
+        let export_dir = tempfile::tempdir().unwrap();
+        let exported_path = export_dir.path().join("exported_key");
+        let exported = export_key(&imported.private_path, &exported_path).unwrap();
+        assert_eq!(exported.public_key, expected_public_key);
+        assert!(exported.private_path.exists());
+        assert!(exported.public_path.exists());
+        assert!(export_key(&imported.private_path, &exported_path).is_err());
+
+        let deleted = delete_key_pair(&exported.private_path).unwrap();
+        assert_eq!(
+            deleted,
+            super::DeletedKeyPair {
+                private_removed: true,
+                public_removed: true,
+            }
+        );
+        assert!(!exported.private_path.exists());
+        assert!(!exported.public_path.exists());
+    }
+
+    #[test]
+    fn key_transfer_rejects_malformed_or_public_key_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let malformed = directory.path().join("bad_key");
+        fs::write(&malformed, "not an OpenSSH key\n").unwrap();
+        assert!(
+            export_key(&malformed, &directory.path().join("copy"))
+                .unwrap_err()
+                .to_string()
+                .contains("parse")
+        );
+
+        let public = directory.path().join("id_ed25519.pub");
+        fs::write(&public, "ssh-ed25519 AAAA comment\n").unwrap();
+        assert!(import_key(&public, directory.path()).is_err());
     }
 }

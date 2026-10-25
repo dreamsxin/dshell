@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.14`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.15`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -20,6 +20,12 @@ footer. The Session menu can export saved host profiles to a versioned JSON
 backup and import that backup later; exported files contain no recent history,
 passwords, passphrases or private key material, and imports skip duplicate
 profile names without overwriting existing entries.
+
+The Keys panel can discover existing OpenSSH identities, import a private key
+into `~/.ssh`, export a key pair to a user-selected path, change a passphrase,
+copy a public key, and delete a key pair after an explicit confirmation. Key
+files are parsed before transfer, existing destinations are never overwritten,
+and passwords or passphrases are never persisted.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;

@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：密钥管理补齐完成并准备发布 `v0.1.15`。Keys 面板支持导入 OpenSSH 私钥到 `~/.ssh`、导出经校验的私钥和匹配公钥、修改口令、复制公钥，以及带显式确认的密钥对删除；目标文件不会被覆盖，缺失 `.pub` 时从私钥派生公钥，非普通文件不会被删除。新增密钥传输、删除、格式校验和不覆盖失败路径单测；`cargo fmt --all`、`cargo test --locked --offline`（121 项通过、9 项 Docker 专项跳过）、`cargo check --locked --all-targets --offline`、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。新构建已完成，但真实 Windows Keys 面板的图标点击、文件选择器和删除确认因本轮 Computer Use 被物理 `Esc` 中止，仍待手工验证。
+
 2026-10-25，Windows/MSVC：主机资料备份与迁移完成并准备发布 `v0.1.14`。Session 图标菜单新增 dshell 主机资料 JSON 的导入/导出；导出只包含版本化主机资料，不包含最近连接、密码、口令或私钥材料；导入校验版本和全部资料约束，遇到重复名称时跳过且不覆盖已有资料。新增导入/导出往返、未知版本、重复名称、合并去重和无秘密字段单测；`cargo fmt --all`、`cargo test --locked --offline`（119 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 均已完成。真实 Windows 烟测已完成：中文 More 菜单显示导入/导出入口，原生文件选择器成功导出并重新选择 `artifacts/manual-export.json`，界面和 Toast 均确认导入 0 个、跳过 1 个重复项；证据截图为 `artifacts/dshell-v0.1.14-profile-menu-cn.jpg`。
 
 2026-10-25，Windows/MSVC：主机分组管理完成并准备发布 `v0.1.13`。侧栏可创建空分组，分组标题提供重命名和删除图标；重命名会同步主机资料、分组显示名、顺序和折叠状态，删除前明确确认并将主机移至 `UNGROUPED`。分组显示名、顺序和折叠状态写入版本化 UI 设置，旧版配置缺少字段时继续兼容。新增分组重命名/删除纯逻辑单测；`cargo fmt --all`、`cargo test --locked --offline`（116 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 均已完成。真实 Windows DPI、中文 IME、图标点击和删除确认仍需用户手工烟测。
@@ -181,7 +183,7 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 - UI 改版六阶段和阶段 7（可调工作区与连接可观测性）已完成。侧栏（200–360px）与检查器（300–520px）可拖拽并持久化宽度，标签可拖拽排序且 `Alt+1..9` 跟随视觉顺序；列表行的悬停才显示动作（当前动作常驻以支持键盘）仍未实现。命令条已改为扁平图标工具栏，More 菜单按 Session/View/Tools 分组提供图标、名称和快捷键提示，标签上下文菜单也已支持右键和省略号入口；仍不支持子菜单、自定义工具栏或面板停靠。Transfers 组已显示实时速率并可取消，但不支持暂停；Forwards 组可停止并重新启动规则，已停止规则只保留在当前会话内。Connection 组展示主机密钥算法与 SHA256 指纹，但 russh 0.64.1 未暴露协商后的 kex/cipher/MAC。标签顺序不跨重启持久化。会话属性、设置、密钥生成、认证提示和日志回放已统一为模态并支持 `Esc`；SFTP、转发和片段面板仍是右侧停靠样式，模态尚无 140–180 ms 的出现/关闭过渡动画，Toast 也没有排队或历史记录。深/浅主题对比度与 9–32 px 字号、三档 DPI 对应的逻辑视口已用单测覆盖，但 Windows 100%/150%/200% 实际缩放、中文 IME 组合输入和终端字形像素对齐仍需在隔离桌面人工烟测。
 - 键盘映射覆盖常见按键和修饰键，但尚未验证完整 IME 组合输入；文本选择仍按字符范围处理，终端图像协议未实现。
 - 当前通过 GPUI flex 元素绘制样式化网格，尚未实现自定义 `TerminalElement`、字体 shaping、精确字素宽度/重排或渲染性能优化。
-- 当前认证已覆盖密码、OpenSSH 私钥、键盘交互（含 OTP/多因素逐提示输入）和系统 agent；Keys 面板可发现 `~/.ssh` 中的候选身份、填入主机认证表单并复制 `.pub` 公钥，也可生成 Ed25519、RSA 3072/4096 和 ECDSA P-256/P-384。改口令、导入导出或删除、GSSAPI、证书文件和硬件密钥仍待实现。Windows 上私钥文件权限依赖用户目录 ACL，未额外设置 ACL。
+- 当前认证已覆盖密码、OpenSSH 私钥、键盘交互（含 OTP/多因素逐提示输入）和系统 agent；Keys 面板可发现 `~/.ssh` 中的候选身份、填入主机认证表单、复制 `.pub` 公钥、生成 Ed25519/RSA/ECDSA、修改口令，以及导入、导出和删除密钥对。GSSAPI、证书文件和硬件密钥仍待实现。Windows 上私钥文件权限依赖用户目录 ACL，未额外设置 ACL。
 - 首次连接不会弹出信任确认；用户需先通过独立可信渠道验证服务器指纹并写入 OpenSSH known_hosts。
 - Windows OpenSSH agent/Pageant 路径已实现但尚未在安装并加载身份的桌面环境做自动化验证；私钥口令错误与隔离 Docker 私钥认证已覆盖。
 - 跳板机当前只支持一层已保存主机引用，不支持 `ProxyJump` 列表、ProxyCommand、按通配符/`Match` 自动选择，也不支持在连接提示中临时输入跳板缺口令以外的交互式认证。跳板连接失败原因会显示在会话状态中，但不会针对单跳弹出独立重试对话框。

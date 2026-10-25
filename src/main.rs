@@ -1907,6 +1907,9 @@ struct AppView {
     key_change_new_passphrase: Entity<InputState>,
     key_change_message: String,
     key_change_visible: bool,
+    key_delete_path: Option<PathBuf>,
+    key_delete_message: String,
+    key_delete_visible: bool,
     auth_prompt: Option<AuthPromptState>,
     auth_prompt_inputs: Vec<Entity<InputState>>,
     auth_prompt_plain_inputs: Vec<Entity<InputState>>,
@@ -2198,6 +2201,9 @@ impl AppView {
             key_change_new_passphrase,
             key_change_message: String::new(),
             key_change_visible: false,
+            key_delete_path: None,
+            key_delete_message: String::new(),
+            key_delete_visible: false,
             auth_prompt: None,
             auth_prompt_inputs,
             auth_prompt_plain_inputs,
@@ -9503,6 +9509,9 @@ impl AppView {
             self.key_change_visible = false;
             self.key_change_path = None;
             self.key_change_message.clear();
+            self.key_delete_visible = false;
+            self.key_delete_path = None;
+            self.key_delete_message.clear();
             self.settings_visible = false;
             self.snippets_visible = false;
             self.keywords_visible = false;
@@ -9518,6 +9527,9 @@ impl AppView {
             self.key_change_visible = false;
             self.key_change_path = None;
             self.key_change_message.clear();
+            self.key_delete_visible = false;
+            self.key_delete_path = None;
+            self.key_delete_message.clear();
             Self::set_input_value(&self.key_change_old_passphrase, "", window, cx);
             Self::set_input_value(&self.key_change_new_passphrase, "", window, cx);
             window.focus(&self.terminal_focus);
@@ -9541,6 +9553,161 @@ impl AppView {
                 );
             }
         }
+    }
+
+    fn begin_key_import(&mut self, cx: &mut Context<Self>) {
+        let prompt: SharedString = self.tr("Import OpenSSH private key").into();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(prompt),
+        });
+        let directory = home_directory().join(".ssh");
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = receiver.await
+                && let Some(path) = paths.pop()
+            {
+                let _ = this.update(cx, |view, cx| {
+                    view.import_key_from_path(&path, &directory, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn import_key_from_path(&mut self, source: &Path, directory: &Path, cx: &mut Context<Self>) {
+        let source = source.to_owned();
+        let directory = directory.to_owned();
+        self.key_message = self.tr("Importing key...");
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { keygen::import_key(&source, &directory) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(imported) => {
+                        view.key_message = format!(
+                            "{} {}.",
+                            view.tr("Imported key"),
+                            imported.private_path.display()
+                        );
+                        view.refresh_existing_keys();
+                        view.show_toast(view.tr("Key imported."), Tone::Success, cx);
+                    }
+                    Err(error) => {
+                        view.key_message = format!("{error:#}");
+                        view.show_toast(view.tr("Key import failed."), Tone::Danger, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn begin_key_export(&mut self, key: &keygen::ExistingKey, cx: &mut Context<Self>) {
+        let source = key.private_path.clone();
+        let suggested = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("id_ed25519")
+            .to_owned();
+        let directory = home_directory();
+        let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                let _ = this.update(cx, |view, cx| {
+                    view.export_key_to_path(&source, &path, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn export_key_to_path(&mut self, source: &Path, destination: &Path, cx: &mut Context<Self>) {
+        let source = source.to_owned();
+        let destination = destination.to_owned();
+        self.key_message = self.tr("Exporting key...");
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { keygen::export_key(&source, &destination) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(exported) => {
+                        view.key_message = format!(
+                            "{} {}.",
+                            view.tr("Exported key"),
+                            exported.private_path.display()
+                        );
+                        view.show_toast(view.tr("Key exported."), Tone::Success, cx);
+                    }
+                    Err(error) => {
+                        view.key_message = format!("{error:#}");
+                        view.show_toast(view.tr("Key export failed."), Tone::Danger, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn request_key_delete(&mut self, key: &keygen::ExistingKey, cx: &mut Context<Self>) {
+        self.key_delete_path = Some(key.private_path.clone());
+        self.key_delete_message.clear();
+        self.key_delete_visible = true;
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn cancel_key_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_delete_visible = false;
+        self.key_delete_path = None;
+        self.key_delete_message.clear();
+        if self.keys_visible {
+            self.request_overlay_focus();
+        } else {
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
+    fn confirm_key_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.key_delete_path.clone() else {
+            return;
+        };
+        let path_for_ui = path.clone();
+        self.key_delete_message = self.tr("Deleting key...");
+        self.key_delete_visible = false;
+        self.key_delete_path = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { keygen::delete_key_pair(&path) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(_) => {
+                        view.key_delete_message.clear();
+                        view.refresh_existing_keys();
+                        view.show_toast(view.tr("Key deleted."), Tone::Success, cx);
+                    }
+                    Err(error) => {
+                        view.key_delete_path = Some(path_for_ui.clone());
+                        view.key_delete_visible = true;
+                        view.key_delete_message = format!("{error:#}");
+                        view.request_overlay_focus();
+                        view.show_toast(view.tr("Key deletion failed."), Tone::Danger, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn use_existing_key(
@@ -9720,11 +9887,25 @@ impl AppView {
                 })),
             );
         }
-        let mut existing_keys_panel = div()
+        let mut existing_keys_panel = div().flex().flex_col().gap(px(ui_tokens::SPACE_2));
+        let existing_keys_header = div()
             .flex()
-            .flex_col()
+            .items_center()
+            .justify_between()
             .gap(px(ui_tokens::SPACE_2))
-            .child(components::section_label(&tokens, self.tr("Existing keys")));
+            .child(components::section_label(&tokens, self.tr("Existing keys")))
+            .child(
+                components::icon_button(
+                    &tokens,
+                    "import-key",
+                    IconName::FolderOpen,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    self.tr("Import key"),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.begin_key_import(cx))),
+            );
+        existing_keys_panel = existing_keys_panel.child(existing_keys_header);
         if existing_keys.is_empty() {
             existing_keys_panel = existing_keys_panel.child(components::help_text(
                 &tokens,
@@ -9744,6 +9925,8 @@ impl AppView {
                 let use_tooltip = self.tr("Use for SSH");
                 let change_tooltip = self.tr("Change passphrase");
                 let copy_tooltip = self.tr("Copy public key");
+                let export_tooltip = self.tr("Export key");
+                let delete_tooltip = self.tr("Delete key");
                 let mut actions = div().flex().items_center().gap(px(ui_tokens::SPACE_1));
                 actions = actions.child(
                     components::icon_button(
@@ -9790,6 +9973,34 @@ impl AppView {
                         })),
                     );
                 }
+                let key_for_export = key.clone();
+                actions = actions.child(
+                    components::icon_button(
+                        &tokens,
+                        ("existing-key-export", index),
+                        IconName::ArrowUp,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        export_tooltip,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_key_export(&key_for_export, cx);
+                    })),
+                );
+                let key_for_delete = key.clone();
+                actions = actions.child(
+                    components::icon_button(
+                        &tokens,
+                        ("existing-key-delete", index),
+                        IconName::Delete,
+                        ButtonKind::Danger,
+                        ButtonSize::Small,
+                        delete_tooltip,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_key_delete(&key_for_delete, cx);
+                    })),
+                );
                 existing_keys_panel = existing_keys_panel.child(
                     div()
                         .flex()
@@ -10054,6 +10265,99 @@ impl AppView {
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
                                         this.change_key_passphrase(window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn key_delete_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let path = self
+            .key_delete_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.tr("No key selected."));
+        let mut body = div()
+            .id("key-delete-body")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_3))
+            .p(px(ui_tokens::SPACE_4))
+            .child(components::help_text(
+                &tokens,
+                format!("{}: {path}", self.tr("Private key path")),
+            ))
+            .child(components::warning_text(
+                &tokens,
+                self.tr(
+                    "The private key and its .pub companion will be permanently removed from disk.",
+                ),
+            ));
+        if !self.key_delete_message.is_empty() {
+            body = body.child(components::warning_text(
+                &tokens,
+                self.key_delete_message.clone(),
+            ));
+        }
+        components::modal_overlay(&tokens, "key-delete-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.cancel_key_delete(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "key-delete-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .child(
+                        components::modal_header(&tokens, self.tr("Delete key")).child(
+                            components::icon_button(
+                                &tokens,
+                                "key-delete-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close"),
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.cancel_key_delete(window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .child(body)
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "key-delete-cancel",
+                                    self.tr("Keep key"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.cancel_key_delete(window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "key-delete-confirm",
+                                    self.tr("Delete key"),
+                                    ButtonKind::Danger,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.confirm_key_delete(cx);
                                     },
                                 )),
                             ),
@@ -13748,6 +14052,9 @@ impl Render for AppView {
         }
         if self.keys_visible && self.key_change_visible {
             root = root.child(self.key_change_panel(cx));
+        }
+        if self.keys_visible && self.key_delete_visible {
+            root = root.child(self.key_delete_panel(cx));
         }
         if self.settings_visible {
             root = root.child(self.settings_panel(cx));

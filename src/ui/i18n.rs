@@ -333,6 +333,25 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         }
         "Copy public key" => "复制公钥",
         "Public key copied." => "公钥已复制。",
+        "Import key" => "导入密钥",
+        "Import OpenSSH private key" => "导入 OpenSSH 私钥",
+        "Importing key..." => "正在导入密钥……",
+        "Imported key" => "已导入密钥",
+        "Key imported." => "密钥已导入。",
+        "Key import failed." => "密钥导入失败。",
+        "Export key" => "导出密钥",
+        "Exporting key..." => "正在导出密钥……",
+        "Exported key" => "已导出密钥",
+        "Key exported." => "密钥已导出。",
+        "Key export failed." => "密钥导出失败。",
+        "Delete key" => "删除密钥",
+        "Keep key" => "保留密钥",
+        "The private key and its .pub companion will be permanently removed from disk." => {
+            "私钥及其 .pub 公钥文件将从磁盘永久删除。"
+        }
+        "Deleting key..." => "正在删除密钥……",
+        "Key deleted." => "密钥已删除。",
+        "Key deletion failed." => "密钥删除失败。",
         "Change passphrase" => "修改口令",
         "Change key passphrase" => "修改密钥口令",
         "Current passphrase" => "当前口令",

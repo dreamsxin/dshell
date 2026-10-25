@@ -2,6 +2,32 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.15] - 2026-10-25
+
+Adds OpenSSH key-pair management to the Keys panel.
+
+### Added
+
+- Import an existing OpenSSH private key into `~/.ssh` without overwriting an
+  existing key or relying on a sidecar `.pub` file.
+- Export a validated private key and its matching public key to a selected
+  destination.
+- Delete a discovered key pair only after an explicit confirmation, with safe
+  handling for missing or non-regular public-key companions.
+- Add Simplified Chinese labels and feedback for key import, export and delete.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo test --locked --offline` and
+  `scripts\verify-hard-constraints.ps1` passed (121 unit tests passed, 9
+  Docker-only tests ignored by the unit-test run).
+- `cargo check --locked --all-targets --offline` and
+  `scripts\test-docker-ssh.ps1` passed (9 Docker integration tests).
+- The new Windows Keys-panel import/export/delete clicks and confirmation
+  remain a manual desktop check; the isolated Computer Use turn was stopped
+  before those actions were completed.
+
 ## [0.1.14] - 2026-10-25
 
 Adds credential-free host profile backup and migration.
