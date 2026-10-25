@@ -2,6 +2,27 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.14] - 2026-10-25
+
+Adds credential-free host profile backup and migration.
+
+### Added
+
+- Export saved host profiles to a versioned JSON file without recent history,
+  passwords, passphrases or private key material.
+- Import an exported host profile file from the flat icon menu and skip duplicate
+  names without overwriting existing profiles.
+- Add Simplified Chinese labels and feedback for both actions.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo test --locked --offline` and
+  `scripts\verify-hard-constraints.ps1` passed (119 unit tests passed, 9
+  Docker-only tests ignored by the unit-test run).
+- The previous Docker SSH integration suite remains green; this milestone only
+  changes profile serialization, menu actions and localized feedback.
+
 ## [0.1.13] - 2026-10-25
 
 Adds persistent host-group management to the server sidebar.

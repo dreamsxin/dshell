@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.13`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.14`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -16,7 +16,10 @@ Deleting a group moves its hosts to `UNGROUPED`. Group definitions, collapsed
 state and order are saved with the UI settings; older settings files load with
 all groups expanded and the groups in their default order. The Simplified
 Chinese shell also covers profile load/save/delete feedback and the main menu
-footer.
+footer. The Session menu can export saved host profiles to a versioned JSON
+backup and import that backup later; exported files contain no recent history,
+passwords, passphrases or private key material, and imports skip duplicate
+profile names without overwriting existing entries.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;

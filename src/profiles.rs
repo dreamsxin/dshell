@@ -1,4 +1,9 @@
-use std::{collections::HashSet, env, fs, io::ErrorKind, path::PathBuf};
+use std::{
+    collections::HashSet,
+    env, fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +11,8 @@ use crate::forward::ForwardRuleSpec;
 
 const DOCUMENT_VERSION: u8 = 2;
 const SUPPORTED_DOCUMENT_VERSIONS: [u8; 2] = [1, 2];
+const EXPORT_DOCUMENT_VERSION: u8 = 1;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 1] = [EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 
@@ -92,6 +99,13 @@ struct ProfileDocument {
     profiles: Vec<HostProfile>,
     #[serde(default)]
     recent: Vec<RecentConnection>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileExportDocument {
+    version: u8,
+    profiles: Vec<HostProfile>,
 }
 
 pub struct ProfileStore {
@@ -186,6 +200,55 @@ impl ProfileStore {
             )
         })
     }
+}
+
+/// Export host profiles without recent-connection history or any credentials.
+pub fn export_profiles(path: &Path, profiles: &[HostProfile]) -> Result<(), String> {
+    validate_profiles(profiles)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "The host profile export path has no parent directory.".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Could not create host profile export directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let contents = serde_json::to_vec_pretty(&ProfileExportDocument {
+        version: EXPORT_DOCUMENT_VERSION,
+        profiles: profiles.to_vec(),
+    })
+    .map_err(|error| format!("Could not serialize host profile export: {error}"))?;
+    fs::write(path, contents).map_err(|error| {
+        format!(
+            "Could not write host profile export at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Import host profiles from the versioned, credential-free export format.
+pub fn import_profiles(path: &Path) -> Result<Vec<HostProfile>, String> {
+    let contents = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Could not read host profile export at {}: {error}",
+            path.display()
+        )
+    })?;
+    let document: ProfileExportDocument = serde_json::from_str(&contents).map_err(|error| {
+        format!(
+            "Could not parse host profile export at {}: {error}",
+            path.display()
+        )
+    })?;
+    if !SUPPORTED_EXPORT_DOCUMENT_VERSIONS.contains(&document.version) {
+        return Err(format!(
+            "Host profile export version {} is not supported.",
+            document.version
+        ));
+    }
+    validate_profiles(&document.profiles)?;
+    Ok(document.profiles)
 }
 
 pub fn record_recent(recent: &mut Vec<RecentConnection>, entry: RecentConnection) {
@@ -335,6 +398,55 @@ mod tests {
         assert_eq!(store.load().unwrap(), data);
         let contents = fs::read_to_string(&store.path).unwrap();
         assert!(!contents.to_lowercase().contains("password"));
+    }
+
+    #[test]
+    fn profile_exports_round_trip_without_recent_history_or_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("export.json");
+        let profiles = vec![HostProfile {
+            group: "Production".to_owned(),
+            favorite: true,
+            proxy_jump: "bastion".to_owned(),
+            forwards: vec![ForwardRuleSpec {
+                kind: ForwardKind::Local,
+                listen_host: "127.0.0.1".to_owned(),
+                listen_port: 15432,
+                target_host: "db.internal".to_owned(),
+                target_port: 5432,
+            }],
+            keepalive_seconds: 30,
+            ..profile("staging")
+        }];
+
+        export_profiles(&path, &profiles).unwrap();
+        assert_eq!(import_profiles(&path).unwrap(), profiles);
+        let contents = fs::read_to_string(path).unwrap();
+        assert!(!contents.contains("recent"));
+        assert!(!contents.to_lowercase().contains("password"));
+        assert!(!contents.to_lowercase().contains("passphrase"));
+        assert!(!contents.to_lowercase().contains("private_key"));
+    }
+
+    #[test]
+    fn profile_exports_reject_unknown_versions_and_duplicate_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("export.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 99,
+                "profiles": []
+            }"#,
+        )
+        .unwrap();
+        assert!(import_profiles(&path).is_err());
+
+        let duplicate = HostProfile {
+            name: "STAGING".to_owned(),
+            ..profile("staging")
+        };
+        assert!(export_profiles(&path, &[profile("staging"), duplicate]).is_err());
     }
 
     #[test]

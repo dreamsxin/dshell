@@ -297,6 +297,15 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Start" => "启动",
         "Open session log" => "打开会话日志",
         "Import OpenSSH config" => "导入 OpenSSH 配置",
+        "Import dshell host profiles" => "导入 dshell 主机资料",
+        "Export host profiles" => "导出主机资料",
+        "Host profiles are unavailable for export." => "主机资料不可用于导出。",
+        "Could not export host profiles." => "无法导出主机资料。",
+        "Could not import host profiles." => "无法导入主机资料。",
+        "Exported {count} host profile(s) to {path}." => "已将{count}个主机资料导出到{path}。",
+        "Imported {added} host profile(s) from {path}; skipped {skipped} duplicate(s)." => {
+            "已从{path}导入{added}个主机资料，跳过{skipped}个重复项。"
+        }
         "Upload file" => "上传文件",
         "Choose download folder" => "选择下载文件夹",
         "Upload folder" => "上传文件夹",
@@ -542,6 +551,14 @@ mod tests {
                 "Loaded {name}. Enter the credentials to connect."
             ),
             "已载入{name}。请输入凭据以连接。"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Export host profiles"),
+            "导出主机资料"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Import dshell host profiles"),
+            "导入 dshell 主机资料"
         );
         assert_eq!(
             translate(

@@ -37,6 +37,7 @@ use gpui_component::{
 use openssh_config::import_openssh_config;
 use profiles::{
     AuthMethod, HostData, HostProfile, MAX_FORWARD_RULES, ProfileStore, RecentConnection,
+    export_profiles as export_host_profiles, import_profiles as import_host_profiles,
     record_recent,
 };
 use settings::{
@@ -452,6 +453,30 @@ fn sort_profiles(profiles: &mut [HostProfile]) {
             .cmp(&right.group.to_lowercase())
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
+}
+
+fn merge_unique_profiles(
+    profiles: &mut Vec<HostProfile>,
+    imported: impl IntoIterator<Item = HostProfile>,
+) -> (usize, usize) {
+    let mut names = profiles
+        .iter()
+        .map(|profile| profile.name.to_lowercase())
+        .collect::<HashSet<_>>();
+    let mut added = 0;
+    let mut skipped = 0;
+    for profile in imported {
+        if names.insert(profile.name.to_lowercase()) {
+            profiles.push(profile);
+            added += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    if added > 0 {
+        sort_profiles(profiles);
+    }
+    (added, skipped)
 }
 
 fn build_authentication(
@@ -954,8 +979,8 @@ mod session_tests {
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
         collapsed_group_key, dragged_panel_width, enqueue_session_request,
         filesystem_usage_percent, forget_stopped_forward, format_log_time, format_rate,
-        is_sftp_transfer_command, keyword_matches, move_profile_to_group, mpsc,
-        recall_compose_history, remember_compose_history, remember_stopped_forward,
+        is_sftp_transfer_command, keyword_matches, merge_unique_profiles, move_profile_to_group,
+        mpsc, recall_compose_history, remember_compose_history, remember_stopped_forward,
         remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
         reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
@@ -1467,6 +1492,39 @@ mod session_tests {
                 .is_empty()
         );
         assert!(!move_profile_to_group(&mut profiles, "missing", "Prod"));
+    }
+
+    #[test]
+    fn merging_imported_profiles_skips_duplicate_names_and_sorts_new_hosts() {
+        fn profile(name: &str, group: &str) -> HostProfile {
+            HostProfile {
+                name: name.to_owned(),
+                host: format!("{name}.example.com"),
+                port: 22,
+                username: "ops".to_owned(),
+                group: group.to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Password,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+            }
+        }
+
+        let mut profiles = vec![profile("existing", "Production")];
+        let (added, skipped) = merge_unique_profiles(
+            &mut profiles,
+            vec![profile("EXISTING", "Other"), profile("new", "Development")],
+        );
+        assert_eq!((added, skipped), (1, 1));
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "existing"]
+        );
     }
 
     #[test]
@@ -3043,6 +3101,90 @@ impl AppView {
         .detach();
     }
 
+    fn begin_profile_export(&mut self, cx: &mut Context<Self>) {
+        if !self.profiles_ready {
+            self.profile_message = self.tr("Host profiles are unavailable for export.");
+            self.show_toast(self.profile_message.clone(), Tone::Danger, cx);
+            return;
+        }
+        let directory = home_directory();
+        let receiver = cx.prompt_for_new_path(&directory, Some("dshell-hosts.json"));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                let _ = this.update(cx, |view, cx| view.export_profiles(&path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn export_profiles(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Err(error) = export_host_profiles(path, &self.profiles) {
+            self.profile_message = error;
+            self.show_toast(self.tr("Could not export host profiles."), Tone::Danger, cx);
+            return;
+        }
+        self.profile_message = self
+            .tr("Exported {count} host profile(s) to {path}.")
+            .replace("{count}", &self.profiles.len().to_string())
+            .replace("{path}", &path.display().to_string());
+        self.show_toast(self.profile_message.clone(), Tone::Success, cx);
+    }
+
+    fn begin_profile_import(&mut self, cx: &mut Context<Self>) {
+        let prompt: SharedString = self.tr("Import dshell host profiles").into();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(prompt),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = receiver.await
+                && let Some(path) = paths.pop()
+            {
+                let _ = this.update(cx, |view, cx| view.import_host_profiles(&path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn import_host_profiles(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !self.profiles_ready {
+            self.profile_message = self
+                .tr("Host profiles could not be loaded; fix the profile file before importing.");
+            self.show_toast(self.profile_message.clone(), Tone::Danger, cx);
+            return;
+        }
+        let imported = match import_host_profiles(path) {
+            Ok(imported) => imported,
+            Err(error) => {
+                self.profile_message = error;
+                self.show_toast(self.tr("Could not import host profiles."), Tone::Danger, cx);
+                return;
+            }
+        };
+        let mut profiles = self.profiles.clone();
+        let (added, skipped) = merge_unique_profiles(&mut profiles, imported);
+        if added > 0 {
+            if let Err(error) = self.save_workspace(profiles, self.recent.clone()) {
+                self.profile_message = error;
+                self.show_toast(self.tr("Could not import host profiles."), Tone::Danger, cx);
+                return;
+            }
+        }
+        self.profile_message = self
+            .tr("Imported {added} host profile(s) from {path}; skipped {skipped} duplicate(s).")
+            .replace("{added}", &added.to_string())
+            .replace("{path}", &path.display().to_string())
+            .replace("{skipped}", &skipped.to_string());
+        let tone = if skipped > 0 {
+            Tone::Warning
+        } else {
+            Tone::Success
+        };
+        self.show_toast(self.profile_message.clone(), tone, cx);
+    }
+
     fn import_config(&mut self, path: &Path, cx: &mut Context<Self>) {
         if !self.profiles_ready {
             self.profile_message =
@@ -3060,22 +3202,8 @@ impl AppView {
             }
         };
         let mut profiles = self.profiles.clone();
-        let mut names = profiles
-            .iter()
-            .map(|profile| profile.name.to_lowercase())
-            .collect::<HashSet<_>>();
-        let mut added = 0;
-        let mut skipped = 0;
-        for profile in imported.profiles {
-            if names.insert(profile.name.to_lowercase()) {
-                profiles.push(profile);
-                added += 1;
-            } else {
-                skipped += 1;
-            }
-        }
+        let (added, skipped) = merge_unique_profiles(&mut profiles, imported.profiles);
         if added > 0 {
-            sort_profiles(&mut profiles);
             if let Err(error) = self.save_workspace(profiles, self.recent.clone()) {
                 self.profile_message = error;
                 cx.notify();
@@ -12282,6 +12410,38 @@ impl AppView {
                     this.menu_visible = false;
                     window.focus(&this.terminal_focus);
                     this.begin_config_import(cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-import-host-profiles",
+                    IconName::FolderOpen,
+                    self.tr("Import dshell host profiles"),
+                    "",
+                    false,
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    window.focus(&this.terminal_focus);
+                    this.begin_profile_import(cx);
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-export-host-profiles",
+                    IconName::ArrowUp,
+                    self.tr("Export host profiles"),
+                    "",
+                    false,
+                    !self.profiles.is_empty(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_visible = false;
+                    window.focus(&this.terminal_focus);
+                    this.begin_profile_export(cx);
                 })),
             )
             .child(

@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：主机资料备份与迁移完成并准备发布 `v0.1.14`。Session 图标菜单新增 dshell 主机资料 JSON 的导入/导出；导出只包含版本化主机资料，不包含最近连接、密码、口令或私钥材料；导入校验版本和全部资料约束，遇到重复名称时跳过且不覆盖已有资料。新增导入/导出往返、未知版本、重复名称、合并去重和无秘密字段单测；`cargo fmt --all`、`cargo test --locked --offline`（119 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 均已完成。真实 Windows 烟测已完成：中文 More 菜单显示导入/导出入口，原生文件选择器成功导出并重新选择 `artifacts/manual-export.json`，界面和 Toast 均确认导入 0 个、跳过 1 个重复项；证据截图为 `artifacts/dshell-v0.1.14-profile-menu-cn.jpg`。
+
 2026-10-25，Windows/MSVC：主机分组管理完成并准备发布 `v0.1.13`。侧栏可创建空分组，分组标题提供重命名和删除图标；重命名会同步主机资料、分组显示名、顺序和折叠状态，删除前明确确认并将主机移至 `UNGROUPED`。分组显示名、顺序和折叠状态写入版本化 UI 设置，旧版配置缺少字段时继续兼容。新增分组重命名/删除纯逻辑单测；`cargo fmt --all`、`cargo test --locked --offline`（116 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 均已完成。真实 Windows DPI、中文 IME、图标点击和删除确认仍需用户手工烟测。
 
 2026-10-25，Windows/MSVC：简体中文界面补齐主机载入、最近连接、收藏、分组移动、主机保存/删除、认证模板反馈、会话删除确认和主菜单版本栏；用户提供的主机名与模板名保持原文，版本栏改为读取 `CARGO_PKG_VERSION`。准备发布 `v0.1.12`。`cargo fmt --all`、`cargo test --locked --offline`（114 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 均已完成；本轮仅修改 UI 本地化与版本显示，上一版本的 `scripts\test-docker-ssh.ps1` 9 项集成测试结果保持通过。真实 Windows DPI、中文 IME 和字形像素对齐仍需用户手工烟测。
