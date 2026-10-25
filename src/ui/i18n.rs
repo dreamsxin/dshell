@@ -75,6 +75,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Prev event" => "上一事件",
         "Next event" => "下一事件",
         "Replay log" => "回放日志",
+        "Replay log (Ctrl+Shift+R)" => "回放日志 (Ctrl+Shift+R)",
         "Search terminal" => "搜索终端",
         "Search saved hosts" => "搜索已保存主机",
         "New session" => "新建会话",
@@ -84,8 +85,10 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Toggle settings" => "切换设置",
         "Toggle sidebar" => "切换侧栏",
         "Toggle compose" => "切换命令编辑器",
+        "Compose a multi-line command, then press Ctrl+Enter" => "编辑多行命令，然后按 Ctrl+Enter",
         "New session (Ctrl+Shift+T)" => "新建会话 (Ctrl+Shift+T)",
         "New SSH Session" => "新建 SSH 会话",
+        "Split with another session" => "与另一会话分屏",
         "Session Properties" => "会话属性",
         "Session properties" => "会话属性",
         "No active sessions" => "没有活动会话",
@@ -96,6 +99,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Host" => "主机",
         "Port" => "端口",
         "Group" => "分组",
+        "name" => "名称",
+        "Unix seconds" => "Unix 秒",
         "Favorite" => "已收藏",
         "Not favorite" => "未收藏",
         "Jump host" => "跳板机",
@@ -104,12 +109,21 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Username" => "用户名",
         "Authentication method" => "认证方式",
         "Password" => "密码",
+        "Passwords are used for a connection and are never saved with host profiles." => {
+            "密码仅用于本次连接，不会随主机资料保存。"
+        }
+        "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet." => {
+            "隐藏的键盘交互提示会使用此密码回答。一次性验证码和明文提示暂不支持。"
+        }
         "Public key" => "公钥",
         "Keyboard-interactive" => "键盘交互",
         "Keyboard interactive" => "键盘交互",
         "Identity file" => "身份文件",
         "Key passphrase" => "密钥口令",
         "Agent" => "代理",
+        "Uses the Windows OpenSSH agent named pipe or Pageant. Load the key into the agent before connecting." => {
+            "使用 Windows OpenSSH agent 命名管道或 Pageant。连接前请先将密钥加载到 agent。"
+        }
         "Jump password" => "跳板机密码",
         "Jump key passphrase" => "跳板机密钥口令",
         "Server identity" => "服务器身份",
@@ -336,11 +350,12 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Stop logging" => "停止记录",
         "Quick commands (Ctrl+Shift+S)" => "快捷命令 (Ctrl+Shift+S)",
         "Settings (Ctrl+Shift+O)" => "设置 (Ctrl+Shift+O)",
-        "dshell 0.1.9 · native GPUI · Esc closes" => "dshell 0.1.9 · 原生 GPUI · 按 Esc 关闭",
+        "dshell 0.1.10 · native GPUI · Esc closes" => "dshell 0.1.10 · 原生 GPUI · 按 Esc 关闭",
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",
         "Disconnecting" => "断开中",
+        "Disconnect" => "断开连接",
         "Copy selection" => "复制选中内容",
         "Paste" => "粘贴",
         "Send file" => "发送文件",
@@ -393,6 +408,55 @@ mod tests {
     fn simplified_chinese_translates_shell_labels_and_preserves_names() {
         assert_eq!(translate(Language::SimplifiedChinese, "Settings"), "设置");
         assert_eq!(translate(Language::SimplifiedChinese, "Generate"), "生成");
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Compose a multi-line command, then press Ctrl+Enter"
+            ),
+            "编辑多行命令，然后按 Ctrl+Enter"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Replay log (Ctrl+Shift+R)"),
+            "回放日志 (Ctrl+Shift+R)"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Split with another session"),
+            "与另一会话分屏"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Disconnect"),
+            "断开连接"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Production"),
+            "生产环境"
+        );
+        assert_eq!(translate(Language::SimplifiedChinese, "name"), "名称");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Unix seconds"),
+            "Unix 秒"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Passwords are used for a connection and are never saved with host profiles."
+            ),
+            "密码仅用于本次连接，不会随主机资料保存。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet."
+            ),
+            "隐藏的键盘交互提示会使用此密码回答。一次性验证码和明文提示暂不支持。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Uses the Windows OpenSSH agent named pipe or Pageant. Load the key into the agent before connecting."
+            ),
+            "使用 Windows OpenSSH agent 命名管道或 Pageant。连接前请先将密钥加载到 agent。"
+        );
         assert_eq!(translate(Language::SimplifiedChinese, "Triggers"), "触发器");
         assert_eq!(
             translate(Language::SimplifiedChinese, "Change key passphrase"),

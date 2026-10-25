@@ -2033,6 +2033,7 @@ impl AppView {
 
     fn set_language_placeholders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholders = [
+            (&self.profile_name, "Production"),
             (&self.profile_search, "Search saved hosts"),
             (&self.profile_group, "Ungrouped"),
             (&self.key_passphrase, "Key passphrase"),
@@ -2057,6 +2058,20 @@ impl AppView {
             (&self.auth_profile_name, "Template name"),
         ];
         for (input, placeholder) in placeholders {
+            let localized = self.tr(placeholder);
+            input.update(cx, |state, cx| state.set_placeholder(localized, window, cx));
+        }
+        for inputs in [&self.auth_prompt_inputs, &self.auth_prompt_plain_inputs] {
+            for (index, input) in inputs.iter().enumerate() {
+                let localized = format!("{} {}", self.tr("Response"), index + 1);
+                input.update(cx, |state, cx| state.set_placeholder(localized, window, cx));
+            }
+        }
+        for (input, placeholder) in [
+            (&self.sftp_name, "name"),
+            (&self.sftp_atime, "Unix seconds"),
+            (&self.sftp_mtime, "Unix seconds"),
+        ] {
             let localized = self.tr(placeholder);
             input.update(cx, |state, cx| state.set_placeholder(localized, window, cx));
         }
@@ -5124,9 +5139,9 @@ impl AppView {
                             .child(components::help_text(
                                 &tokens,
                                 if self.auth_method == AuthMethod::KeyboardInteractive {
-                                    "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet."
+                                    self.tr("Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet.")
                                 } else {
-                                    "Passwords are used for a connection and are never saved with host profiles."
+                                    self.tr("Passwords are used for a connection and are never saved with host profiles.")
                                 },
                             ))
                     })
@@ -5152,7 +5167,7 @@ impl AppView {
                     .when(self.auth_method == AuthMethod::Agent, |panel| {
                         panel.child(components::help_text(
                             &tokens,
-                            "Uses the Windows OpenSSH agent named pipe or Pageant. Load the key into the agent before connecting.",
+                            self.tr("Uses the Windows OpenSSH agent named pipe or Pageant. Load the key into the agent before connecting."),
                         ))
                     })
                     .when(!jump_name.is_empty(), |panel| {
@@ -12059,7 +12074,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.9 · native GPUI · Esc closes"),
+                        self.tr("dshell 0.1.10 · native GPUI · Esc closes"),
                     )),
             );
 

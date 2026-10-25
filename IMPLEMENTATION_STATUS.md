@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：简体中文覆盖补漏完成并准备发布 `v0.1.10`。撰写、日志回放、分屏、断开连接入口、认证说明和剩余输入占位符接入翻译表；切换语言后主机名称、SFTP 属性和键盘交互响应占位符即时刷新。新增本地化键单测；`cargo fmt --all`、`scripts\verify-hard-constraints.ps1`（113 项通过、9 项 Docker 专项跳过）和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。手工 SSH 服务继续绑定 `127.0.0.1:2222`，真实 Windows DPI、中文 IME 和字形像素对齐仍需用户手工烟测。
+
 2026-10-25，Windows/MSVC：主机侧栏分组折叠完成并准备发布 `v0.1.9`。分组标题使用统一的折叠图标，点击后隐藏或展开该组主机；折叠键按大小写不敏感的分组名称保存到版本化 UI 设置，旧版设置文件缺少字段时默认全部展开。新增设置归一化和分组键单测；`cargo fmt --all`、离线 `cargo check --locked --all-targets`、`cargo test --locked --offline`（113 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。真实 Windows DPI、中文 IME 和侧栏实际交互仍需用户手工烟测。
 
 2026-10-25，Windows/MSVC：SFTP 远端文件系统容量信息完成并准备发布 `v0.1.8`。SFTP worker 通过 OpenSSH `statvfs@openssh.com` 读取当前路径所在文件系统的总容量、可用空间、空闲空间、块大小和最长文件名；面板自动显示已用百分比并提供图标刷新入口，服务器不支持扩展时显示明确的中文提示。新增容量百分比边界单测；Docker SFTP 集成覆盖真实文件系统信息读取。`cargo fmt --all`、离线 `cargo check --locked`、`cargo test --locked --offline`（112 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。真实 Windows DPI、中文 IME 和 SFTP 面板实际交互仍需用户手工烟测。
@@ -187,7 +189,7 @@ Cargo 对传递依赖 `proc-macro-error2 2.0.1` 输出 future-incompatibility �
 - 同步输入目标只保存在当前进程，不跨重启；同步范围是键盘、粘贴和组合输入，不包含鼠标、滚动、resize 或片段广播。多会话广播尚无“全选/按分组选择”。关键字高亮与受限触发器规则只保存在当前进程，均最多 32 条且仅支持字面量、不区分大小写匹配；触发器动作限定为高亮、Toast 或预设文本，不执行本地 Shell 或任意脚本。快速命令网格已交付，Xshell 对照能力矩阵与阶段 9 顺序见 ROADMAP。
 - 侧栏分组是单层字符串，已支持拖拽主机到现有分组或 UNGROUPED，并持久化每个分组的折叠状态；尚不支持拖拽创建/重排分组或嵌套目录。最近连接记录在连接启动时写入，不区分认证失败和成功握手。
 
-当前发布版 `v0.1.9`、维护版本 `v0.1.8`、`v0.1.7`、`v0.1.6`、`v0.1.5`、`v0.1.4`、`v0.1.3`、`v0.1.2`、`v0.1.1` 和首个公开版本 `v0.1.0` 的发布范围及验证记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前发布版 `v0.1.10`、维护版本 `v0.1.9`、`v0.1.8`、`v0.1.7`、`v0.1.6`、`v0.1.5`、`v0.1.4`、`v0.1.3`、`v0.1.2`、`v0.1.1` 和首个公开版本 `v0.1.0` 的发布范围及验证记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 下一段接力
 

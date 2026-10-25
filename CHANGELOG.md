@@ -2,6 +2,23 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.10] - 2026-10-25
+
+Completes Simplified Chinese coverage for the workspace shell and input placeholders.
+
+### Added
+
+- Localize compose, replay, split, disconnect, authentication explanations and remaining input placeholder labels.
+- Refresh host name, SFTP metadata and keyboard-interactive response placeholders when the language changes.
+- Keep the manual Docker SSH service available on `127.0.0.1:2222` for desktop smoke testing.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all` and `scripts\verify-hard-constraints.ps1` passed (113 unit tests passed, 9 Docker-only tests ignored by the unit-test run).
+- `scripts\test-docker-ssh.ps1`: 9 integration tests passed.
+- Manual Windows screenshot captured from the running Chinese shell; real DPI, IME and glyph alignment remain manual checks.
+
 ## [0.1.9] - 2026-10-25
 
 Adds persistent collapsing for host groups in the server sidebar.
