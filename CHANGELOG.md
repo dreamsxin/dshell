@@ -2,6 +2,28 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.12] - 2026-10-25
+
+Completes the visible Simplified Chinese feedback for host profiles and the
+main menu footer.
+
+### Added
+
+- Translate profile load, recent-connection, favorite, group-move, save/delete,
+  and authentication-template feedback while preserving user-provided names.
+- Translate the session editor's confirmation buttons and derive the footer
+  version from `CARGO_PKG_VERSION` so it cannot lag behind the package version.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo test --locked --offline` and
+  `scripts\verify-hard-constraints.ps1` passed (114 unit tests passed, 9
+  Docker-only tests ignored by the unit-test run).
+- The existing Docker SSH integration suite remains green from the `v0.1.11`
+  release; this patch changes only UI localization and version display.
+- Fresh-build screenshots are stored in `artifacts/` and remain untracked.
+
 ## [0.1.11] - 2026-10-25
 
 Adds persistent ordering for host groups in the server sidebar.

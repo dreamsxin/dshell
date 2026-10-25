@@ -100,6 +100,31 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Port" => "端口",
         "Group" => "分组",
         "Group order updated." => "分组顺序已更新。",
+        "Loaded {name}. Enter the credentials to connect." => "已载入{name}。请输入凭据以连接。",
+        "Loaded {name} from recent connections." => "已从最近连接载入{name}。",
+        "Loaded a recent connection. Save it as a host profile if you want to keep it." => {
+            "已载入最近连接。若要保留，请将其保存为主机资料。"
+        }
+        "Added {name} to favorites." => "已将{name}加入收藏。",
+        "Removed {name} from favorites." => "已将{name}移出收藏。",
+        "Moved {name} to Ungrouped." => "已将{name}移至未分组。",
+        "Moved {name} to {group}." => "已将{name}移至{group}。",
+        "Could not move the host." => "无法移动主机。",
+        "Saved {name}." => "已保存{name}。",
+        "Deleted {name}." => "已删除{name}。",
+        "Applied authentication template {name}. Re-enter any password or passphrase." => {
+            "已应用认证模板{name}。请重新输入密码或口令。"
+        }
+        "Applied authentication template {name}." => "已应用认证模板{name}。",
+        "Authentication template {name} was not found." => "未找到认证模板{name}。",
+        "Enter a template name." => "请输入模板名称。",
+        "Keep-alive must be a whole number of seconds." => "保活必须是整数秒数。",
+        "Authentication profile storage is unavailable." => "认证资料存储不可用。",
+        "Could not save the authentication template." => "无法保存认证模板。",
+        "Saved authentication template {name}." => "已保存认证模板{name}。",
+        "Select or name a template to delete." => "请选择要删除的模板，或输入模板名称。",
+        "Could not delete the authentication template." => "无法删除认证模板。",
+        "Deleted authentication template {name}." => "已删除认证模板{name}。",
         "name" => "名称",
         "Unix seconds" => "Unix 秒",
         "Favorite" => "已收藏",
@@ -351,7 +376,9 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Stop logging" => "停止记录",
         "Quick commands (Ctrl+Shift+S)" => "快捷命令 (Ctrl+Shift+S)",
         "Settings (Ctrl+Shift+O)" => "设置 (Ctrl+Shift+O)",
-        "dshell 0.1.10 · native GPUI · Esc closes" => "dshell 0.1.10 · 原生 GPUI · 按 Esc 关闭",
+        "dshell {version} · native GPUI · Esc closes" => {
+            "dshell {version} · 原生 GPUI · 按 Esc 关闭"
+        }
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",
@@ -492,6 +519,20 @@ mod tests {
                 "Creates an OpenSSH private key and a .pub file. Existing files are never overwritten. The passphrase is not stored; Unix key files use mode 0600."
             ),
             "创建 OpenSSH 私钥和 .pub 公钥文件。不会覆盖已有文件。口令不会保存；Unix 私钥文件权限为 0600。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Loaded {name}. Enter the credentials to connect."
+            ),
+            "已载入{name}。请输入凭据以连接。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "dshell {version} · native GPUI · Esc closes"
+            ),
+            "dshell {version} · 原生 GPUI · 按 Esc 关闭"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "my-host"), "my-host");
     }

@@ -3051,8 +3051,9 @@ impl AppView {
         self.session_editor_open = true;
         self.request_overlay_focus();
         self.confirm_delete = false;
-        self.profile_message =
-            format!("Loaded {}. Enter the credentials to connect.", profile.name);
+        self.profile_message = self
+            .tr("Loaded {name}. Enter the credentials to connect.")
+            .replace("{name}", &profile.name);
         cx.notify();
     }
 
@@ -3069,7 +3070,9 @@ impl AppView {
         });
         if let Some(profile) = saved.cloned() {
             self.load_profile(&profile, window, cx);
-            self.profile_message = format!("Loaded {} from recent connections.", profile.name);
+            self.profile_message = self
+                .tr("Loaded {name} from recent connections.")
+                .replace("{name}", &profile.name);
             cx.notify();
             return;
         }
@@ -3094,9 +3097,8 @@ impl AppView {
         self.session_editor_open = true;
         self.request_overlay_focus();
         self.confirm_delete = false;
-        self.profile_message =
-            "Loaded a recent connection. Save it as a host profile if you want to keep it."
-                .to_owned();
+        self.profile_message = self
+            .tr("Loaded a recent connection. Save it as a host profile if you want to keep it.");
         cx.notify();
     }
 
@@ -3116,9 +3118,11 @@ impl AppView {
         match self.save_workspace(profiles, self.recent.clone()) {
             Ok(()) => {
                 self.profile_message = if favorite {
-                    format!("Added {name} to favorites.")
+                    self.tr("Added {name} to favorites.")
+                        .replace("{name}", name)
                 } else {
-                    format!("Removed {name} from favorites.")
+                    self.tr("Removed {name} from favorites.")
+                        .replace("{name}", name)
                 };
             }
             Err(error) => self.profile_message = error,
@@ -3135,15 +3139,18 @@ impl AppView {
             Ok(()) => {
                 self.profiles = profiles;
                 self.profile_message = if group.is_empty() {
-                    format!("Moved {name} to Ungrouped.")
+                    self.tr("Moved {name} to Ungrouped.")
+                        .replace("{name}", name)
                 } else {
-                    format!("Moved {name} to {group}.")
+                    self.tr("Moved {name} to {group}.")
+                        .replace("{name}", name)
+                        .replace("{group}", group)
                 };
                 self.show_toast(self.profile_message.clone(), Tone::Success, cx);
             }
             Err(error) => {
                 self.profile_message = error;
-                self.show_toast("Could not move the host.", Tone::Danger, cx);
+                self.show_toast(self.tr("Could not move the host."), Tone::Danger, cx);
             }
         }
     }
@@ -3231,7 +3238,9 @@ impl AppView {
             .find(|profile| profile.name.eq_ignore_ascii_case(name))
             .cloned()
         else {
-            self.auth_profile_message = format!("Authentication template {name} was not found.");
+            self.auth_profile_message = self
+                .tr("Authentication template {name} was not found.")
+                .replace("{name}", name);
             cx.notify();
             return;
         };
@@ -3251,12 +3260,12 @@ impl AppView {
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
         Self::set_input_value(&self.auth_profile_name, &profile.name, window, cx);
         self.applied_auth_profile = Some(profile.name.clone());
-        self.auth_profile_message = format!(
-            "Applied authentication template {}. Re-enter any password or passphrase.",
-            profile.name
-        );
+        self.auth_profile_message = self
+            .tr("Applied authentication template {name}. Re-enter any password or passphrase.")
+            .replace("{name}", &profile.name);
         self.show_toast(
-            format!("Applied authentication template {}.", profile.name),
+            self.tr("Applied authentication template {name}.")
+                .replace("{name}", &profile.name),
             Tone::Success,
             cx,
         );
@@ -3265,7 +3274,7 @@ impl AppView {
     fn save_auth_profile(&mut self, cx: &mut Context<Self>) {
         let name = self.auth_profile_name.read(cx).value().trim().to_owned();
         if name.is_empty() {
-            self.auth_profile_message = "Enter a template name.".to_owned();
+            self.auth_profile_message = self.tr("Enter a template name.");
             cx.notify();
             return;
         }
@@ -3277,7 +3286,7 @@ impl AppView {
                 Ok(value) => value,
                 Err(_) => {
                     self.auth_profile_message =
-                        "Keep-alive must be a whole number of seconds.".to_owned();
+                        self.tr("Keep-alive must be a whole number of seconds.");
                     cx.notify();
                     return;
                 }
@@ -3309,14 +3318,14 @@ impl AppView {
         }
         profiles.sort_by_key(|profile| profile.name.to_lowercase());
         let Some(store) = self.auth_profile_store.as_ref() else {
-            self.auth_profile_message = "Authentication profile storage is unavailable.".to_owned();
+            self.auth_profile_message = self.tr("Authentication profile storage is unavailable.");
             cx.notify();
             return;
         };
         if let Err(error) = store.save(&profiles) {
             self.auth_profile_message = error;
             self.show_toast(
-                "Could not save the authentication template.",
+                self.tr("Could not save the authentication template."),
                 Tone::Danger,
                 cx,
             );
@@ -3324,9 +3333,12 @@ impl AppView {
         }
         self.auth_profiles = profiles;
         self.applied_auth_profile = Some(profile.name.clone());
-        self.auth_profile_message = format!("Saved authentication template {}.", profile.name);
+        self.auth_profile_message = self
+            .tr("Saved authentication template {name}.")
+            .replace("{name}", &profile.name);
         self.show_toast(
-            format!("Saved authentication template {}.", profile.name),
+            self.tr("Saved authentication template {name}.")
+                .replace("{name}", &profile.name),
             Tone::Success,
             cx,
         );
@@ -3338,7 +3350,7 @@ impl AppView {
             name = self.applied_auth_profile.clone().unwrap_or_default();
         }
         if name.is_empty() {
-            self.auth_profile_message = "Select or name a template to delete.".to_owned();
+            self.auth_profile_message = self.tr("Select or name a template to delete.");
             cx.notify();
             return;
         }
@@ -3346,19 +3358,21 @@ impl AppView {
         let before = profiles.len();
         profiles.retain(|profile| !profile.name.eq_ignore_ascii_case(&name));
         if profiles.len() == before {
-            self.auth_profile_message = format!("Authentication template {name} was not found.");
+            self.auth_profile_message = self
+                .tr("Authentication template {name} was not found.")
+                .replace("{name}", &name);
             cx.notify();
             return;
         }
         let Some(store) = self.auth_profile_store.as_ref() else {
-            self.auth_profile_message = "Authentication profile storage is unavailable.".to_owned();
+            self.auth_profile_message = self.tr("Authentication profile storage is unavailable.");
             cx.notify();
             return;
         };
         if let Err(error) = store.save(&profiles) {
             self.auth_profile_message = error;
             self.show_toast(
-                "Could not delete the authentication template.",
+                self.tr("Could not delete the authentication template."),
                 Tone::Danger,
                 cx,
             );
@@ -3366,9 +3380,12 @@ impl AppView {
         }
         self.auth_profiles = profiles;
         self.applied_auth_profile = None;
-        self.auth_profile_message = format!("Deleted authentication template {name}.");
+        self.auth_profile_message = self
+            .tr("Deleted authentication template {name}.")
+            .replace("{name}", &name);
         self.show_toast(
-            format!("Deleted authentication template {name}."),
+            self.tr("Deleted authentication template {name}.")
+                .replace("{name}", &name),
             Tone::Success,
             cx,
         );
@@ -3547,7 +3564,7 @@ impl AppView {
 
         self.selected_profile = Some(name.clone());
         self.confirm_delete = false;
-        self.profile_message = format!("Saved {name}.");
+        self.profile_message = self.tr("Saved {name}.").replace("{name}", &name);
         self.show_toast(self.profile_message.clone(), Tone::Success, cx);
     }
 
@@ -3580,7 +3597,7 @@ impl AppView {
         self.session_editor_open = false;
         self.overlay_focus_pending = false;
         window.focus(&self.terminal_focus);
-        self.profile_message = format!("Deleted {selected}.");
+        self.profile_message = self.tr("Deleted {name}.").replace("{name}", &selected);
         self.show_toast(self.profile_message.clone(), Tone::Success, cx);
     }
 
@@ -5298,7 +5315,7 @@ impl AppView {
                         components::button(
                             &tokens,
                             "cancel-delete-profile",
-                            "Keep",
+                            self.tr("Keep"),
                             ButtonKind::Ghost,
                             ButtonSize::Regular,
                         )
@@ -5311,7 +5328,7 @@ impl AppView {
                         components::button(
                             &tokens,
                             "confirm-delete-profile",
-                            "Delete",
+                            self.tr("Delete"),
                             ButtonKind::Danger,
                             ButtonSize::Regular,
                         )
@@ -5324,7 +5341,7 @@ impl AppView {
                     components::button(
                         &tokens,
                         "delete-profile",
-                        "Delete",
+                        self.tr("Delete"),
                         ButtonKind::Danger,
                         ButtonSize::Regular,
                     )
@@ -12168,7 +12185,8 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.10 · native GPUI · Esc closes"),
+                        self.tr("dshell {version} · native GPUI · Esc closes")
+                            .replace("{version}", env!("CARGO_PKG_VERSION")),
                     )),
             );
 
