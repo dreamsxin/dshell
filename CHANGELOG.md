@@ -2,6 +2,25 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.24] - 2026-10-25
+
+Adds guarded remote server power controls to the Server health inspector.
+
+### Added
+
+- Add confirmed `Reboot server` and `Shut down server` actions.
+- Route power actions through a separate SSH exec channel with fixed commands,
+  a three-second timeout, a 64 KiB response limit and explicit result feedback.
+- Add Simplified Chinese labels and parser coverage for power action responses.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (146 passed, 9 Docker-only ignored).
+- Hard-constraint verification passed; Docker SSH integration passed 9/9.
+- Windows manual verification confirmed the Chinese confirmation dialog; the action was cancelled without changing the test server state.
+
 ## [0.1.23] - 2026-10-25
 
 Adds confirmed remote process termination to the server inspector.

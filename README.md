@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.23`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.24`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -75,6 +75,10 @@ terminal stream, session log or host profile. Each probe has a three-second
 timeout and a 64 KiB response limit. Server alert thresholds for process CPU,
 memory use and root-disk use are configurable in Settings and persist in the
 versioned settings file.
+
+The Server health group also provides confirmed `Reboot server` and `Shut down
+server` actions. They use fixed commands through separate SSH exec channels,
+show the result in the inspector, and may disconnect the current session.
 
 Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
 active session. Remote exit and connection failure clear the terminal view so a

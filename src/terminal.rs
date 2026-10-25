@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::ssh::ServiceAction;
+use crate::ssh::{ServerPowerAction, ServiceAction};
 use alacritty_terminal::{
     event::VoidListener,
     grid::{Dimensions, Scroll},
@@ -183,6 +183,9 @@ pub enum TerminalRequest {
     ControlServerService {
         name: String,
         action: ServiceAction,
+    },
+    ControlServerPower {
+        action: ServerPowerAction,
     },
 }
 

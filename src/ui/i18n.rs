@@ -101,6 +101,27 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Start service" => "启动服务",
         "Stop service" => "停止服务",
         "Restart service" => "重启服务",
+        "Reboot server" => "重启服务器",
+        "Shut down server" => "关闭服务器",
+        "Reboot server requested." => "已请求重启服务器。",
+        "Shut down server requested." => "已请求关闭服务器。",
+        "Reboot server failed." => "重启服务器失败。",
+        "Shut down server failed." => "关闭服务器失败。",
+        "Connect to the server before changing power state." => {
+            "更改服务器电源状态前请先连接服务器。"
+        }
+        "Applying server power action..." => "正在执行服务器电源操作……",
+        "This changes the remote server power state immediately and may disconnect the session. Confirm before continuing." => {
+            "这会立即更改远程服务器电源状态，并可能断开会话。请确认后继续。"
+        }
+        "The remote host did not return a supported power action response." => {
+            "远端主机未返回受支持的电源操作响应。"
+        }
+        "The remote host returned an invalid power action status." => {
+            "远端主机返回了无效的电源操作状态。"
+        }
+        "The server power action response was too large." => "服务器电源操作响应过大。",
+        "Timed out waiting for the server power action." => "等待服务器电源操作超时。",
         "Terminate process" => "终止进程",
         "Terminate" => "终止",
         "PID" => "进程号",
@@ -943,6 +964,14 @@ mod tests {
                 "The remote host returned too many process rows."
             ),
             "远端主机返回了过多进程行。"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Reboot server"),
+            "重启服务器"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Shut down server"),
+            "关闭服务器"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "TABS"), "标签页");
     }

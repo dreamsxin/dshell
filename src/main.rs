@@ -53,7 +53,8 @@ use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
     AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerMetrics, ServerProcess, ServerService, ServiceAction, UiEvent,
+    ServerDataError, ServerMetrics, ServerPowerAction, ServerProcess, ServerService, ServiceAction,
+    UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -892,6 +893,8 @@ struct ServerMetricsViewState {
     metrics: Option<ServerMetrics>,
     loading: bool,
     message: String,
+    power_action_loading: bool,
+    power_action_message: String,
     processes: Vec<ServerProcess>,
     processes_loading: bool,
     processes_message: String,
@@ -1013,6 +1016,10 @@ impl SshSession {
             }
             UiEvent::ServerMetrics(ServerData::ServiceAction(result)) => {
                 self.server_metrics.services_message = result.message;
+            }
+            UiEvent::ServerMetrics(ServerData::PowerAction(result)) => {
+                self.server_metrics.power_action_loading = false;
+                self.server_metrics.power_action_message = result.message;
             }
             UiEvent::ServerMetricsError(ServerDataError::Metrics(error)) => {
                 self.server_metrics.loading = false;
@@ -2096,6 +2103,7 @@ struct AppView {
     pending_process_termination: Option<(u64, u32)>,
     inspector_services_open: bool,
     pending_service_action: Option<(u64, String, ServiceAction)>,
+    pending_power_action: Option<(u64, ServerPowerAction)>,
     inspector_log_open: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
@@ -2412,6 +2420,7 @@ impl AppView {
             pending_process_termination: None,
             inspector_services_open: true,
             pending_service_action: None,
+            pending_power_action: None,
             inspector_log_open: true,
             profile_name,
             profile_search,
@@ -9508,6 +9517,141 @@ impl AppView {
             .into_any_element()
     }
 
+    fn request_power_action(
+        &mut self,
+        session_id: u64,
+        action: ServerPowerAction,
+        cx: &mut Context<Self>,
+    ) {
+        let not_connected = self.tr("Connect to the server before changing power state.");
+        if self
+            .session(session_id)
+            .is_none_or(|session| session.state != SessionState::Connected)
+        {
+            if let Some(session) = self.session_mut(session_id) {
+                session.server_metrics.power_action_message = not_connected;
+            }
+            cx.notify();
+            return;
+        }
+        self.pending_power_action = Some((session_id, action));
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn cancel_power_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_power_action = None;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn submit_power_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((session_id, action)) = self.pending_power_action.take() else {
+            return;
+        };
+        let not_connected = self.tr("Connect to the server before changing power state.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let applying = self.tr("Applying server power action...");
+        let Some(session) = self.session_mut(session_id) else {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.power_action_message = not_connected;
+        } else if let Some(command_tx) = &session.command_tx {
+            match command_tx.try_send(TerminalRequest::ControlServerPower { action }) {
+                Ok(()) => {
+                    session.server_metrics.power_action_loading = true;
+                    session.server_metrics.power_action_message = applying;
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    session.server_metrics.power_action_message = queue_full;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    session.server_metrics.power_action_message = not_accepting;
+                }
+            }
+        } else {
+            session.server_metrics.power_action_message = not_accepting;
+        }
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn power_action_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = self.tokens();
+        let Some((_, action)) = self.pending_power_action else {
+            return div().into_any_element();
+        };
+        let action_label = self.tr(action.label());
+        components::modal_overlay(&tokens, "power-action-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.cancel_power_action(window, cx);
+                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
+                    cx.stop_propagation();
+                    this.submit_power_action(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "power-action-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .child(components::modal_header(&tokens, action_label.clone()).child(
+                        components::icon_button(
+                            &tokens,
+                            "power-action-close",
+                            IconName::Close,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            self.tr("Close"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.cancel_power_action(window, cx);
+                        })),
+                    ))
+                    .child(components::warning_text(
+                        &tokens,
+                        self.tr(
+                            "This changes the remote server power state immediately and may disconnect the session. Confirm before continuing.",
+                        ),
+                    ))
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "power-action-cancel",
+                                    self.tr("Cancel"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_power_action(window, cx);
+                                })),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "power-action-confirm",
+                                    action_label,
+                                    ButtonKind::Danger,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_power_action(window, cx);
+                                })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn keywords_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = self.tokens();
         let keywords = self.keyword_highlights.clone();
@@ -14499,6 +14643,8 @@ impl AppView {
         let log_path = session.log_path.clone();
         let connection_info = session.connection_info.clone();
         let server_metrics = session.server_metrics.clone();
+        let power_action_loading = server_metrics.power_action_loading;
+        let power_action_message = server_metrics.power_action_message.clone();
         let server_processes = server_metrics.processes.clone();
         let processes_loading = server_metrics.processes_loading;
         let processes_message = server_metrics.processes_message.clone();
@@ -14934,6 +15080,49 @@ impl AppView {
                     this.refresh_server_metrics(session_id, cx);
                 })),
             );
+            let power_actions = div()
+                .flex()
+                .items_center()
+                .gap(px(ui_tokens::SPACE_1))
+                .child(
+                    components::icon_button(
+                        tokens,
+                        ("server-reboot", session_id),
+                        IconName::Replace,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Reboot server"),
+                    )
+                    .disabled(power_action_loading || state != SessionState::Connected)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_power_action(session_id, ServerPowerAction::Reboot, cx);
+                    })),
+                )
+                .child(
+                    components::icon_button(
+                        tokens,
+                        ("server-shutdown", session_id),
+                        IconName::CircleX,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Shut down server"),
+                    )
+                    .disabled(power_action_loading || state != SessionState::Connected)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_power_action(session_id, ServerPowerAction::Shutdown, cx);
+                    })),
+                );
+            group = group.child(power_actions);
+            if power_action_loading || !power_action_message.is_empty() {
+                group = group.child(components::help_text(
+                    tokens,
+                    if power_action_loading {
+                        self.tr("Applying server power action...")
+                    } else {
+                        self.tr(&power_action_message)
+                    },
+                ));
+            }
             if let Some(metrics) = server_metrics.metrics {
                 group = group
                     .child(components::info_row(
@@ -15895,6 +16084,9 @@ impl Render for AppView {
         }
         if self.pending_service_action.is_some() {
             root = root.child(self.service_action_overlay(cx));
+        }
+        if self.pending_power_action.is_some() {
+            root = root.child(self.power_action_overlay(cx));
         }
         if self.pending_process_termination.is_some() {
             root = root.child(self.process_termination_overlay(cx));

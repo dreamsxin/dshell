@@ -164,12 +164,35 @@ pub struct ServerServiceActionResult {
     pub message: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerPowerAction {
+    Reboot,
+    Shutdown,
+}
+
+impl ServerPowerAction {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Reboot => "Reboot server",
+            Self::Shutdown => "Shut down server",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerPowerActionResult {
+    pub action: ServerPowerAction,
+    pub success: bool,
+    pub message: String,
+}
+
 pub enum ServerData {
     Metrics(ServerMetrics),
     Processes(Vec<ServerProcess>),
     ProcessAction(ServerProcessActionResult),
     Services(Vec<ServerService>),
     ServiceAction(ServerServiceActionResult),
+    PowerAction(ServerPowerActionResult),
 }
 
 pub enum ServerDataError {
@@ -697,6 +720,9 @@ async fn run_connection_with_known_hosts(
                     }
                     Some(TerminalRequest::ControlServerService { name, action }) => {
                         control_server_service(&mut session, &events, name, action).await;
+                    }
+                    Some(TerminalRequest::ControlServerPower { action }) => {
+                        control_server_power(&mut session, &events, action).await;
                     }
                     None => break,
                 }
@@ -1449,6 +1475,96 @@ async fn control_server_service(
         .await;
 }
 
+fn power_action_command(action: ServerPowerAction) -> &'static str {
+    match action {
+        ServerPowerAction::Reboot => {
+            "if command -v systemctl >/dev/null 2>&1; then systemctl --no-block reboot; status=$?; else (sleep 1; reboot) >/dev/null 2>&1 & status=$?; fi; printf 'DSHELL_POWER_ACTION_V1\\t%d\\n' \"$status\""
+        }
+        ServerPowerAction::Shutdown => {
+            "if command -v systemctl >/dev/null 2>&1; then systemctl --no-block poweroff; status=$?; else (sleep 1; shutdown -h now) >/dev/null 2>&1 & status=$?; fi; printf 'DSHELL_POWER_ACTION_V1\\t%d\\n' \"$status\""
+        }
+    }
+}
+
+fn parse_power_action(output: &str) -> Result<(bool, String)> {
+    let marker = output
+        .lines()
+        .find_map(|line| line.strip_prefix("DSHELL_POWER_ACTION_V1\t"))
+        .ok_or_else(|| {
+            anyhow!("The remote host did not return a supported power action response.")
+        })?;
+    let status = marker
+        .trim()
+        .parse::<u8>()
+        .context("The remote host returned an invalid power action status.")?;
+    let detail = output
+        .lines()
+        .filter(|line| !line.starts_with("DSHELL_POWER_ACTION_V1\t"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("; ");
+    Ok((status == 0, detail))
+}
+
+async fn control_server_power(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+    action: ServerPowerAction,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a server power action channel")?;
+        channel
+            .exec(true, power_action_command(action))
+            .await
+            .context("could not start the server power action command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the server power action response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server power action response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_power_action(&output)
+    })
+    .await;
+    let (success, detail) = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => (false, format!("{error:#}")),
+        Err(_) => (
+            false,
+            "Timed out waiting for the server power action.".to_owned(),
+        ),
+    };
+    let message = if success {
+        if detail.is_empty() {
+            format!("{} requested.", action.label())
+        } else {
+            detail
+        }
+    } else if detail.is_empty() {
+        format!("{} failed.", action.label())
+    } else {
+        detail
+    };
+    let _ = events
+        .send(UiEvent::ServerMetrics(ServerData::PowerAction(
+            ServerPowerActionResult {
+                action,
+                success,
+                message,
+            },
+        )))
+        .await;
+}
+
 fn can_answer_with_password(prompts: &[Prompt], password_used: bool) -> bool {
     if prompts.is_empty() {
         return true;
@@ -1728,11 +1844,12 @@ async fn flush_log(
 #[cfg(test)]
 mod tests {
     use super::{
-        Authentication, ConnectionSpec, JumpSpec, ServiceAction, UiEvent, can_answer_with_password,
-        connection_info_for_key, is_known_host_key, parse_process_action, parse_server_metrics,
-        parse_server_processes, parse_server_services, parse_service_action,
-        process_termination_command, run_connection_with_known_hosts, service_action_command,
-        valid_process_pid, valid_service_name,
+        Authentication, ConnectionSpec, JumpSpec, ServerPowerAction, ServiceAction, UiEvent,
+        can_answer_with_password, connection_info_for_key, is_known_host_key, parse_power_action,
+        parse_process_action, parse_server_metrics, parse_server_processes, parse_server_services,
+        parse_service_action, power_action_command, process_termination_command,
+        run_connection_with_known_hosts, service_action_command, valid_process_pid,
+        valid_service_name,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -1900,6 +2017,28 @@ mod tests {
             (false, "failed".to_owned())
         );
         assert!(parse_service_action("no marker").is_err());
+    }
+
+    #[test]
+    fn power_actions_use_fixed_commands_and_parse_status() {
+        assert_eq!(ServerPowerAction::Reboot.label(), "Reboot server");
+        assert_eq!(ServerPowerAction::Shutdown.label(), "Shut down server");
+        assert!(
+            power_action_command(ServerPowerAction::Reboot).contains("systemctl --no-block reboot")
+        );
+        assert!(
+            power_action_command(ServerPowerAction::Shutdown)
+                .contains("systemctl --no-block poweroff")
+        );
+        assert_eq!(
+            parse_power_action("queued\nDSHELL_POWER_ACTION_V1\t0\n").unwrap(),
+            (true, "queued".to_owned())
+        );
+        assert_eq!(
+            parse_power_action("permission denied\nDSHELL_POWER_ACTION_V1\t1\n").unwrap(),
+            (false, "permission denied".to_owned())
+        );
+        assert!(parse_power_action("no marker").is_err());
     }
 
     #[test]
