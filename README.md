@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.17`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.19`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -43,11 +43,12 @@ private key file (with an optional passphrase), keyboard-interactive
 authentication, or the system SSH agent (Windows OpenSSH named pipe or Pageant;
 `SSH_AUTH_SOCK` on Unix). A plain password prompt in keyboard-interactive mode
 uses the password field; one-time-password or other extra prompts open a masked
-dialog that sends responses only to the SSH server. Double-clicking a saved host
-opens a credential-only dialog when no in-memory credential is available. After
-a successful connection, the password or passphrase is reused for the rest of
-the current dshell run; a rejected credential clears that cache and reopens the
-dialog, while Cancel abandons the connection. Credentials are never written to
+dialog that sends responses only to the SSH server. Clicking a saved host row or
+its connect icon opens a credential-only dialog when no in-memory credential is
+available; the edit icon opens the session properties. After a successful
+connection, the password or passphrase is reused for the rest of the current
+dshell run. A rejected credential clears that cache and reopens the dialog, while
+Cancel abandons and removes the failed connection. Credentials are never written to
 host profiles or settings. Each connection opens an independent session tab; switching tabs
 preserves each session's terminal state, and closing a tab ends only that SSH
 session. The password and key passphrase fields are masked and cleared when
@@ -63,6 +64,12 @@ It starts a temporary Ubuntu OpenSSH service bound only to `127.0.0.1:2222`
 and prints a generated username, password, SHA256 host-key fingerprint and the
 `known_hosts` line for review. Add that line manually only after checking the
 fingerprint; stop the service with `docker rm --force dshell-ssh-manual`.
+
+The inspector includes a `Server health` group for connected sessions. Press
+`Refresh` to run a short read-only command through a separate SSH exec channel
+and display the remote OS, kernel, load average, memory, root filesystem usage
+and uptime. The probe output stays in the current session memory and is not
+added to the terminal stream, session log or host profile.
 
 Use `Cancel` while the SSH handshake is in progress and `Disconnect` to end an
 active session. Remote exit and connection failure clear the terminal view so a

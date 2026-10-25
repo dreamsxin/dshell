@@ -93,6 +93,29 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Session properties" => "会话属性",
         "No active sessions" => "没有活动会话",
         "Connection" => "连接",
+        "Server health" => "服务器健康",
+        "Refreshing..." => "刷新中……",
+        "Collecting server metrics..." => "正在采集服务器指标……",
+        "No server metrics collected yet." => "尚未采集服务器指标。",
+        "Operating system" => "操作系统",
+        "Kernel" => "内核",
+        "Load average" => "负载均值",
+        "Memory" => "内存",
+        "Root disk" => "根分区",
+        "Uptime" => "运行时间",
+        "Unavailable" => "不可用",
+        "Connect to the server before refreshing metrics." => "请先连接服务器，再刷新指标。",
+        "The SSH session is not accepting requests." => "SSH 会话当前不接受请求。",
+        "The SSH request queue is full." => "SSH 请求队列已满。",
+        "Timed out waiting for server metrics." => "等待服务器指标超时。",
+        "The remote host did not return a supported metrics response." => {
+            "远端主机未返回受支持的指标响应。"
+        }
+        "The remote host did not expose usable system metrics." => "远端主机未提供可用的系统指标。",
+        "The server metrics response was too large." => "服务器指标响应过大。",
+        "The server metrics command exited with a non-zero status." => {
+            "服务器指标命令以非零状态退出。"
+        }
         "Authentication" => "认证",
         "Security" => "安全",
         "Session name" => "会话名称",

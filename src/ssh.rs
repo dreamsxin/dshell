@@ -20,7 +20,7 @@ use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     sync::{mpsc, watch},
     task::JoinHandle,
-    time::{MissedTickBehavior, interval},
+    time::{MissedTickBehavior, interval, timeout},
 };
 use zeroize::Zeroizing;
 
@@ -89,6 +89,22 @@ pub struct ConnectionInfo {
     pub host_key_fingerprint: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerMetrics {
+    pub os: String,
+    pub kernel: String,
+    pub load_1m: Option<f32>,
+    pub load_5m: Option<f32>,
+    pub load_15m: Option<f32>,
+    pub memory_total_kib: Option<u64>,
+    pub memory_available_kib: Option<u64>,
+    pub disk_total_kib: Option<u64>,
+    pub disk_used_kib: Option<u64>,
+    pub disk_available_kib: Option<u64>,
+    pub disk_use_percent: Option<u8>,
+    pub uptime_seconds: Option<u64>,
+}
+
 fn connection_info_for_key(key: &PublicKey) -> ConnectionInfo {
     ConnectionInfo {
         host_key_algorithm: key.algorithm().as_str().to_owned(),
@@ -103,6 +119,8 @@ pub enum UiEvent {
     Disconnected,
     LogState(Option<PathBuf>),
     ConnectionInfo(ConnectionInfo),
+    ServerMetrics(ServerMetrics),
+    ServerMetricsError(String),
     AuthPrompt {
         name: String,
         instructions: String,
@@ -450,7 +468,7 @@ async fn run_connection_with_known_hosts(
         Ok::<_, anyhow::Error>((session, channel, jump_session))
     };
     tokio::pin!(setup);
-    let (session, channel, jump_session) = tokio::select! {
+    let (mut session, channel, jump_session) = tokio::select! {
         result = &mut setup => result?,
         _ = wait_for_cancellation(&mut cancellation) => {
             let _ = events.send(UiEvent::Disconnected).await;
@@ -591,6 +609,9 @@ async fn run_connection_with_known_hosts(
                             .send(UiEvent::Screen(terminal.frame()))
                             .await
                             .context("UI closed while showing the search match")?;
+                    }
+                    Some(TerminalRequest::RefreshServerMetrics) => {
+                        refresh_server_metrics(&mut session, &events).await;
                     }
                     None => break,
                 }
@@ -830,6 +851,109 @@ async fn run_connection_with_known_hosts(
     }
     let _ = events.send(UiEvent::Disconnected).await;
     Ok(())
+}
+
+const SERVER_METRICS_COMMAND: &str = r##"printf 'DSHELL_METRICS_V1\n'; printf 'OS=%s\n' "$(uname -s 2>/dev/null || printf unknown)"; printf 'KERNEL=%s\n' "$(uname -r 2>/dev/null || printf unknown)"; printf 'LOAD1=%s\n' "$(awk '{print $1}' /proc/loadavg 2>/dev/null)"; printf 'LOAD5=%s\n' "$(awk '{print $2}' /proc/loadavg 2>/dev/null)"; printf 'LOAD15=%s\n' "$(awk '{print $3}' /proc/loadavg 2>/dev/null)"; printf 'MEM_TOTAL_KIB=%s\n' "$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf 'MEM_AVAILABLE_KIB=%s\n' "$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf 'UPTIME_SECONDS=%s\n' "$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"; printf 'DISK_TOTAL_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $2; exit}')"; printf 'DISK_USED_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $3; exit}')"; printf 'DISK_AVAILABLE_KIB=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4; exit}')"; printf 'DISK_USE_PERCENT=%s\n' "$(df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5; exit}')"##;
+
+fn metric_value<'a>(lines: &'a str, key: &str) -> Option<&'a str> {
+    lines
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(key)
+                .and_then(|value| value.strip_prefix('='))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn metric_u64(lines: &str, key: &str) -> Option<u64> {
+    metric_value(lines, key).and_then(|value| value.parse().ok())
+}
+
+fn metric_f32(lines: &str, key: &str) -> Option<f32> {
+    metric_value(lines, key)
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+}
+
+fn parse_server_metrics(output: &str) -> Result<ServerMetrics> {
+    if !output.contains("DSHELL_METRICS_V1") {
+        bail!("The remote host did not return a supported metrics response.");
+    }
+    let os = metric_value(output, "OS").unwrap_or("Unknown").to_owned();
+    let kernel = metric_value(output, "KERNEL")
+        .unwrap_or("Unknown")
+        .to_owned();
+    let disk_use_percent = metric_u64(output, "DISK_USE_PERCENT").map(|value| value.min(100) as u8);
+    if os == "Unknown"
+        && kernel == "Unknown"
+        && metric_f32(output, "LOAD1").is_none()
+        && metric_u64(output, "MEM_TOTAL_KIB").is_none()
+        && metric_u64(output, "DISK_TOTAL_KIB").is_none()
+    {
+        bail!("The remote host did not expose usable system metrics.");
+    }
+    Ok(ServerMetrics {
+        os,
+        kernel,
+        load_1m: metric_f32(output, "LOAD1"),
+        load_5m: metric_f32(output, "LOAD5"),
+        load_15m: metric_f32(output, "LOAD15"),
+        memory_total_kib: metric_u64(output, "MEM_TOTAL_KIB"),
+        memory_available_kib: metric_u64(output, "MEM_AVAILABLE_KIB"),
+        disk_total_kib: metric_u64(output, "DISK_TOTAL_KIB"),
+        disk_used_kib: metric_u64(output, "DISK_USED_KIB"),
+        disk_available_kib: metric_u64(output, "DISK_AVAILABLE_KIB"),
+        disk_use_percent,
+        uptime_seconds: metric_u64(output, "UPTIME_SECONDS"),
+    })
+}
+
+async fn refresh_server_metrics(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a server metrics channel")?;
+        channel
+            .exec(true, SERVER_METRICS_COMMAND)
+            .await
+            .context("could not start the server metrics command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the server metrics response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The server metrics response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        let metrics = parse_server_metrics(&output)?;
+        Ok::<ServerMetrics, anyhow::Error>(metrics)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(metrics)) => {
+            let _ = events.send(UiEvent::ServerMetrics(metrics)).await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(format!("{error:#}")))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(
+                    "Timed out waiting for server metrics.".to_owned(),
+                ))
+                .await;
+        }
+    }
 }
 
 fn can_answer_with_password(prompts: &[Prompt], password_used: bool) -> bool {
@@ -1112,7 +1236,8 @@ async fn flush_log(
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, UiEvent, can_answer_with_password,
-        connection_info_for_key, is_known_host_key, run_connection_with_known_hosts,
+        connection_info_for_key, is_known_host_key, parse_server_metrics,
+        run_connection_with_known_hosts,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -1184,6 +1309,26 @@ mod tests {
             info.host_key_fingerprint
         );
         assert!(!info.host_key_fingerprint.contains(KEY_A));
+    }
+
+    #[test]
+    fn server_metrics_parser_reads_supported_fields() {
+        let metrics = parse_server_metrics(
+            "DSHELL_METRICS_V1\nOS=Linux\nKERNEL=6.8.0\nLOAD1=0.25\nLOAD5=0.50\nLOAD15=1.00\nMEM_TOTAL_KIB=4096\nMEM_AVAILABLE_KIB=1024\nUPTIME_SECONDS=3661\nDISK_TOTAL_KIB=8192\nDISK_USED_KIB=2048\nDISK_AVAILABLE_KIB=6144\nDISK_USE_PERCENT=25\n",
+        )
+        .unwrap();
+        assert_eq!(metrics.os, "Linux");
+        assert_eq!(metrics.kernel, "6.8.0");
+        assert_eq!(metrics.memory_total_kib, Some(4096));
+        assert_eq!(metrics.disk_use_percent, Some(25));
+        assert_eq!(metrics.uptime_seconds, Some(3661));
+        assert_eq!(metrics.load_1m, Some(0.25));
+    }
+
+    #[test]
+    fn server_metrics_parser_rejects_unmarked_or_empty_output() {
+        assert!(parse_server_metrics("OS=Linux\n").is_err());
+        assert!(parse_server_metrics("DSHELL_METRICS_V1\n").is_err());
     }
 
     #[test]
@@ -1399,7 +1544,7 @@ mod tests {
                             UiEvent::ConnectionInfo(info) => connection_info = Some(info),
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     let info = connection_info
@@ -1505,6 +1650,8 @@ mod tests {
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_)
                             | UiEvent::AuthPrompt { .. } => {}
                         }
                     }
@@ -1689,7 +1836,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -1783,7 +1930,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -1801,7 +1950,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -1897,7 +2048,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -1918,7 +2071,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -1949,7 +2104,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     let replay = crate::log::read_replay(&log_path, 16 * 1024 * 1024)
@@ -1986,7 +2143,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2085,7 +2244,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -2115,7 +2276,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2212,7 +2375,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -2230,7 +2395,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2408,7 +2575,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -2426,7 +2595,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::SearchResult(_)
-                            | UiEvent::ConnectionInfo(_) => {}
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -2539,7 +2710,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -2956,7 +3127,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -3049,7 +3220,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -3164,7 +3335,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) => {}
+                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -3305,7 +3476,9 @@ mod tests {
                 | UiEvent::LogState(_)
                 | UiEvent::AuthPrompt { .. }
                 | UiEvent::SearchResult(_)
-                | UiEvent::ConnectionInfo(_) => {}
+                | UiEvent::ConnectionInfo(_)
+                | UiEvent::ServerMetrics(_)
+                | UiEvent::ServerMetricsError(_) => {}
             }
         }
     }

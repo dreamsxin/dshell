@@ -51,7 +51,10 @@ use sftp::{
 };
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
-use ssh::{AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, UiEvent};
+use ssh::{
+    AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerMetrics,
+    UiEvent,
+};
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
     TerminalKeyInput, TerminalMouseButton, TerminalMouseEvent, TerminalMouseModifiers,
@@ -636,6 +639,40 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn format_uptime(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds / 3_600) % 24;
+    let minutes = (seconds / 60) % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+fn format_kib(kib: Option<u64>) -> String {
+    kib.map_or_else(
+        || "Unavailable".to_owned(),
+        |value| format_size(value.saturating_mul(1024)),
+    )
+}
+
+fn memory_usage_percent(total_kib: Option<u64>, available_kib: Option<u64>) -> Option<u8> {
+    let (total, available) = (total_kib?, available_kib?);
+    if total == 0 {
+        return Some(0);
+    }
+    Some(
+        (total
+            .saturating_sub(available.min(total))
+            .saturating_mul(100)
+            / total)
+            .min(100) as u8,
+    )
+}
+
 fn format_unix_timestamp(value: Option<u32>) -> String {
     value.map_or_else(String::new, |value| value.to_string())
 }
@@ -837,8 +874,16 @@ struct SshSession {
     pending_forwards: Vec<ForwardRuleSpec>,
     log_path: Option<PathBuf>,
     connection_info: Option<ConnectionInfo>,
+    server_metrics: ServerMetricsViewState,
     credential_key: Option<CredentialCacheKey>,
     state: SessionState,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ServerMetricsViewState {
+    metrics: Option<ServerMetrics>,
+    loading: bool,
+    message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -933,6 +978,15 @@ impl SshSession {
             UiEvent::ConnectionInfo(info) => {
                 self.connection_info = Some(info);
             }
+            UiEvent::ServerMetrics(metrics) => {
+                self.server_metrics.metrics = Some(metrics);
+                self.server_metrics.loading = false;
+                self.server_metrics.message.clear();
+            }
+            UiEvent::ServerMetricsError(error) => {
+                self.server_metrics.loading = false;
+                self.server_metrics.message = error;
+            }
             UiEvent::Screen(frame) => {
                 self.frame = Some(frame);
                 self.terminal_message.clear();
@@ -959,6 +1013,7 @@ impl SshSession {
                 self.forwards.stopped.clear();
                 self.log_path = None;
                 self.connection_info = None;
+                self.server_metrics = ServerMetricsViewState::default();
                 self.state = SessionState::Disconnected;
             }
             UiEvent::Disconnected => {
@@ -982,6 +1037,7 @@ impl SshSession {
                 self.forwards.stopped.clear();
                 self.log_path = None;
                 self.connection_info = None;
+                self.server_metrics = ServerMetricsViewState::default();
                 self.state = SessionState::Disconnected;
             }
             UiEvent::AuthPrompt { .. } => {}
@@ -1068,12 +1124,12 @@ mod session_tests {
         UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
         enqueue_session_request, filesystem_usage_percent, forget_stopped_forward, format_log_time,
         format_rate, is_authentication_failure, is_sftp_transfer_command, keyword_matches,
-        merge_unique_profiles, move_profile_to_group, mpsc, recall_compose_history,
-        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
-        rename_profile_group, reorder_group_order, reorder_session_ids, search_result_message,
-        session_editor_escape, session_editor_key, session_matches_target,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
-        take_next_sftp_transfer, terminal_size_for_viewport, watch,
+        memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
+        recall_compose_history, remember_compose_history, remember_stopped_forward,
+        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
+        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
+        session_matches_target, session_terminal_size_for_split, split_panel_terminal_size,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1122,6 +1178,7 @@ mod session_tests {
                 pending_forwards: Vec::new(),
                 log_path: None,
                 connection_info: None,
+                server_metrics: crate::ServerMetricsViewState::default(),
                 credential_key: None,
                 state: SessionState::Connected,
             },
@@ -1550,6 +1607,14 @@ mod session_tests {
     }
 
     #[test]
+    fn memory_usage_handles_missing_and_clamped_capacity_values() {
+        assert_eq!(memory_usage_percent(None, Some(10)), None);
+        assert_eq!(memory_usage_percent(Some(0), Some(0)), Some(0));
+        assert_eq!(memory_usage_percent(Some(100), Some(25)), Some(75));
+        assert_eq!(memory_usage_percent(Some(100), Some(200)), Some(0));
+    }
+
+    #[test]
     fn sftp_transfer_queue_ignores_non_transfer_commands() {
         let upload = SftpCommand::Upload {
             local: "local.txt".into(),
@@ -1956,6 +2021,7 @@ struct AppView {
     inspector_transfers_open: bool,
     inspector_forwards_open: bool,
     inspector_info_open: bool,
+    inspector_server_open: bool,
     inspector_log_open: bool,
     profile_name: Entity<InputState>,
     profile_search: Entity<InputState>,
@@ -2014,6 +2080,7 @@ struct AppView {
     selected_profile: Option<String>,
     session_editor_open: bool,
     credential_prompt_open: bool,
+    credential_prompt_session_id: Option<u64>,
     session_editor_section: SessionEditorSection,
     confirm_delete: bool,
     profile_message: String,
@@ -2254,6 +2321,7 @@ impl AppView {
             inspector_transfers_open: true,
             inspector_forwards_open: true,
             inspector_info_open: true,
+            inspector_server_open: true,
             inspector_log_open: true,
             profile_name,
             profile_search,
@@ -2312,6 +2380,7 @@ impl AppView {
             selected_profile: None,
             session_editor_open: false,
             credential_prompt_open: false,
+            credential_prompt_session_id: None,
             session_editor_section: SessionEditorSection::Connection,
             confirm_delete: false,
             profile_message,
@@ -2642,6 +2711,7 @@ impl AppView {
     fn open_credential_prompt(&mut self, message: String, cx: &mut Context<Self>) {
         self.session_editor_open = false;
         self.credential_prompt_open = true;
+        self.credential_prompt_session_id = None;
         self.session_editor_section = SessionEditorSection::Authentication;
         self.confirm_delete = false;
         self.profile_message = message;
@@ -2674,6 +2744,7 @@ impl AppView {
             .session(id)
             .and_then(|session| session.profile_name.clone());
         self.selected_profile = profile_name;
+        self.credential_prompt_session_id = Some(id);
         self.profile_message = self.tr(&error);
         self.session_editor_section = SessionEditorSection::Authentication;
         self.session_editor_open = false;
@@ -2687,21 +2758,6 @@ impl AppView {
                 .saved_jump_profile(&jump_name)
                 .is_some_and(|profile| profile.auth_method != AuthMethod::Agent);
         cx.notify();
-    }
-
-    fn activate_saved_profile(
-        &mut self,
-        profile: &HostProfile,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(id) = self.session_for_target(&profile.host, profile.port, &profile.username) {
-            self.selected_profile = Some(profile.name.clone());
-            self.session_editor_open = false;
-            self.select_session(id, window, cx);
-        } else {
-            self.load_profile(profile, window, cx);
-        }
     }
 
     fn activate_recent_connection(
@@ -3590,6 +3646,7 @@ impl AppView {
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
         self.credential_prompt_open = false;
+        self.credential_prompt_session_id = None;
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message.clear();
@@ -3621,6 +3678,7 @@ impl AppView {
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
         self.credential_prompt_open = false;
+        self.credential_prompt_session_id = None;
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message = self
@@ -3668,6 +3726,7 @@ impl AppView {
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
         self.credential_prompt_open = false;
+        self.credential_prompt_session_id = None;
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message = self
@@ -4503,6 +4562,7 @@ impl AppView {
     }
 
     fn cancel_session_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let credential_session_id = self.credential_prompt_session_id.take();
         Self::set_input_value(&self.password, "", window, cx);
         Self::set_input_value(&self.key_passphrase, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
@@ -4511,6 +4571,10 @@ impl AppView {
         self.session_editor_open = false;
         self.credential_prompt_open = false;
         self.overlay_focus_pending = false;
+        if let Some(id) = credential_session_id {
+            self.close_session(id, window, cx);
+            return;
+        }
         window.focus(&self.terminal_focus);
         cx.notify();
     }
@@ -4720,6 +4784,7 @@ impl AppView {
                     pending_forwards: saved_forwards.clone(),
                     log_path: None,
                     connection_info: None,
+                    server_metrics: ServerMetricsViewState::default(),
                     credential_key: Some(credential_key.clone()),
                     state: SessionState::Connecting,
                 });
@@ -4732,6 +4797,7 @@ impl AppView {
                 self.active_session_id = Some(id);
                 self.session_editor_open = false;
                 self.credential_prompt_open = false;
+                self.credential_prompt_session_id = None;
                 self.overlay_focus_pending = false;
                 let mut recent = self.recent.clone();
                 record_recent(
@@ -6646,9 +6712,8 @@ impl AppView {
         let drag_name = profile.name.clone();
         let drag_title: SharedString = profile.name.clone().into();
         let favorite_name = profile.name.clone();
-        let selected_profile = profile.clone();
         let connect_profile = profile.clone();
-        let double_click_profile = profile.clone();
+        let row_connect_profile = connect_profile.clone();
         let edit_profile = profile.clone();
         let actions = div()
             .flex()
@@ -6713,12 +6778,8 @@ impl AppView {
         .selected(is_selected)
         .actions(actions)
         .into_row()
-        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            if event.click_count() >= 2 {
-                this.connect_saved_profile(&double_click_profile, window, cx);
-            } else {
-                this.activate_saved_profile(&selected_profile, window, cx);
-            }
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.connect_saved_profile(&row_connect_profile, window, cx);
         }))
         .on_drag(
             SidebarDragData::Host {
@@ -8900,6 +8961,36 @@ impl AppView {
         }
         cx.notify();
         true
+    }
+
+    fn refresh_server_metrics(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing metrics.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.message = not_accepting;
+            cx.notify();
+            return;
+        };
+        if let Err(error) = command_tx.try_send(TerminalRequest::RefreshServerMetrics) {
+            session.server_metrics.message = match error {
+                mpsc::error::TrySendError::Full(_) => queue_full,
+                mpsc::error::TrySendError::Closed(_) => not_accepting,
+            };
+            session.server_metrics.loading = false;
+        } else {
+            session.server_metrics.loading = true;
+            session.server_metrics.message.clear();
+        }
+        cx.notify();
     }
 
     fn keywords_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -13795,6 +13886,7 @@ impl AppView {
         let log_active = session.log_path.is_some();
         let log_path = session.log_path.clone();
         let connection_info = session.connection_info.clone();
+        let server_metrics = session.server_metrics.clone();
         let profile = session
             .profile_name
             .as_ref()
@@ -14181,6 +14273,123 @@ impl AppView {
                         self.tr("Off")
                     },
                 ));
+        }
+
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-server",
+                self.tr("Server health"),
+                self.inspector_server_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_server_open = !this.inspector_server_open;
+                cx.notify();
+            })),
+        );
+        if self.inspector_server_open {
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let refresh_label = if server_metrics.loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            group = group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-server", session_id),
+                    refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(server_metrics.loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_metrics(session_id, cx);
+                })),
+            );
+            if let Some(metrics) = server_metrics.metrics {
+                group = group
+                    .child(components::info_row(
+                        tokens,
+                        self.tr("Operating system"),
+                        metrics.os,
+                    ))
+                    .child(components::info_row(
+                        tokens,
+                        self.tr("Kernel"),
+                        metrics.kernel,
+                    ))
+                    .child(components::info_row(
+                        tokens,
+                        self.tr("Load average"),
+                        match (metrics.load_1m, metrics.load_5m, metrics.load_15m) {
+                            (Some(one), Some(five), Some(fifteen)) => {
+                                format!("{one:.2} / {five:.2} / {fifteen:.2}")
+                            }
+                            _ => self.tr("Unavailable"),
+                        },
+                    ))
+                    .child(components::info_row(
+                        tokens,
+                        self.tr("Memory"),
+                        match (metrics.memory_total_kib, metrics.memory_available_kib) {
+                            (Some(total), Some(available)) => format!(
+                                "{} total · {} available · {}% used",
+                                format_kib(Some(total)),
+                                format_kib(Some(available)),
+                                memory_usage_percent(Some(total), Some(available)).unwrap_or(0)
+                            ),
+                            _ => self.tr("Unavailable"),
+                        },
+                    ))
+                    .child(components::info_row(
+                        tokens,
+                        self.tr("Root disk"),
+                        match (
+                            metrics.disk_total_kib,
+                            metrics.disk_used_kib,
+                            metrics.disk_available_kib,
+                        ) {
+                            (Some(total), Some(used), Some(available)) => format!(
+                                "{} total · {} used · {} available · {}%",
+                                format_kib(Some(total)),
+                                format_kib(Some(used)),
+                                format_kib(Some(available)),
+                                metrics.disk_use_percent.unwrap_or(0)
+                            ),
+                            _ => self.tr("Unavailable"),
+                        },
+                    ))
+                    .child(components::info_row(
+                        tokens,
+                        self.tr("Uptime"),
+                        metrics
+                            .uptime_seconds
+                            .map(format_uptime)
+                            .unwrap_or_else(|| self.tr("Unavailable")),
+                    ));
+            } else if server_metrics.loading {
+                group = group.child(components::help_text(
+                    tokens,
+                    self.tr("Collecting server metrics..."),
+                ));
+            } else {
+                group = group.child(components::help_text(
+                    tokens,
+                    if server_metrics.message.is_empty() {
+                        self.tr("No server metrics collected yet.")
+                    } else {
+                        self.tr(&server_metrics.message)
+                    },
+                ));
+            }
+            body = body.child(group);
         }
 
         body = body.child(

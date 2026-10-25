@@ -2,6 +2,52 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.19] - 2026-10-25
+
+Completes the saved-host authentication flow so connecting from the sidebar is
+predictable and retryable.
+
+### Fixed
+
+- Clicking a saved host row now connects or opens the credential-only dialog;
+  editing remains available from the settings icon.
+- Cancelling after an authentication failure removes the failed session instead
+  of leaving a disconnected entry in the sidebar.
+- Successful credentials remain reusable only in `Zeroizing` memory for the
+  current run; rejected credentials are cleared before retrying.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (129 passed, 9 Docker-only ignored).
+- `scripts\verify-hard-constraints.ps1` passed; `scripts\test-docker-ssh.ps1`
+  passed all 9 Docker SSH tests.
+- Fresh Simplified Chinese authentication evidence:
+  `artifacts/dshell-v0.1.19-auth-dialog-cn.png`.
+- Password entry, retry and successful in-memory reuse remain manual Windows
+  checks; DPI/IME and glyph-level checks remain manual as required.
+
+## [0.1.18] - 2026-10-25
+
+Adds an on-demand server health view for connected SSH sessions.
+
+### Added
+
+- Add a Server health inspector group with OS, kernel, load average, memory,
+  root filesystem usage and uptime fields.
+- Run the read-only probe through a short-lived SSH exec channel so metrics do
+  not pollute the interactive terminal or session log.
+- Add bounded parsing, timeout/error handling, Simplified Chinese labels and
+  unit coverage for supported and malformed responses.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets --offline` and
+  `cargo test --locked --offline` (129 passed, 9 Docker-only ignored).
+- Hard-constraint and Docker SSH verification are run for this milestone.
+
 ## [0.1.17] - 2026-10-25
 
 Improves saved-host authentication so repeated connections do not require

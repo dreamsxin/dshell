@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+2026-10-25，Windows/MSVC：保存主机认证交互修正并准备发布 `v0.1.19`。侧栏主机行点击和连接图标统一进入自动连接流程：本次运行已有凭据时直接复用，没有凭据时只弹出密码、私钥口令或跳板凭据窗口，编辑仍由设置图标进入属性。认证失败会清除错误缓存并重新弹窗，取消会删除失败会话，不再留下“未连接”条目或回到属性窗口。凭据仍只保存在 `Zeroizing` 内存中，不写入主机资料、设置或日志。`cargo fmt --all`、`cargo check --locked --all-targets --offline` 和 `cargo test --locked --offline`（129 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）已完成。新构建中文认证弹窗截图为 `artifacts/dshell-v0.1.19-auth-dialog-cn.png`；密码输入、错误重试和成功后缓存复用仍需用户手工操作，DPI/IME/字形像素对齐继续按策略人工检查。
+
+2026-10-25，Windows/MSVC：服务器健康检查完成并准备发布 `v0.1.18`。检查器新增 Server health 分组和刷新按钮，已连接会话通过独立 SSH exec channel 按需读取操作系统、内核、1/5/15 分钟负载、内存总量/可用量、根分区容量/使用率和运行时间；结果只保留在当前会话内存，不混入交互终端、日志或主机资料。命令输出限制为 64 KiB，3 秒超时，缺少兼容工具或非零退出会显示错误并保持终端可用。新增指标解析、边界和错误路径单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（129 项通过、9 项 Docker 专项跳过）已完成。硬约束、Docker SSH 和 Windows 中文界面截图仍在本切片收尾验证。
+
 2026-10-25，Windows/MSVC：保存主机认证流程完成并准备发布 `v0.1.17`。双击或连接图标打开保存主机时，若本次运行没有可复用凭据，只显示认证弹窗；密码、键盘交互密码、私钥口令和跳板机凭据都可在同一弹窗中确认。成功连接后凭据仅以 `Zeroizing` 形式保存在本次进程内存中，下一次连接自动复用；认证失败会清除旧缓存并重新弹出输入，取消会清空输入并结束连接流程。左侧已连接主机继续直接切换会话，不打开属性窗口。新增缓存归一化、空凭据和中文认证文案单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（126 项通过、9 项 Docker 专项跳过）、`scripts\verify-hard-constraints.ps1` 和 `scripts\test-docker-ssh.ps1`（9 项通过）均已完成。新鲜构建中文工作区截图为 `artifacts/dshell-v0.1.17-chinese-workspace.png`；认证输入、DPI、IME、字形像素对齐和连接后的 SFTP/隧道交互仍需手工烟测。
 
 2026-10-25，Windows/MSVC：简体中文覆盖补齐并准备发布 `v0.1.16`。隧道与 SOCKS5、关键词高亮、快捷命令、组合输入、键盘交互认证、同步输入、标签菜单、检查器和连接校验反馈全部接入现有翻译表；用户提供的主机名、命令、远端路径和终端输出保持原样。新增近期面板和认证校验的本地化单测；`cargo fmt --all`、`cargo check --locked --all-targets --offline`、`cargo test --locked --offline`（121 项通过、9 项 Docker 专项跳过）和 `scripts\verify-hard-constraints.ps1` 已完成。新鲜 Windows 构建的中文工作区截图为 `artifacts/dshell-v0.1.16-chinese-fresh.png`。手工 SSH 服务继续绑定 `127.0.0.1:2222`，真实 DPI、IME、字形像素对齐和连接后的 SFTP/隧道交互仍需用户手工烟测。

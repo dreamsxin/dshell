@@ -173,6 +173,7 @@ pub enum TerminalRequest {
         query: String,
         direction: SearchDirection,
     },
+    RefreshServerMetrics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
