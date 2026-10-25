@@ -41,8 +41,9 @@ use profiles::{
 };
 use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
 use sftp::{
-    RemoteEntry, SftpCommand, SftpEvent, TransferKind, format_permission_mode, parent_remote_path,
-    parse_permission_mode, parse_unix_timestamp, remote_join,
+    RemoteEntry, RemoteFilesystemInfo, SftpCommand, SftpEvent, TransferKind,
+    format_permission_mode, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
+    remote_join,
 };
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
@@ -475,6 +476,14 @@ fn format_unix_timestamp(value: Option<u32>) -> String {
     value.map_or_else(String::new, |value| value.to_string())
 }
 
+fn filesystem_usage_percent(total_bytes: u64, available_bytes: u64) -> u8 {
+    if total_bytes == 0 {
+        return 0;
+    }
+    let used_bytes = total_bytes.saturating_sub(available_bytes.min(total_bytes));
+    ((used_bytes as f64 * 100.0 / total_bytes as f64).round() as u8).min(100)
+}
+
 fn format_rate(bytes_per_second: f64) -> String {
     if !bytes_per_second.is_finite() || bytes_per_second <= 0.5 {
         "0 B/s".to_owned()
@@ -705,6 +714,8 @@ struct SftpViewState {
     rename_from: Option<String>,
     pending_delete: Option<(String, bool)>,
     metadata_edit: Option<SftpMetadataEdit>,
+    filesystem: Option<RemoteFilesystemInfo>,
+    filesystem_supported: Option<bool>,
 }
 
 #[derive(Default)]
@@ -776,6 +787,8 @@ impl SshSession {
                 self.sftp.transfer_queue.clear();
                 self.sftp.overwrite = None;
                 self.sftp.metadata_edit = None;
+                self.sftp.filesystem = None;
+                self.sftp.filesystem_supported = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
                 self.forwards.stopped.clear();
@@ -797,6 +810,8 @@ impl SshSession {
                 self.sftp.transfer_queue.clear();
                 self.sftp.overwrite = None;
                 self.sftp.metadata_edit = None;
+                self.sftp.filesystem = None;
+                self.sftp.filesystem_supported = None;
                 self.forward_tx = None;
                 self.forwards.rules.clear();
                 self.forwards.stopped.clear();
@@ -870,10 +885,11 @@ mod session_tests {
         AppShortcut, ForwardViewState, LayoutDragTarget, MouseTrackingMode, SessionEditorEscape,
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
         TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
-        dragged_panel_width, enqueue_session_request, forget_stopped_forward, format_log_time,
-        format_rate, is_sftp_transfer_command, keyword_matches, move_profile_to_group, mpsc,
-        recall_compose_history, remember_compose_history, remember_stopped_forward, remove_session,
-        reorder_session_ids, search_result_message, session_editor_escape, session_editor_key,
+        dragged_panel_width, enqueue_session_request, filesystem_usage_percent,
+        forget_stopped_forward, format_log_time, format_rate, is_sftp_transfer_command,
+        keyword_matches, move_profile_to_group, mpsc, recall_compose_history,
+        remember_compose_history, remember_stopped_forward, remove_session, reorder_session_ids,
+        search_result_message, session_editor_escape, session_editor_key,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
         take_next_sftp_transfer, terminal_size_for_viewport, watch,
     };
@@ -1274,6 +1290,14 @@ mod session_tests {
         assert_eq!(format_rate(0.0), "0 B/s");
         assert_eq!(format_rate(f64::NAN), "0 B/s");
         assert!(format_rate(1536.0).ends_with("/s"));
+    }
+
+    #[test]
+    fn filesystem_usage_handles_empty_and_clamped_capacity_values() {
+        assert_eq!(filesystem_usage_percent(0, 0), 0);
+        assert_eq!(filesystem_usage_percent(100, 100), 0);
+        assert_eq!(filesystem_usage_percent(100, 25), 75);
+        assert_eq!(filesystem_usage_percent(100, 200), 0);
     }
 
     #[test]
@@ -5470,13 +5494,28 @@ impl AppView {
                     session.sftp.message.clear();
                     let target = session.sftp.path.clone();
                     if let Some(sftp_tx) = &session.sftp_tx {
-                        let _ = sftp_tx.try_send(SftpCommand::List(target));
+                        let _ = sftp_tx.try_send(SftpCommand::List(target.clone()));
+                        let _ = sftp_tx.try_send(SftpCommand::FilesystemInfo(target));
                     }
                 }
                 SftpEvent::Entries { path, entries } => {
                     session.sftp.path = path;
                     session.sftp.entries = entries;
                     session.sftp.message.clear();
+                    let target = session.sftp.path.clone();
+                    if let Some(sftp_tx) = &session.sftp_tx {
+                        let _ = sftp_tx.try_send(SftpCommand::FilesystemInfo(target));
+                    }
+                }
+                SftpEvent::FilesystemInfo(info) => {
+                    session.sftp.filesystem = Some(info);
+                    session.sftp.filesystem_supported = Some(true);
+                }
+                SftpEvent::FilesystemUnavailable { path } => {
+                    if path == session.sftp.path {
+                        session.sftp.filesystem = None;
+                        session.sftp.filesystem_supported = Some(false);
+                    }
                 }
                 SftpEvent::Error(error) => {
                     session.sftp.message = error;
@@ -5999,6 +6038,8 @@ impl AppView {
         let rename_from = session.sftp.rename_from.clone();
         let pending_delete = session.sftp.pending_delete.clone();
         let metadata_edit = session.sftp.metadata_edit.clone();
+        let filesystem = session.sftp.filesystem.clone();
+        let filesystem_supported = session.sftp.filesystem_supported;
 
         let mut list = div()
             .id("sftp-entries")
@@ -6173,6 +6214,19 @@ impl AppView {
                     })),
             )
             .child(
+                components::icon_button(
+                    &tokens,
+                    "sftp-filesystem-info",
+                    IconName::Info,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    self.tr("Show disk usage"),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_sftp(session_id, cx);
+                })),
+            )
+            .child(
                 Button::new("sftp-close")
                     .label(self.tr("Close"))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_sftp(session_id, cx))),
@@ -6215,6 +6269,53 @@ impl AppView {
                         path
                     }),
             );
+        if let Some(info) = filesystem {
+            let used_bytes = info.total_bytes.saturating_sub(info.available_bytes);
+            let usage = filesystem_usage_percent(info.total_bytes, info.available_bytes);
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .border_b_1()
+                    .border_color(tokens.border_subtle)
+                    .text_size(px(10.))
+                    .child(format!(
+                        "{}: {}% · {} / {}",
+                        self.tr("Disk usage"),
+                        usage,
+                        format_size(used_bytes),
+                        format_size(info.total_bytes)
+                    ))
+                    .child(format!(
+                        "{}: {} · {}: {}",
+                        self.tr("Available"),
+                        format_size(info.available_bytes),
+                        self.tr("Free space"),
+                        format_size(info.free_bytes)
+                    ))
+                    .child(format!(
+                        "{}: {} · {}: {}",
+                        self.tr("Block size"),
+                        format_size(info.block_size),
+                        self.tr("Max filename length"),
+                        info.name_max
+                    )),
+            );
+        } else if filesystem_supported == Some(false) {
+            panel = panel.child(
+                div()
+                    .px(px(8.))
+                    .py(px(5.))
+                    .border_b_1()
+                    .border_color(tokens.border_subtle)
+                    .text_size(px(10.))
+                    .text_color(tokens.text_secondary)
+                    .child(self.tr("Filesystem statistics unavailable.")),
+            );
+        }
         if metadata_edit.is_none() {
             let mut operations = div()
                 .flex()
@@ -11920,7 +12021,7 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_2))
                     .child(components::help_text(
                         tokens,
-                        self.tr("dshell 0.1.7 · native GPUI · Esc closes"),
+                        self.tr("dshell 0.1.8 · native GPUI · Esc closes"),
                     )),
             );
 

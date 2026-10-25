@@ -2,6 +2,24 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.8] - 2026-10-25
+
+Adds remote filesystem capacity visibility to the SFTP workflow.
+
+### Added
+
+- Show total, used, available and free remote filesystem space in the SFTP panel.
+- Show filesystem block size and maximum filename length when `statvfs@openssh.com` is available.
+- Add an icon refresh action and Simplified Chinese labels for disk usage details.
+- Cover the SFTP filesystem information path in the Docker OpenSSH integration test.
+
+### Verification
+
+- Verification date: 2026-10-25 (Windows/MSVC).
+- `cargo fmt --all`, offline `cargo check --locked`, and `cargo test --locked --offline` (112 passed, 9 ignored) passed.
+- `scripts\test-docker-ssh.ps1`: 9 integration tests passed.
+- Real Windows DPI, Chinese IME, and SFTP panel interaction remain manual checks.
+
 ## [0.1.7] - 2026-10-25
 
 Adds remote SFTP metadata management.

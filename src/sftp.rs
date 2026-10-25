@@ -54,6 +54,16 @@ pub struct RemoteEntry {
     pub mtime: Option<u32>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteFilesystemInfo {
+    pub path: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub available_bytes: u64,
+    pub block_size: u64,
+    pub name_max: u64,
+}
+
 #[derive(Clone, Debug)]
 pub enum SftpCommand {
     List(String),
@@ -94,6 +104,7 @@ pub enum SftpCommand {
         atime: Option<u32>,
         mtime: Option<u32>,
     },
+    FilesystemInfo(String),
 }
 
 #[derive(Debug)]
@@ -104,6 +115,10 @@ pub enum SftpEvent {
     Entries {
         path: String,
         entries: Vec<RemoteEntry>,
+    },
+    FilesystemInfo(RemoteFilesystemInfo),
+    FilesystemUnavailable {
+        path: String,
     },
     Error(String),
     NeedsOverwrite {
@@ -339,6 +354,31 @@ pub async fn run<S>(
                     }
                 }
             }
+            SftpCommand::FilesystemInfo(path) => match session.fs_info(path.clone()).await {
+                Ok(Some(stats)) => {
+                    let unit = stats.fragment_size.max(1);
+                    let _ = events
+                        .send(SftpEvent::FilesystemInfo(RemoteFilesystemInfo {
+                            path,
+                            total_bytes: stats.blocks.saturating_mul(unit),
+                            free_bytes: stats.blocks_free.saturating_mul(unit),
+                            available_bytes: stats.blocks_avail.saturating_mul(unit),
+                            block_size: stats.block_size,
+                            name_max: stats.name_max,
+                        }))
+                        .await;
+                }
+                Ok(None) => {
+                    let _ = events.send(SftpEvent::FilesystemUnavailable { path }).await;
+                }
+                Err(error) => {
+                    let _ = events
+                        .send(SftpEvent::Error(format!(
+                            "Could not read filesystem information for {path}: {error}"
+                        )))
+                        .await;
+                }
+            },
         }
     }
     let _ = session.close().await;

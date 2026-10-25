@@ -2561,6 +2561,19 @@ mod tests {
                         |event| matches!(event, SftpEvent::Entries { path, .. } if path == &home),
                     )
                     .await?;
+                    sftp_command_tx
+                        .send(SftpCommand::FilesystemInfo(home.clone()))
+                        .await?;
+                    let filesystem = next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::FilesystemInfo(info) if info.path == home)
+                    })
+                    .await?;
+                    let SftpEvent::FilesystemInfo(filesystem) = filesystem else {
+                        unreachable!()
+                    };
+                    assert!(filesystem.total_bytes > 0);
+                    assert!(filesystem.available_bytes <= filesystem.total_bytes);
+                    assert!(filesystem.block_size > 0);
 
                     sftp_command_tx
                         .send(SftpCommand::Upload {
