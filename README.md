@@ -96,6 +96,11 @@ mouse input, paste, and Compose sends are blocked. A Compose draft stays in the
 editor when nothing receives it. Input locks last only for the current session
 and clear when its tab closes.
 
+Use the session-switcher search icon beside the tab actions, or press
+`Ctrl+Shift+P`, to find an active session by its title, username, host or port.
+Search terms can be combined; the list shows each connection identity and
+status. Use Up/Down and Enter to switch, or Esc to return to the terminal.
+
 For a repeatable local manual test, run
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start-docker-ssh-manual.ps1`.
 It starts a temporary Ubuntu OpenSSH service bound only to `127.0.0.1:2222`
@@ -288,9 +293,9 @@ While a terminal has focus, the default workspace shortcuts are `Ctrl+Shift+T`
 for a new session, `Ctrl+Shift+W` close tab, `Ctrl+Shift+F` files,
 `Ctrl+Shift+S` quick commands, `Ctrl+Shift+O` settings, `Ctrl+Shift+B` toggle the
 saved-host sidebar, `Ctrl+Shift+M` toggle the compose pane, `Ctrl+Shift+D`
-disconnect, `Ctrl+Shift+R` replay log and `Ctrl+F` find. `Alt+1` through `Alt+9`
-always select a session tab. `Ctrl+Shift+C` and `Ctrl+Shift+V` remain copy and
-paste.
+disconnect, `Ctrl+Shift+R` replay log, `Ctrl+Shift+P` switch session and
+`Ctrl+F` find. `Alt+1` through `Alt+9` always select a session tab.
+`Ctrl+Shift+C` and `Ctrl+Shift+V` remain copy and paste.
 
 The command bar switches between the dark and light UI palettes and remembers
 the choice, together with the collapsed/expanded sidebar state, in

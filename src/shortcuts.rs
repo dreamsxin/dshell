@@ -12,10 +12,11 @@ pub enum ShortcutAction {
     Disconnect,
     ReplayLog,
     Find,
+    ToggleSessionSwitcher,
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::NewSession,
         Self::CloseSession,
         Self::ToggleFiles,
@@ -26,6 +27,7 @@ impl ShortcutAction {
         Self::Disconnect,
         Self::ReplayLog,
         Self::Find,
+        Self::ToggleSessionSwitcher,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -40,6 +42,7 @@ impl ShortcutAction {
             Self::Disconnect => "Disconnect",
             Self::ReplayLog => "Replay log",
             Self::Find => "Find",
+            Self::ToggleSessionSwitcher => "Switch session",
         }
     }
 
@@ -55,6 +58,7 @@ impl ShortcutAction {
             Self::Disconnect => "ctrl+shift+d",
             Self::ReplayLog => "ctrl+shift+r",
             Self::Find => "ctrl+f",
+            Self::ToggleSessionSwitcher => "ctrl+shift+p",
         }
     }
 }
@@ -72,6 +76,7 @@ pub struct ShortcutSettings {
     pub disconnect: String,
     pub replay_log: String,
     pub find: String,
+    pub toggle_session_switcher: String,
 }
 
 impl Default for ShortcutSettings {
@@ -87,6 +92,7 @@ impl Default for ShortcutSettings {
             disconnect: String::new(),
             replay_log: String::new(),
             find: String::new(),
+            toggle_session_switcher: String::new(),
         };
         for action in ShortcutAction::ALL {
             settings.set(action, action.default_shortcut());
@@ -108,6 +114,7 @@ impl ShortcutSettings {
             ShortcutAction::Disconnect => &self.disconnect,
             ShortcutAction::ReplayLog => &self.replay_log,
             ShortcutAction::Find => &self.find,
+            ShortcutAction::ToggleSessionSwitcher => &self.toggle_session_switcher,
         }
     }
 
@@ -124,6 +131,7 @@ impl ShortcutSettings {
             ShortcutAction::Disconnect => self.disconnect = value,
             ShortcutAction::ReplayLog => self.replay_log = value,
             ShortcutAction::Find => self.find = value,
+            ShortcutAction::ToggleSessionSwitcher => self.toggle_session_switcher = value,
         }
     }
 

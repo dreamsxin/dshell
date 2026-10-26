@@ -78,6 +78,14 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Replay log (Ctrl+Shift+R)" => "回放日志 (Ctrl+Shift+R)",
         "Search terminal" => "搜索终端",
         "Search saved hosts" => "搜索已保存主机",
+        "Search sessions by name, user, host or port" => "按名称、用户、主机或端口搜索会话",
+        "Search by name, user, host or port" => "按名称、用户、主机或端口搜索",
+        "No sessions match your search" => "没有匹配的会话",
+        "Use Up/Down to navigate, Enter to switch, Esc to close" => {
+            "使用上/下方向键浏览，按 Enter 切换，按 Esc 关闭"
+        }
+        "Switch session" => "切换会话",
+        "Switch session (Ctrl+Shift+P)" => "切换会话 (Ctrl+Shift+P)",
         "New session" => "新建会话",
         "Close session" => "关闭会话",
         "Toggle files" => "切换文件面板",
@@ -997,6 +1005,17 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Reconnecting"),
             "正在重新连接"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Switch session"),
+            "切换会话"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Search sessions by name, user, host or port"
+            ),
+            "按名称、用户、主机或端口搜索会话"
         );
         assert_eq!(
             translate(

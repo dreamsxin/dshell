@@ -1608,6 +1608,45 @@ fn keyword_matches(text: &str, keywords: &[String]) -> bool {
     })
 }
 
+fn session_switcher_matches(session: &SshSession, query: &str) -> bool {
+    let searchable = format!(
+        "{} {} {} {}",
+        session.title, session.username, session.host, session.port
+    );
+    let keywords = query
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    keywords.is_empty() || keyword_matches_all(&searchable, &keywords)
+}
+
+fn keyword_matches_all(text: &str, keywords: &[String]) -> bool {
+    let text = text.to_lowercase();
+    keywords
+        .iter()
+        .all(|keyword| text.contains(&keyword.to_lowercase()))
+}
+
+fn session_switcher_matches_ids(sessions: &[SshSession], query: &str) -> Vec<u64> {
+    sessions
+        .iter()
+        .filter(|session| session_switcher_matches(session, query))
+        .map(|session| session.id)
+        .collect()
+}
+
+fn next_session_switcher_index(current: usize, count: usize, direction: i32) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let current = current.min(count - 1);
+    Some(if direction < 0 {
+        if current == 0 { count - 1 } else { current - 1 }
+    } else {
+        (current + 1) % count
+    })
+}
+
 fn session_matches_target(session: &SshSession, host: &str, port: u16, username: &str) -> bool {
     session.state != SessionState::Disconnected
         && session.host.eq_ignore_ascii_case(host)
@@ -1783,11 +1822,12 @@ mod session_tests {
         group_launch_candidates, is_authentication_failure, is_sftp_transfer_command,
         keyword_matches, local_upload_kind, mark_sftp_ready, matching_saved_profile_for_session,
         memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
-        parse_alert_percent, recall_compose_history, recent_sftp_directories_for_target,
-        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
-        rename_profile_group, reorder_group_order, reorder_session_ids, saved_profile_for_session,
-        search_result_message, server_alert_observations, session_accepts_requests,
-        session_editor_escape, session_editor_key, session_matches_target,
+        next_session_switcher_index, parse_alert_percent, recall_compose_history,
+        recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
+        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
+        reorder_session_ids, saved_profile_for_session, search_result_message,
+        server_alert_observations, session_accepts_requests, session_editor_escape,
+        session_editor_key, session_matches_target, session_switcher_matches_ids,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_input_targets,
         synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
         unique_duplicate_session_title, update_sessions_for_profile, watch,
@@ -2593,6 +2633,10 @@ mod session_tests {
             Some(AppShortcut::Find)
         );
         assert_eq!(
+            app_shortcut(&defaults, "p", true, true, false),
+            Some(AppShortcut::ToggleSessionSwitcher)
+        );
+        assert_eq!(
             app_shortcut(&defaults, "1", false, false, true),
             Some(AppShortcut::SelectSession(0))
         );
@@ -2621,6 +2665,40 @@ mod session_tests {
         assert!(keyword_matches("request timed out", &["timed".to_owned()]));
         assert!(!keyword_matches("connected", &keywords));
         assert!(!keyword_matches("error", &[String::new()]));
+    }
+
+    #[test]
+    fn session_switcher_search_matches_all_words_across_session_identity() {
+        let (mut first, _, _) = test_session(1);
+        first.title = "Production API".to_owned();
+        first.host = "api.prod.example.com".to_owned();
+        first.port = 2222;
+        first.username = "deploy".to_owned();
+        let (mut second, _, _) = test_session(2);
+        second.title = "Staging API".to_owned();
+        second.host = "api.staging.example.com".to_owned();
+        second.username = "operator".to_owned();
+        let sessions = vec![first, second];
+
+        assert_eq!(session_switcher_matches_ids(&sessions, ""), vec![1, 2]);
+        assert_eq!(
+            session_switcher_matches_ids(&sessions, "DEPLOY 2222 prod"),
+            vec![1]
+        );
+        assert_eq!(
+            session_switcher_matches_ids(&sessions, "api operator staging"),
+            vec![2]
+        );
+        assert!(session_switcher_matches_ids(&sessions, "deploy staging").is_empty());
+    }
+
+    #[test]
+    fn session_switcher_navigation_clamps_filtered_selection_and_wraps() {
+        assert_eq!(next_session_switcher_index(8, 2, -1), Some(0));
+        assert_eq!(next_session_switcher_index(8, 2, 1), Some(0));
+        assert_eq!(next_session_switcher_index(0, 3, -1), Some(2));
+        assert_eq!(next_session_switcher_index(2, 3, 1), Some(0));
+        assert_eq!(next_session_switcher_index(0, 0, 1), None);
     }
 
     #[test]
@@ -3455,6 +3533,10 @@ struct AppView {
     auth_prompt_needs_clear: bool,
     log_replay: Option<LogReplayState>,
     search_input: Entity<InputState>,
+    session_switcher_search: Entity<InputState>,
+    session_switcher_visible: bool,
+    session_switcher_selected: usize,
+    session_switcher_scroll: ScrollHandle,
     compose_input: Entity<InputState>,
     compose_visible: bool,
     compose_history: Vec<String>,
@@ -3572,6 +3654,9 @@ impl AppView {
             })
             .collect();
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search terminal"));
+        let session_switcher_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search sessions by name, user, host or port")
+        });
         let compose_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line()
@@ -3803,6 +3888,10 @@ impl AppView {
             auth_prompt_needs_clear: false,
             log_replay: None,
             search_input,
+            session_switcher_search,
+            session_switcher_visible: false,
+            session_switcher_selected: 0,
+            session_switcher_scroll: ScrollHandle::new(),
             compose_input,
             compose_visible: false,
             compose_history: Vec::new(),
@@ -3844,6 +3933,10 @@ impl AppView {
             (&self.keyword_input, "ERROR or timeout"),
             (&self.trigger_keyword_input, "ERROR or timeout"),
             (&self.search_input, "Search terminal"),
+            (
+                &self.session_switcher_search,
+                "Search sessions by name, user, host or port",
+            ),
             (&self.key_path, "Path for the new private key"),
             (&self.new_key_passphrase, "Optional passphrase"),
             (&self.key_change_old_passphrase, "Current passphrase"),
@@ -7308,6 +7401,7 @@ impl AppView {
                 AppShortcut::Disconnect => self.disconnect_session(session_id, cx),
                 AppShortcut::ReplayLog => self.begin_log_replay(cx),
                 AppShortcut::Find => self.open_search(session_id, window, cx),
+                AppShortcut::ToggleSessionSwitcher => self.toggle_session_switcher(window, cx),
                 AppShortcut::SelectSession(index) => {
                     if let Some(target) = self.sessions.get(index).map(|session| session.id) {
                         self.select_session(target, window, cx);
@@ -7716,6 +7810,73 @@ impl AppView {
             self.overlay_focus_pending = false;
             window.focus(&self.terminal_focus);
             cx.notify();
+        }
+    }
+
+    fn open_session_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        Self::set_input_value(&self.session_switcher_search, "", window, cx);
+        self.session_switcher_selected = self
+            .active_session_id
+            .and_then(|active_id| {
+                self.sessions
+                    .iter()
+                    .position(|session| session.id == active_id)
+            })
+            .unwrap_or(0);
+        self.session_switcher_scroll
+            .scroll_to_item(self.session_switcher_selected);
+        self.session_switcher_visible = true;
+        self.session_switcher_search
+            .update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    fn close_session_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_switcher_visible {
+            self.session_switcher_visible = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
+    fn select_session_switcher_index(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let session_ids = session_switcher_matches_ids(&self.sessions, &query);
+        let Some(session_id) = session_ids
+            .get(index.min(session_ids.len().saturating_sub(1)))
+            .copied()
+        else {
+            return;
+        };
+        self.session_switcher_visible = false;
+        self.select_session(session_id, window, cx);
+    }
+
+    fn move_session_switcher_selection(&mut self, direction: i32, cx: &mut Context<Self>) {
+        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let count = session_switcher_matches_ids(&self.sessions, &query).len();
+        if count == 0 {
+            self.session_switcher_selected = 0;
+            return;
+        }
+        self.session_switcher_selected =
+            next_session_switcher_index(self.session_switcher_selected, count, direction)
+                .unwrap_or_default();
+        self.session_switcher_scroll
+            .scroll_to_item(self.session_switcher_selected);
+        cx.notify();
+    }
+
+    fn toggle_session_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_switcher_visible {
+            self.close_session_switcher(window, cx);
+        } else {
+            self.open_session_switcher(window, cx);
         }
     }
 
@@ -16039,6 +16200,24 @@ impl AppView {
             .child(
                 components::icon_button(
                     tokens,
+                    "open-session-switcher",
+                    IconName::Search,
+                    if self.session_switcher_visible {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    self.tr("Switch session (Ctrl+Shift+P)"),
+                )
+                .disabled(self.sessions.is_empty())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_session_switcher(window, cx);
+                })),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
                     "session-tab-menu",
                     IconName::Ellipsis,
                     if self.tab_menu_session.is_some() {
@@ -16753,6 +16932,162 @@ impl AppView {
                                     this.toggle_sync_modal(window, cx);
                                 })),
                             ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn session_switcher_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let session_ids = session_switcher_matches_ids(&self.sessions, &query);
+        let selected_index = self
+            .session_switcher_selected
+            .min(session_ids.len().saturating_sub(1));
+        if !session_ids.is_empty() {
+            self.session_switcher_scroll.scroll_to_item(selected_index);
+        }
+        let mut list = div()
+            .id("session-switcher-list")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.session_switcher_scroll)
+            .p(px(ui_tokens::SPACE_3));
+        if session_ids.is_empty() {
+            list = list.child(components::empty_state(
+                tokens,
+                self.tr("No sessions match your search"),
+                self.tr("Search by name, user, host or port"),
+            ));
+        } else {
+            for (index, session_id) in session_ids.into_iter().enumerate() {
+                let Some(session) = self.session(session_id) else {
+                    continue;
+                };
+                let title = session.title.clone();
+                let identity = format!("{}@{}:{}", session.username, session.host, session.port);
+                let state = session.state;
+                let selected = selected_index == index;
+                list = list.child(
+                    div()
+                        .id(("session-switcher-row", session_id))
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_2))
+                        .min_h(px(ui_tokens::LIST_ROW_HEIGHT))
+                        .px(px(ui_tokens::SPACE_3))
+                        .border_1()
+                        .border_color(if selected {
+                            tokens.focus_ring
+                        } else {
+                            tokens.border_subtle
+                        })
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .bg(if selected {
+                            tokens.surface_raised
+                        } else {
+                            tokens.surface
+                        })
+                        .hover(|style| style.bg(tokens.surface_raised))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_session_switcher_index(index, window, cx);
+                        }))
+                        .child(components::status_dot(tokens, session_tone(state)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_size(px(ui_tokens::FONT_BODY))
+                                        .text_color(tokens.text_primary)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .text_size(px(ui_tokens::FONT_CAPTION))
+                                        .text_color(tokens.text_secondary)
+                                        .child(identity),
+                                ),
+                        )
+                        .child(components::pill(
+                            tokens,
+                            self.tr(session_state_label(state)),
+                            session_tone(state),
+                        )),
+                );
+            }
+        }
+
+        components::modal_overlay(tokens, "session-switcher-overlay")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.close_session_switcher(window, cx)),
+            )
+            .child(
+                components::modal_panel(tokens, "session-switcher-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_AUTH))
+                    .max_h(px(ui_tokens::MODAL_HEIGHT_SESSION))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        match event.keystroke.key.to_ascii_lowercase().as_str() {
+                            "escape" => {
+                                cx.stop_propagation();
+                                this.close_session_switcher(window, cx);
+                            }
+                            "up" => {
+                                cx.stop_propagation();
+                                this.move_session_switcher_selection(-1, cx);
+                            }
+                            "down" => {
+                                cx.stop_propagation();
+                                this.move_session_switcher_selection(1, cx);
+                            }
+                            "enter" => {
+                                cx.stop_propagation();
+                                let index = this.session_switcher_selected;
+                                this.select_session_switcher_index(index, window, cx);
+                            }
+                            _ => {}
+                        }
+                    }))
+                    .child(components::modal_header(tokens, self.tr("Switch session")))
+                    .child(
+                        div()
+                            .px(px(ui_tokens::SPACE_3))
+                            .py(px(ui_tokens::SPACE_2))
+                            .child(
+                                TextInput::new(&self.session_switcher_search)
+                                    .h(px(ui_tokens::CONTROL_HEIGHT))
+                                    .w_full(),
+                            ),
+                    )
+                    .child(list)
+                    .child(
+                        div()
+                            .px(px(ui_tokens::SPACE_3))
+                            .py(px(ui_tokens::SPACE_2))
+                            .border_t_1()
+                            .border_color(tokens.border_subtle)
+                            .child(components::help_text(
+                                tokens,
+                                self.tr("Use Up/Down to navigate, Enter to switch, Esc to close"),
+                            )),
                     ),
             )
             .into_any_element()
@@ -19467,6 +19802,7 @@ enum AppShortcut {
     Disconnect,
     ReplayLog,
     Find,
+    ToggleSessionSwitcher,
     SelectSession(usize),
 }
 
@@ -19501,6 +19837,7 @@ fn app_shortcut(
                 ShortcutAction::Disconnect => AppShortcut::Disconnect,
                 ShortcutAction::ReplayLog => AppShortcut::ReplayLog,
                 ShortcutAction::Find => AppShortcut::Find,
+                ShortcutAction::ToggleSessionSwitcher => AppShortcut::ToggleSessionSwitcher,
             });
         }
     }
@@ -19749,6 +20086,9 @@ impl Render for AppView {
         }
         if self.tab_menu_session.is_some() {
             root = root.child(self.tab_menu_overlay(&tokens, cx));
+        }
+        if self.session_switcher_visible {
+            root = root.child(self.session_switcher_overlay(&tokens, cx));
         }
         if self.sync_visible {
             root = root.child(self.sync_overlay(&tokens, cx));

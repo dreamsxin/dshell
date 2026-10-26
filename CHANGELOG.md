@@ -2,6 +2,14 @@
 
 All notable changes to dshell are documented here.
 
+## Unreleased
+
+### Added
+
+- Add a searchable active-session switcher to locate sessions by title, user,
+  host or port, show connection state, and switch with keyboard navigation.
+- Add the `Ctrl+Shift+P` shortcut and Simplified Chinese translations.
+
 ## [0.1.42] - 2026-10-27
 
 Adds optional commands after login and allows duplicating any active SSH session.
