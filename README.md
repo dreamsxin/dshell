@@ -100,6 +100,9 @@ Use the session-switcher search icon beside the tab actions, or press
 `Ctrl+Shift+P`, to find an active session by its title, username, host or port.
 Search terms can be combined; the list shows each connection identity and
 status. Use Up/Down and Enter to switch, or Esc to return to the terminal.
+To compare two sessions, keep one active, right-click another session tab, and
+choose `Compare with active session`. The read-only view aligns visible-screen
+changes and can refresh both snapshots; scrollback is not included.
 
 For a repeatable local manual test, run
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start-docker-ssh-manual.ps1`.

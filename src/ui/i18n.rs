@@ -99,6 +99,17 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Split with another session" => "与另一会话分屏",
         "Session Properties" => "会话属性",
         "Session properties" => "会话属性",
+        "Compare with active session" => "与活动会话比较",
+        "Terminal comparison" => "终端比较",
+        "Both sessions need a terminal screen to compare." => "两个会话都需要有终端画面才能比较。",
+        "No visible differences" => "可见内容没有差异",
+        "The visible terminal screens match." => "两个终端当前可见画面相同。",
+        "Close comparison" => "关闭比较",
+        "1 differing line" => "1 行存在差异",
+        "{count} differing lines" => "{count} 行存在差异",
+        "Visible terminal screens only; scrollback is excluded." => {
+            "仅比较当前可见终端画面，不包含滚动历史。"
+        }
         "No active sessions" => "没有活动会话",
         "Connection" => "连接",
         "Server health" => "服务器健康",
@@ -1364,5 +1375,27 @@ mod tests {
             ),
             "请至少填写一条登录后命令。"
         );
+    }
+
+    #[test]
+    fn simplified_chinese_translates_terminal_comparison() {
+        for (key, expected) in [
+            ("Compare with active session", "与活动会话比较"),
+            ("Terminal comparison", "终端比较"),
+            ("No visible differences", "可见内容没有差异"),
+            (
+                "The visible terminal screens match.",
+                "两个终端当前可见画面相同。",
+            ),
+            ("Close comparison", "关闭比较"),
+            ("1 differing line", "1 行存在差异"),
+            ("{count} differing lines", "{count} 行存在差异"),
+            (
+                "Visible terminal screens only; scrollback is excluded.",
+                "仅比较当前可见终端画面，不包含滚动历史。",
+            ),
+        ] {
+            assert_eq!(translate(Language::SimplifiedChinese, key), expected);
+        }
     }
 }

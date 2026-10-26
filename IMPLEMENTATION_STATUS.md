@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+2026-10-27，Windows/MSVC：会话标签菜单新增“与活动会话比较”，可并排查看两个 SSH 会话当前可见的终端文本，按行对齐并标示新增、删除和替换；支持刷新快照，不包含滚动历史，也不向远端发送命令。新增简体中文文案及 5 项比较逻辑测试。`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked` 和 `scripts\verify-hard-constraints.ps1` 全部通过（205 项通过、9 项 Docker 专项忽略）。本轮未修改 SSH/SFTP/认证/转发/日志/PTY 路径，因此未运行 Docker SSH 集成测试。现有 SFTP 最近目录记忆已于 `v0.1.33` 交付，按主机、端口和用户名恢复本地与远端目录。未在用户活动桌面启动 GUI；比较弹层交互、截图、DPI/IME 和字形检查仍需隔离 Windows 桌面人工验收。下一步：完成隔离 GUI 验收，并继续按公开 Xshell 评价筛选高频工作流。
+
+## 当前切片
+
 2026-10-27，Windows/MSVC：同步输入面板新增按已保存分组批量选择在线会话，父分组会包含子组；只加入仍连接且连接目标匹配当前主机资料的会话，临时会话不会被隐式归组。活动会话作为主目标；若被锁定则整体停止发送。补充英文/简体中文文案与组路径边界测试。功能依据 G2 用户描述的 100+ 会话并行运维工作负载推导，评价没有直接提出分组同步按钮。验证：`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked` 和 `scripts\verify-hard-constraints.ps1` 全部通过（199 项通过、9 项 Docker 专项忽略）；本轮未修改 SSH transport/PTY 实现，因此未重跑 Docker 集成测试。未启动用户活动桌面的 GUI，弹层交互和截图仍待隔离桌面人工验收。下一步：继续从公开 Xshell 评价中筛选未覆盖的高频工作流。
 
 2026-10-27，Windows/MSVC：新增可搜索的活动会话切换器，按会话标题、用户名、主机和端口做大小写不敏感的多词匹配，显示身份与连接状态；支持 `Ctrl+Shift+P`、上/下方向键、Enter、Esc、点击关闭以及简体中文。新增纯过滤、键盘导航和快捷键测试。验证：`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked` 和 `scripts\verify-hard-constraints.ps1` 全部通过（198 项通过、9 项 Docker 专项忽略）；目录记忆匹配与配置往返相关测试也通过。本轮未修改 SSH 通信路径，因此未重跑 Docker 集成测试。未启动用户活动桌面的 GUI，隔离窗口截图、DPI/IME/字形和弹层交互仍待人工验收。依据 G2 的 100+ 会话并行工作负载，提升大量标签下的目标定位效率；该弹层是产品推导，不是用户评价直接点名的功能。下一步：继续按公开 Xshell 评价筛选高频工作流。

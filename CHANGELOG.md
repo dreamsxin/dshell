@@ -11,6 +11,8 @@ All notable changes to dshell are documented here.
 - Add the `Ctrl+Shift+P` shortcut and Simplified Chinese translations.
 - Add bulk synchronized-input target selection for connected sessions in a
   saved host group and its subgroups.
+- Add a read-only comparison of visible terminal screens from two sessions,
+  with aligned changes and refresh support.
 
 ## [0.1.42] - 2026-10-27
 

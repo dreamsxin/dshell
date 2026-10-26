@@ -11,6 +11,7 @@ mod shortcuts;
 mod snippets;
 mod ssh;
 mod terminal;
+mod terminal_compare;
 mod triggers;
 mod ui;
 
@@ -67,6 +68,7 @@ use terminal::{
     TerminalPalette, TerminalPosition, TerminalRequest, TerminalRun, TerminalSearchResult,
     TerminalSize, TerminalTheme,
 };
+use terminal_compare::{DiffKind, DiffLine, compare_lines, visible_terminal_lines};
 use tokio::sync::{mpsc, oneshot, watch};
 use triggers::{
     MAX_TRIGGER_RULES, TriggerAction, TriggerActionKind, TriggerRule, TriggerSettings,
@@ -3451,6 +3453,18 @@ mod session_tests {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TerminalComparison {
+    left_session_id: u64,
+    right_session_id: u64,
+    left_title: String,
+    left_identity: String,
+    right_title: String,
+    right_identity: String,
+    rows: Vec<DiffLine>,
+    changed_rows: usize,
+}
+
 struct AppView {
     ui_theme: UiTheme,
     sidebar_collapsed: bool,
@@ -3607,6 +3621,7 @@ struct AppView {
     search_input: Entity<InputState>,
     session_switcher_search: Entity<InputState>,
     session_switcher_visible: bool,
+    terminal_comparison: Option<TerminalComparison>,
     session_switcher_selected: usize,
     session_switcher_scroll: ScrollHandle,
     compose_input: Entity<InputState>,
@@ -3963,6 +3978,7 @@ impl AppView {
             search_input,
             session_switcher_search,
             session_switcher_visible: false,
+            terminal_comparison: None,
             session_switcher_selected: 0,
             session_switcher_scroll: ScrollHandle::new(),
             compose_input,
@@ -7905,6 +7921,86 @@ impl AppView {
         }
     }
 
+    fn build_terminal_comparison(
+        &self,
+        left_session_id: u64,
+        right_session_id: u64,
+    ) -> Option<TerminalComparison> {
+        if left_session_id == right_session_id {
+            return None;
+        }
+        let left = self.session(left_session_id)?;
+        let right = self.session(right_session_id)?;
+        let left_frame = left.frame.as_ref()?;
+        let right_frame = right.frame.as_ref()?;
+        let rows = compare_lines(
+            &visible_terminal_lines(left_frame),
+            &visible_terminal_lines(right_frame),
+        );
+        let changed_rows = rows
+            .iter()
+            .filter(|row| row.kind != DiffKind::Equal)
+            .count();
+        Some(TerminalComparison {
+            left_session_id,
+            right_session_id,
+            left_title: left.title.clone(),
+            left_identity: format!("{}@{}:{}", left.username, left.host, left.port),
+            right_title: right.title.clone(),
+            right_identity: format!("{}@{}:{}", right.username, right.host, right.port),
+            rows,
+            changed_rows,
+        })
+    }
+
+    fn open_terminal_comparison(
+        &mut self,
+        left_session_id: u64,
+        right_session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(comparison) = self.build_terminal_comparison(left_session_id, right_session_id)
+        else {
+            self.show_toast(
+                self.tr("Both sessions need a terminal screen to compare."),
+                Tone::Warning,
+                cx,
+            );
+            return;
+        };
+        self.terminal_comparison = Some(comparison);
+        self.tab_menu_session = None;
+        self.menu_visible = false;
+        self.layout_menu_visible = false;
+        self.request_overlay_focus();
+        window.focus(&self.overlay_focus);
+        cx.notify();
+    }
+
+    fn refresh_terminal_comparison(&mut self, cx: &mut Context<Self>) {
+        let Some((left_session_id, right_session_id)) = self
+            .terminal_comparison
+            .as_ref()
+            .map(|comparison| (comparison.left_session_id, comparison.right_session_id))
+        else {
+            return;
+        };
+        if let Some(comparison) = self.build_terminal_comparison(left_session_id, right_session_id)
+        {
+            self.terminal_comparison = Some(comparison);
+            cx.notify();
+        }
+    }
+
+    fn close_terminal_comparison(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_comparison.take().is_some() {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
     fn open_session_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input_value(&self.session_switcher_search, "", window, cx);
         self.session_switcher_selected = self
@@ -10260,6 +10356,7 @@ impl AppView {
                 row = row
                     .child(
                         div()
+                            .id(("terminal-comparison-right-text", index))
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
@@ -17137,6 +17234,258 @@ impl AppView {
             .into_any_element()
     }
 
+    fn terminal_comparison_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(comparison) = self.terminal_comparison.as_ref() else {
+            return div().into_any_element();
+        };
+        let comparison = comparison.clone();
+        let mut rows = div()
+            .id("terminal-comparison-rows")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
+        if comparison.rows.is_empty() || comparison.changed_rows == 0 {
+            rows = rows.child(components::empty_state(
+                tokens,
+                self.tr("No visible differences"),
+                self.tr("The visible terminal screens match."),
+            ));
+        } else {
+            for (index, row) in comparison.rows.iter().enumerate() {
+                let (left_background, right_background, left_marker, right_marker) = match row.kind
+                {
+                    DiffKind::Equal => (tokens.surface, tokens.surface, " ", " "),
+                    DiffKind::Changed => (
+                        tokens.danger.opacity(0.12),
+                        tokens.success.opacity(0.12),
+                        "-",
+                        "+",
+                    ),
+                    DiffKind::LeftOnly => (tokens.danger.opacity(0.12), tokens.surface, "-", " "),
+                    DiffKind::RightOnly => (tokens.surface, tokens.success.opacity(0.12), " ", "+"),
+                };
+                let left_marker_color = match row.kind {
+                    DiffKind::Changed | DiffKind::LeftOnly => tokens.danger_text,
+                    DiffKind::Equal | DiffKind::RightOnly => tokens.text_disabled,
+                };
+                let right_marker_color = match row.kind {
+                    DiffKind::Changed | DiffKind::RightOnly => tokens.success_text,
+                    DiffKind::Equal | DiffKind::LeftOnly => tokens.text_disabled,
+                };
+                let left_cell = div()
+                    .flex()
+                    .items_center()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .px(px(ui_tokens::SPACE_2))
+                    .py(px(ui_tokens::SPACE_1))
+                    .bg(left_background)
+                    .child(
+                        div()
+                            .w(px(ui_tokens::SPACE_3))
+                            .flex_shrink_0()
+                            .text_color(left_marker_color)
+                            .child(left_marker),
+                    )
+                    .child(
+                        div()
+                            .id(("terminal-comparison-left-text", index))
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .font_family(self.settings.font_family.clone())
+                            .child(row.left.clone().unwrap_or_default()),
+                    );
+                let right_cell = div()
+                    .flex()
+                    .items_center()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .px(px(ui_tokens::SPACE_2))
+                    .py(px(ui_tokens::SPACE_1))
+                    .bg(right_background)
+                    .child(
+                        div()
+                            .w(px(ui_tokens::SPACE_3))
+                            .flex_shrink_0()
+                            .text_color(right_marker_color)
+                            .child(right_marker),
+                    )
+                    .child(
+                        div()
+                            .id(("terminal-comparison-right-text", index))
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .font_family(self.settings.font_family.clone())
+                            .child(row.right.clone().unwrap_or_default()),
+                    );
+                rows = rows.child(
+                    div()
+                        .id(("terminal-comparison-row", index))
+                        .flex()
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(tokens.border_subtle)
+                        .child(left_cell)
+                        .child(
+                            div()
+                                .w(px(LAYOUT_DIVIDER_PX))
+                                .flex_shrink_0()
+                                .bg(tokens.border_subtle),
+                        )
+                        .child(right_cell),
+                );
+            }
+        }
+
+        let left_heading = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .overflow_hidden()
+                    .text_size(px(ui_tokens::FONT_BODY))
+                    .text_color(tokens.text_primary)
+                    .child(comparison.left_title),
+            )
+            .child(
+                div()
+                    .overflow_hidden()
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_secondary)
+                    .child(comparison.left_identity),
+            );
+        let right_heading = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .overflow_hidden()
+                    .text_size(px(ui_tokens::FONT_BODY))
+                    .text_color(tokens.text_primary)
+                    .child(comparison.right_title),
+            )
+            .child(
+                div()
+                    .overflow_hidden()
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_secondary)
+                    .child(comparison.right_identity),
+            );
+        let header_actions = div()
+            .flex()
+            .items_center()
+            .gap(px(ui_tokens::SPACE_2))
+            .child(
+                Button::new("terminal-comparison-refresh")
+                    .label(self.tr("Refresh"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.refresh_terminal_comparison(cx);
+                    })),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
+                    "terminal-comparison-close",
+                    IconName::Close,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    self.tr("Close comparison"),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_terminal_comparison(window, cx);
+                })),
+            );
+        let summary = if comparison.changed_rows == 1 {
+            self.tr("1 differing line")
+        } else {
+            self.tr("{count} differing lines")
+                .replace("{count}", &comparison.changed_rows.to_string())
+        };
+
+        components::modal_overlay(tokens, "terminal-comparison-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_terminal_comparison(window, cx);
+                }),
+            )
+            .child(
+                components::modal_panel(tokens, "terminal-comparison-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_SETTINGS))
+                    .max_h(px(ui_tokens::MODAL_HEIGHT_SESSION))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                            cx.stop_propagation();
+                            this.close_terminal_comparison(window, cx);
+                        }
+                    }))
+                    .child(
+                        components::modal_header(tokens, self.tr("Terminal comparison"))
+                            .child(header_actions),
+                    )
+                    .child(
+                        div()
+                            .px(px(ui_tokens::SPACE_4))
+                            .py(px(ui_tokens::SPACE_2))
+                            .child(components::help_text(
+                                tokens,
+                                self.tr("Visible terminal screens only; scrollback is excluded."),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .px(px(ui_tokens::SPACE_2))
+                            .py(px(ui_tokens::SPACE_2))
+                            .border_b_1()
+                            .border_color(tokens.border_subtle)
+                            .child(left_heading)
+                            .child(
+                                div()
+                                    .w(px(LAYOUT_DIVIDER_PX))
+                                    .flex_shrink_0()
+                                    .h_full()
+                                    .bg(tokens.border_subtle),
+                            )
+                            .child(right_heading),
+                    )
+                    .child(rows)
+                    .child(
+                        div()
+                            .px(px(ui_tokens::SPACE_4))
+                            .py(px(ui_tokens::SPACE_2))
+                            .border_t_1()
+                            .border_color(tokens.border_subtle)
+                            .child(components::help_text(tokens, summary)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn session_switcher_overlay(
         &mut self,
         tokens: &ThemeTokens,
@@ -17314,6 +17663,12 @@ impl AppView {
             .unwrap_or_default();
         let has_other = self.sessions.iter().any(|session| session.id != session_id);
         let has_right = session_index + 1 < self.sessions.len();
+        let compare_enabled = !active
+            && session.frame.is_some()
+            && self.active_session_id.is_some_and(|active_id| {
+                self.session(active_id)
+                    .is_some_and(|active_session| active_session.frame.is_some())
+            });
         let saved_profile = saved_profile_for_session(session, &self.profiles).cloned();
         let menu = div()
             .id("session-tab-menu")
@@ -17403,6 +17758,22 @@ impl AppView {
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.duplicate_session(session_id, window, cx);
+                })),
+            )
+            .child(
+                menu_item_with_icon(
+                    tokens,
+                    "tab-menu-compare-terminal",
+                    components::asset_icon(tokens, "replace"),
+                    self.tr("Compare with active session"),
+                    "",
+                    false,
+                    compare_enabled,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(active_id) = this.active_session_id {
+                        this.open_terminal_comparison(active_id, session_id, window, cx);
+                    }
                 })),
             )
             .child(
@@ -20289,6 +20660,9 @@ impl Render for AppView {
         }
         if self.session_switcher_visible {
             root = root.child(self.session_switcher_overlay(&tokens, cx));
+        }
+        if self.terminal_comparison.is_some() {
+            root = root.child(self.terminal_comparison_overlay(&tokens, cx));
         }
         if self.sync_visible {
             root = root.child(self.sync_overlay(&tokens, cx));
