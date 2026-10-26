@@ -2,6 +2,30 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.37] - 2026-10-27
+
+Adds one-click startup for saved host groups.
+
+### Added
+
+- Add a terminal icon to each populated group header to start saved profiles in
+  that group and its nested groups; include an action for `UNGROUPED`.
+- Skip active and duplicate host/port/user targets. Collect missing credentials
+  one profile at a time, then attempt connections sequentially. Authentication
+  failures pause the queue until retry or skip; users can stop remaining items.
+- Keep staged credentials in zeroizing memory and cache them only after
+  successful authentication.
+- Add English and Simplified Chinese labels, candidate-filter tests, and queue
+  state coverage for skipping a profile during credential collection.
+
+### Verification
+
+- Verified 2026-10-27 on Windows/MSVC: `cargo fmt --all` and
+  `scripts\verify-hard-constraints.ps1` passed (178 tests passed, 9 SSH tests
+  ignored in the standard run); `scripts\test-docker-ssh.ps1` passed (9/9).
+- Isolated desktop screenshots, DPI/IME, glyph alignment, and manual group
+  launch interaction checks remain outstanding.
+
 ## [0.1.36] - 2026-10-26
 
 Adds prompt-based responses to terminal triggers.

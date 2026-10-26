@@ -1023,6 +1023,48 @@ struct SshSession {
     state: SessionState,
 }
 
+struct GroupLaunchState {
+    group: String,
+    total: usize,
+    pending: VecDeque<HostProfile>,
+    ready: VecDeque<HostProfile>,
+    staged_credentials: HashMap<CredentialCacheKey, CachedCredentials>,
+    current: Option<HostProfile>,
+    active_profile: Option<HostProfile>,
+    current_session_id: Option<u64>,
+    connected: usize,
+    failed: usize,
+    skipped: usize,
+    stopping: bool,
+}
+
+impl GroupLaunchState {
+    fn complete_current(&mut self, connected: bool) {
+        self.current_session_id = None;
+        self.active_profile = None;
+        if connected {
+            self.connected += 1;
+        } else {
+            self.failed += 1;
+        }
+    }
+
+    fn stop_remaining(&mut self) {
+        self.stopping = true;
+        self.pending.clear();
+        self.ready.clear();
+        self.staged_credentials.clear();
+    }
+
+    fn skip_current_profile(&mut self) -> bool {
+        if self.current.take().is_none() {
+            return false;
+        }
+        self.skipped += 1;
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ServerMetricsViewState {
     metrics: Option<ServerMetrics>,
@@ -1442,6 +1484,45 @@ fn session_matches_target(session: &SshSession, host: &str, port: u16, username:
         && session.username == username
 }
 
+fn group_launch_candidates(
+    profiles: &[HostProfile],
+    sessions: &[SshSession],
+    group: &str,
+) -> (Vec<HostProfile>, usize) {
+    let mut candidates = Vec::new();
+    let mut skipped = 0;
+    let mut seen_targets = HashSet::new();
+    for profile in profiles
+        .iter()
+        .filter(|profile| is_group_within(&profile.group, group))
+    {
+        let target = (
+            profile.host.to_ascii_lowercase(),
+            profile.port,
+            profile.username.clone(),
+        );
+        if sessions.iter().any(|session| {
+            session_matches_target(session, &profile.host, profile.port, &profile.username)
+        }) || !seen_targets.insert(target)
+        {
+            skipped += 1;
+            continue;
+        }
+        candidates.push(profile.clone());
+    }
+    candidates.sort_by(|left, right| {
+        left.group
+            .to_ascii_lowercase()
+            .cmp(&right.group.to_ascii_lowercase())
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+    });
+    (candidates, skipped)
+}
+
 fn recent_sftp_directories_for_target(
     recent: &[RecentConnection],
     host: &str,
@@ -1520,26 +1601,26 @@ fn remove_session(
 #[cfg(test)]
 mod session_tests {
     use super::{
-        AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, LayoutDragTarget,
-        LocalUploadKind, MouseTrackingMode, SessionEditorEscape, SessionEditorKey, SessionSplit,
-        SessionState, SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest,
-        TerminalSize, UiEvent, app_shortcut, apply_session_event, collapsed_group_key,
-        dragged_panel_width, enqueue_session_request, filesystem_usage_percent,
-        forget_stopped_forward, format_alert_time, format_log_time, format_rate,
-        format_storage_kib, is_authentication_failure, is_sftp_transfer_command, keyword_matches,
-        local_upload_kind, mark_sftp_ready, memory_usage_percent, merge_unique_profiles,
-        move_profile_to_group, mpsc, parse_alert_percent, recall_compose_history,
-        recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
-        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
-        reorder_session_ids, saved_profile_for_session, search_result_message,
-        server_alert_observations, session_accepts_requests, session_editor_escape,
-        session_editor_key, session_matches_target, session_terminal_size_for_split,
-        split_panel_terminal_size, synchronized_targets, take_next_sftp_transfer,
-        terminal_size_for_viewport, unique_duplicate_session_title, watch,
+        AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, GroupLaunchState,
+        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, SessionEditorEscape,
+        SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
+        TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
+        collapsed_group_key, dragged_panel_width, enqueue_session_request,
+        filesystem_usage_percent, forget_stopped_forward, format_alert_time, format_log_time,
+        format_rate, format_storage_kib, group_launch_candidates, is_authentication_failure,
+        is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
+        memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
+        parse_alert_percent, recall_compose_history, recent_sftp_directories_for_target,
+        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
+        rename_profile_group, reorder_group_order, reorder_session_ids, saved_profile_for_session,
+        search_result_message, server_alert_observations, session_accepts_requests,
+        session_editor_escape, session_editor_key, session_matches_target,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
+        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
-    use crate::profiles::{AuthMethod, HostProfile, RecentConnection};
+    use crate::profiles::{AuthMethod, HostProfile, RecentConnection, ReconnectSettings};
     use crate::settings::AppSettings;
     use crate::sftp::SftpCommand;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
@@ -1714,6 +1795,123 @@ mod session_tests {
 
         session.state = SessionState::Disconnected;
         assert!(!session_matches_target(&session, "127.0.0.1", 22, "test"));
+    }
+
+    #[test]
+    fn group_launch_includes_subgroups_and_skips_active_or_duplicate_targets() {
+        fn profile(name: &str, host: &str, group: &str) -> HostProfile {
+            HostProfile {
+                name: name.to_owned(),
+                host: host.to_owned(),
+                port: 22,
+                username: "test".to_owned(),
+                group: group.to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Agent,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+                reconnect: ReconnectSettings::default(),
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
+            }
+        }
+
+        let profiles = vec![
+            profile("database", "db.example.com", "Production/Databases"),
+            profile("database-copy", "db.example.com", "Production/Other"),
+            profile("web", "web.example.com", "Production/Web"),
+            profile("staging", "staging.example.com", "Staging"),
+        ];
+        let (mut active, _, _) = test_session(9);
+        active.host = "WEB.EXAMPLE.COM".to_owned();
+        let (candidates, skipped) = group_launch_candidates(&profiles, &[active], "production");
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["database"]
+        );
+        assert_eq!(skipped, 2);
+
+        let (ungrouped, _) =
+            group_launch_candidates(&[profile("manual", "manual.example.com", "")], &[], "");
+        assert_eq!(ungrouped[0].name, "manual");
+    }
+
+    #[test]
+    fn group_launch_state_tracks_serial_results_and_stop_request() {
+        let mut launch = GroupLaunchState {
+            group: "Production".to_owned(),
+            total: 2,
+            pending: VecDeque::new(),
+            ready: VecDeque::new(),
+            staged_credentials: std::collections::HashMap::new(),
+            current: None,
+            active_profile: None,
+            current_session_id: Some(9),
+            connected: 0,
+            failed: 0,
+            skipped: 0,
+            stopping: false,
+        };
+
+        launch.complete_current(true);
+        assert_eq!(launch.connected, 1);
+        assert_eq!(launch.current_session_id, None);
+        launch.current_session_id = Some(10);
+        launch.complete_current(false);
+        assert_eq!(launch.failed, 1);
+        launch.stop_remaining();
+        assert!(launch.stopping);
+    }
+
+    #[test]
+    fn group_launch_can_skip_a_profile_while_collecting_credentials() {
+        let profile = HostProfile {
+            name: "production".to_owned(),
+            host: "prod.example.com".to_owned(),
+            port: 22,
+            username: "deploy".to_owned(),
+            group: "Production".to_owned(),
+            favorite: false,
+            auth_method: AuthMethod::Password,
+            identity_file: String::new(),
+            proxy_jump: String::new(),
+            forwards: Vec::new(),
+            keepalive_seconds: 0,
+            reconnect: ReconnectSettings::default(),
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
+        };
+        let mut launch = GroupLaunchState {
+            group: "Production".to_owned(),
+            total: 2,
+            pending: VecDeque::from([profile.clone()]),
+            ready: VecDeque::new(),
+            staged_credentials: std::collections::HashMap::new(),
+            current: Some(profile),
+            active_profile: None,
+            current_session_id: None,
+            connected: 0,
+            failed: 0,
+            skipped: 0,
+            stopping: false,
+        };
+
+        assert!(launch.skip_current_profile());
+        assert!(launch.current.is_none());
+        assert_eq!(launch.pending.len(), 1);
+        assert_eq!(launch.skipped, 1);
+        assert!(!launch.skip_current_profile());
+        assert_eq!(launch.skipped, 1);
     }
 
     #[test]
@@ -2747,6 +2945,7 @@ struct AppView {
     stacked_state: Entity<ResizableState>,
     profiles: Vec<HostProfile>,
     recent: Vec<RecentConnection>,
+    group_launch: Option<GroupLaunchState>,
     collapsed_groups: HashSet<String>,
     group_editor_name: Entity<InputState>,
     group_editor_open: bool,
@@ -3085,6 +3284,7 @@ impl AppView {
             stacked_state,
             profiles: data.profiles,
             recent: data.recent,
+            group_launch: None,
             collapsed_groups,
             group_editor_name,
             group_editor_open: false,
@@ -4817,6 +5017,291 @@ impl AppView {
         self.show_toast(self.tr("Group order updated."), Tone::Success, cx);
     }
 
+    fn start_group_launch(&mut self, group: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group_launch.is_some() {
+            self.show_toast(
+                self.tr("A group launch is already in progress."),
+                Tone::Warning,
+                cx,
+            );
+            return;
+        }
+        if !self.profiles_ready {
+            self.show_toast(self.tr("Host profiles are unavailable."), Tone::Danger, cx);
+            return;
+        }
+
+        let (profiles, skipped) = group_launch_candidates(&self.profiles, &self.sessions, group);
+        if profiles.is_empty() {
+            let message = if skipped > 0 {
+                self.tr("All sessions in this group are already connected.")
+            } else {
+                self.tr("This group has no saved sessions.")
+            };
+            self.show_toast(message, Tone::Warning, cx);
+            return;
+        }
+
+        let total = profiles.len();
+        self.pending_session_title_override = None;
+        self.group_launch = Some(GroupLaunchState {
+            group: group.to_owned(),
+            total,
+            pending: profiles.into(),
+            ready: VecDeque::new(),
+            staged_credentials: HashMap::new(),
+            current: None,
+            active_profile: None,
+            current_session_id: None,
+            connected: 0,
+            failed: 0,
+            skipped,
+            stopping: false,
+        });
+        self.prepare_next_group_launch_profile(window, cx);
+    }
+
+    fn prepare_next_group_launch_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        loop {
+            let next = self
+                .group_launch
+                .as_mut()
+                .and_then(|launch| launch.pending.pop_front());
+            let Some(profile) = next else {
+                if self
+                    .group_launch
+                    .as_ref()
+                    .is_some_and(|launch| launch.current_session_id.is_none())
+                {
+                    self.start_next_group_connection(window, cx);
+                }
+                return;
+            };
+
+            let key = CredentialCacheKey::from_profile(&profile);
+            if self.credential_cache.contains_key(&key)
+                || !self.profile_needs_credential_prompt(&profile)
+            {
+                if let Some(launch) = self.group_launch.as_mut() {
+                    launch.ready.push_back(profile);
+                }
+                continue;
+            }
+
+            let (index, total) = if let Some(launch) = self.group_launch.as_mut() {
+                launch.current = Some(profile.clone());
+                (launch.total - launch.pending.len(), launch.total)
+            } else {
+                return;
+            };
+            self.load_profile(&profile, window, cx);
+            let message = self
+                .tr("Enter credentials for {name} to connect ({current} of {total}).")
+                .replace("{name}", &profile.name)
+                .replace("{current}", &index.to_string())
+                .replace("{total}", &total.to_string());
+            self.open_credential_prompt(message, cx);
+            return;
+        }
+    }
+
+    fn start_next_group_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        loop {
+            let next = self.group_launch.as_mut().and_then(|launch| {
+                if launch.stopping {
+                    return None;
+                }
+                let profile = launch.ready.pop_front()?;
+                launch.active_profile = Some(profile.clone());
+                let key = CredentialCacheKey::from_profile(&profile);
+                Some((profile, launch.staged_credentials.remove(&key)))
+            });
+            let Some((profile, staged_credentials)) = next else {
+                if self
+                    .group_launch
+                    .as_ref()
+                    .is_some_and(|launch| launch.current_session_id.is_none())
+                {
+                    self.finish_group_launch(cx);
+                }
+                return;
+            };
+
+            let session_id = self.next_session_id;
+            let key = CredentialCacheKey::from_profile(&profile);
+            if staged_credentials.is_none()
+                && !self.credential_cache.contains_key(&key)
+                && self.profile_needs_credential_prompt(&profile)
+            {
+                if let Some(launch) = self.group_launch.as_mut() {
+                    launch.active_profile = None;
+                    launch.current = Some(profile.clone());
+                }
+                self.load_profile(&profile, window, cx);
+                let message = self
+                    .tr("Enter credentials for {name} to connect ({current} of {total}).")
+                    .replace("{name}", &profile.name)
+                    .replace(
+                        "{current}",
+                        &self
+                            .group_launch
+                            .as_ref()
+                            .map_or(0, |launch| launch.total - launch.pending.len())
+                            .to_string(),
+                    )
+                    .replace(
+                        "{total}",
+                        &self
+                            .group_launch
+                            .as_ref()
+                            .map_or(0, |launch| launch.total)
+                            .to_string(),
+                    );
+                self.open_credential_prompt(message, cx);
+                return;
+            }
+
+            if let Some(credentials) = staged_credentials {
+                self.load_profile(&profile, window, cx);
+                self.pending_session_title_override = None;
+                self.apply_cached_credentials(&credentials, window, cx);
+                self.connect(window, cx);
+            } else {
+                self.start_saved_profile_connection(&profile, None, window, cx);
+            }
+
+            if self.session(session_id).is_some() {
+                if let Some(launch) = self.group_launch.as_mut() {
+                    launch.current_session_id = Some(session_id);
+                }
+                return;
+            }
+            if let Some(launch) = self.group_launch.as_mut() {
+                launch.active_profile = None;
+                launch.failed += 1;
+            }
+        }
+    }
+
+    fn finish_group_launch(&mut self, cx: &mut Context<Self>) {
+        let Some(launch) = self.group_launch.take() else {
+            return;
+        };
+        let group = if launch.group.is_empty() {
+            self.tr("UNGROUPED")
+        } else {
+            launch.group
+        };
+        let message = if launch.stopping {
+            self.tr("Group launch stopped after {count} successful connections in {group}.")
+        } else {
+            self.tr("Group launch finished: {count} connected in {group}.")
+        }
+        .replace("{count}", &launch.connected.to_string())
+        .replace("{group}", &group);
+        let mut details = Vec::new();
+        if launch.failed > 0 {
+            details.push(
+                self.tr("{count} connection attempts failed.")
+                    .replace("{count}", &launch.failed.to_string()),
+            );
+        }
+        if launch.skipped > 0 {
+            details.push(
+                self.tr("Skipped {count} already-connected or cancelled sessions.")
+                    .replace("{count}", &launch.skipped.to_string()),
+            );
+        }
+        let message = if details.is_empty() {
+            message
+        } else {
+            format!("{message} {}", details.join(" "))
+        };
+        let tone = if launch.failed > 0 || launch.skipped > 0 || launch.stopping {
+            Tone::Warning
+        } else {
+            Tone::Success
+        };
+        self.show_toast(message, tone, cx);
+    }
+
+    fn accept_group_launch_credentials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self
+            .group_launch
+            .as_mut()
+            .and_then(|launch| launch.current.take())
+        else {
+            self.connect(window, cx);
+            return;
+        };
+        let password = Zeroizing::new(self.password.read(cx).text().to_string());
+        let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
+        let jump_password = Zeroizing::new(self.jump_password.read(cx).text().to_string());
+        let jump_passphrase = Zeroizing::new(self.jump_passphrase.read(cx).text().to_string());
+        let credentials = CachedCredentials::from_inputs(
+            &password,
+            &passphrase,
+            &jump_password,
+            &jump_passphrase,
+        );
+        if let Some(launch) = self.group_launch.as_mut() {
+            launch
+                .staged_credentials
+                .insert(CredentialCacheKey::from_profile(&profile), credentials);
+            launch.ready.push_back(profile);
+        }
+        Self::set_input_value(&self.password, "", window, cx);
+        Self::set_input_value(&self.key_passphrase, "", window, cx);
+        Self::set_input_value(&self.jump_password, "", window, cx);
+        Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        self.credential_prompt_open = false;
+        self.credential_prompt_session_id = None;
+        self.session_editor_open = false;
+        self.overlay_focus_pending = false;
+        self.prepare_next_group_launch_profile(window, cx);
+    }
+
+    fn stop_group_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(current_session_id) = self
+            .group_launch
+            .as_ref()
+            .map(|launch| launch.current_session_id)
+        else {
+            return;
+        };
+        if let Some(launch) = self.group_launch.as_mut() {
+            launch.stop_remaining();
+        }
+        if let Some(id) = current_session_id {
+            if self.credential_prompt_session_id == Some(id) {
+                self.cancel_session_editor(window, cx);
+            } else {
+                self.show_toast(
+                    self.tr("Will stop remaining sessions after the current connection."),
+                    Tone::Warning,
+                    cx,
+                );
+            }
+            return;
+        }
+        self.group_launch = None;
+        self.pending_session_title_override = None;
+        Self::set_input_value(&self.password, "", window, cx);
+        Self::set_input_value(&self.key_passphrase, "", window, cx);
+        Self::set_input_value(&self.jump_password, "", window, cx);
+        Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        self.credential_prompt_open = false;
+        self.credential_prompt_session_id = None;
+        self.session_editor_open = false;
+        self.overlay_focus_pending = false;
+        window.focus(&self.terminal_focus);
+        self.show_toast(
+            self.tr("Group launch stopped; queued sessions were not started."),
+            Tone::Warning,
+            cx,
+        );
+    }
+
     fn group_drop_header(
         &self,
         tokens: &ThemeTokens,
@@ -4832,6 +5317,46 @@ impl AppView {
         let host_group = group.clone();
         let preview_tokens = *tokens;
         let mut actions = div().flex().items_center().gap(px(ui_tokens::SPACE_1));
+        if self
+            .profiles
+            .iter()
+            .any(|profile| is_group_within(&profile.group, &group))
+        {
+            let launch_group = group.clone();
+            let stopping_group_launch = self
+                .group_launch
+                .as_ref()
+                .is_some_and(|launch| group_key(&launch.group) == group_key(&group));
+            let label = if stopping_group_launch {
+                self.tr("Stop remaining sessions")
+            } else if group.is_empty() {
+                self.tr("Start ungrouped sessions")
+            } else {
+                self.tr("Start sessions in this group")
+            };
+            actions = actions.child(
+                components::icon_button(
+                    tokens,
+                    SharedString::from(format!("start-group-{target_group}")),
+                    if stopping_group_launch {
+                        IconName::CircleX
+                    } else {
+                        IconName::SquareTerminal
+                    },
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    label,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if stopping_group_launch {
+                        this.stop_group_launch(window, cx);
+                    } else {
+                        this.start_group_launch(&launch_group, window, cx);
+                    }
+                })),
+            );
+        }
         if !group.is_empty() {
             let child_parent = group.clone();
             let rename_group = group.clone();
@@ -5498,6 +6023,16 @@ impl AppView {
 
     fn cancel_session_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let credential_session_id = self.credential_prompt_session_id.take();
+        let cancelled_group_session = credential_session_id.is_some_and(|id| {
+            self.group_launch
+                .as_ref()
+                .is_some_and(|launch| launch.current_session_id == Some(id))
+        });
+        let skipped_group_profile = credential_session_id.is_none()
+            && self
+                .group_launch
+                .as_mut()
+                .is_some_and(GroupLaunchState::skip_current_profile);
         self.pending_session_title_override = None;
         Self::set_input_value(&self.password, "", window, cx);
         Self::set_input_value(&self.key_passphrase, "", window, cx);
@@ -5509,6 +6044,16 @@ impl AppView {
         self.overlay_focus_pending = false;
         if let Some(id) = credential_session_id {
             self.close_session(id, window, cx);
+            if cancelled_group_session {
+                if let Some(launch) = self.group_launch.as_mut() {
+                    launch.complete_current(false);
+                }
+                self.start_next_group_connection(window, cx);
+            }
+            return;
+        }
+        if skipped_group_profile {
+            self.prepare_next_group_launch_profile(window, cx);
             return;
         }
         window.focus(&self.terminal_focus);
@@ -5524,6 +6069,7 @@ impl AppView {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let retrying_session_id = self.credential_prompt_session_id;
         let host = self.host.read(cx).value().trim().to_owned();
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().trim().to_owned();
@@ -5768,6 +6314,11 @@ impl AppView {
                     credential_key: Some(credential_key.clone()),
                     state: SessionState::Connecting,
                 });
+                if let Some(launch) = self.group_launch.as_mut()
+                    && launch.current_session_id == retrying_session_id
+                {
+                    launch.current_session_id = Some(id);
+                }
                 if cached_credentials.contains_secret() {
                     self.pending_credentials
                         .insert(id, (credential_key, cached_credentials));
@@ -5835,6 +6386,7 @@ impl AppView {
             }
         }
 
+        let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             while let Some(event) = event_rx.recv().await {
                 match event {
@@ -5862,7 +6414,8 @@ impl AppView {
                         }
                     }
                     event => {
-                        let result = this.update(cx, |view, cx| {
+                        let result = cx.update_window(window_handle, |_, window, app| {
+                            this.update(app, |view, cx| {
                             let server_alerts_changed = matches!(
                                 &event,
                                 UiEvent::ServerMetrics(ServerData::Metrics(_))
@@ -5903,6 +6456,8 @@ impl AppView {
                                 UiEvent::Failed(error) => Some(error.clone()),
                                 _ => None,
                             };
+                            let authentication_failure =
+                                failure.as_deref().is_some_and(is_authentication_failure);
                             let service_action = match &event {
                                 UiEvent::ServerMetrics(ServerData::ServiceAction(result)) => {
                                     Some(result.clone())
@@ -5987,6 +6542,31 @@ impl AppView {
                                     view.reopen_authentication_after_failure(id, error, cx);
                                 }
                             }
+                            let launch_result = view.group_launch.as_ref().and_then(|launch| {
+                                if launch.current_session_id != Some(id) {
+                                    return None;
+                                }
+                                if connection_established
+                                    && view.session(id).is_some_and(|session| {
+                                        session.state == SessionState::Connected
+                                    })
+                                {
+                                    return Some(true);
+                                }
+                                let auth_retry_pending = authentication_failure
+                                    && view.credential_prompt_session_id == Some(id);
+                                (view.session(id).is_some_and(|session| {
+                                    session.state == SessionState::Disconnected
+                                }) && !auth_retry_pending)
+                                    .then_some(false)
+                            });
+                            if let Some(connected) = launch_result {
+                                if let Some(launch) = view.group_launch.as_mut() {
+                                    launch.complete_current(connected);
+                                }
+                                view.start_next_group_connection(window, cx);
+                            }
+                            })
                         });
                         if result.is_err() {
                             break;
@@ -7633,6 +8213,16 @@ impl AppView {
 
     fn credential_prompt_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = self.tokens();
+        let collecting_group_credentials = self
+            .group_launch
+            .as_ref()
+            .is_some_and(|launch| launch.current.is_some());
+        let retrying_group_session = self.credential_prompt_session_id.is_some_and(|id| {
+            self.group_launch
+                .as_ref()
+                .is_some_and(|launch| launch.current_session_id == Some(id))
+        });
+        let group_batch_prompt = collecting_group_credentials || retrying_group_session;
         let host = self.host.read(cx).value().trim().to_owned();
         let port = self.port.read(cx).value().trim().to_owned();
         let username = self.username.read(cx).value().trim().to_owned();
@@ -7753,6 +8343,65 @@ impl AppView {
             &tokens,
             self.tr("Credentials are cleared from the form after connecting or cancelling. Successful connections keep them only in memory until dshell exits."),
         ));
+        if collecting_group_credentials {
+            body = body.child(components::help_text(
+                &tokens,
+                self.tr(
+                    "Group connections start after the remaining credential prompts are complete.",
+                ),
+            ));
+        }
+
+        let mut footer = components::modal_footer(&tokens).child(
+            components::button(
+                &tokens,
+                "credential-prompt-cancel",
+                if group_batch_prompt {
+                    self.tr("Skip this host")
+                } else {
+                    self.tr("Cancel")
+                },
+                ButtonKind::Ghost,
+                ButtonSize::Regular,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.cancel_session_editor(window, cx);
+            })),
+        );
+        if group_batch_prompt {
+            footer = footer.child(
+                components::button(
+                    &tokens,
+                    "credential-prompt-stop-group",
+                    self.tr("Stop remaining"),
+                    ButtonKind::Ghost,
+                    ButtonSize::Regular,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.stop_group_launch(window, cx);
+                })),
+            );
+        }
+        footer = footer.child(
+            components::button(
+                &tokens,
+                "credential-prompt-connect",
+                if collecting_group_credentials {
+                    self.tr("Continue")
+                } else {
+                    self.tr("Connect")
+                },
+                ButtonKind::Primary,
+                ButtonSize::Large,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if collecting_group_credentials {
+                    this.accept_group_launch_credentials(window, cx);
+                } else {
+                    this.connect(window, cx);
+                }
+            })),
+        );
 
         components::modal_overlay(&tokens, "credential-prompt-overlay")
             .track_focus(&self.overlay_focus)
@@ -7769,37 +8418,7 @@ impl AppView {
                     .max_h(px(640.))
                     .child(components::modal_header(&tokens, title))
                     .child(body)
-                    .child(
-                        components::modal_footer(&tokens)
-                            .child(
-                                components::button(
-                                    &tokens,
-                                    "credential-prompt-cancel",
-                                    self.tr("Cancel"),
-                                    ButtonKind::Ghost,
-                                    ButtonSize::Regular,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.cancel_session_editor(window, cx);
-                                    },
-                                )),
-                            )
-                            .child(
-                                components::button(
-                                    &tokens,
-                                    "credential-prompt-connect",
-                                    self.tr("Connect"),
-                                    ButtonKind::Primary,
-                                    ButtonSize::Large,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.connect(window, cx);
-                                    },
-                                )),
-                            ),
-                    ),
+                    .child(footer),
             )
             .into_any_element()
     }

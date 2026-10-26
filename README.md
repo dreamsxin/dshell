@@ -2,7 +2,8 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.36`.
+runtime. The first public release is `v0.1.0`; the current package version is
+`v0.1.37`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -22,6 +23,16 @@ footer. The Session menu can export saved host profiles to a versioned JSON
 backup and import that backup later; exported files contain no recent history,
 passwords, passphrases or private key material, and imports skip duplicate
 profile names without overwriting existing entries.
+
+Use the terminal icon on a group header to start all saved sessions in that
+group and its nested groups. Already connected targets and duplicate host/port/
+user targets are skipped. When credentials are missing, dshell asks for them
+one session at a time; `Skip this host` omits that profile and `Stop remaining`
+abandons the batch. Connections start after credential collection is complete.
+Connections then run one at a time. An authentication failure pauses the batch
+until you retry or skip that host; the active group header can stop the
+remaining queue. Staged secrets stay in zeroizing memory and enter the reusable
+in-memory cache only after successful authentication.
 
 The Keys panel can discover existing OpenSSH identities, import a private key
 into `~/.ssh`, export a key pair to a user-selected path, change a passphrase,

@@ -260,6 +260,39 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Port" => "端口",
         "Group" => "分组",
         "Group order updated." => "分组顺序已更新。",
+        "Start sessions in this group" => "启动此分组中的会话",
+        "Start ungrouped sessions" => "启动未分组会话",
+        "A group launch is already in progress." => "已有分组会话正在启动。",
+        "Host profiles are unavailable." => "主机资料不可用。",
+        "All sessions in this group are already connected." => "此分组中的会话均已连接。",
+        "This group has no saved sessions." => "此分组没有已保存的会话。",
+        "No sessions were started in {group}." => "未启动分组 {group} 中的会话。",
+        "Starting {count} sessions in {group}." => "正在启动分组 {group} 中的 {count} 个会话。",
+        "Skipped {count} already-connected or cancelled sessions." => {
+            "已跳过 {count} 个已连接或已取消的会话。"
+        }
+        "Enter credentials for {name} to connect ({current} of {total})." => {
+            "请输入{name}的认证信息以连接（第 {current}/{total} 个）。"
+        }
+        "Group connections start after the remaining credential prompts are complete." => {
+            "完成剩余认证信息输入后，将启动分组中的会话。"
+        }
+        "Skip this host" => "跳过此主机",
+        "Stop remaining" => "停止剩余会话",
+        "Group launch stopped; queued sessions were not started." => {
+            "已停止分组启动，队列中的会话尚未连接。"
+        }
+        "Stop remaining sessions" => "停止剩余会话",
+        "Group launch stopped after {count} successful connections in {group}." => {
+            "已停止启动分组 {group}，已成功连接 {count} 个会话。"
+        }
+        "Group launch finished: {count} connected in {group}." => {
+            "分组 {group} 启动完成，已连接 {count} 个会话。"
+        }
+        "{count} connection attempts failed." => "{count} 个连接尝试失败。",
+        "Will stop remaining sessions after the current connection." => {
+            "当前连接完成后将停止剩余会话。"
+        }
         "New group" => "新建分组",
         "New subgroup" => "新建子分组",
         "Rename group" => "重命名分组",
@@ -894,6 +927,14 @@ mod tests {
     fn simplified_chinese_translates_shell_labels_and_preserves_names() {
         assert_eq!(translate(Language::SimplifiedChinese, "Settings"), "设置");
         assert_eq!(translate(Language::SimplifiedChinese, "Generate"), "生成");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Start sessions in this group"),
+            "启动此分组中的会话"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Stop remaining"),
+            "停止剩余会话"
+        );
         assert_eq!(
             translate(
                 Language::SimplifiedChinese,
