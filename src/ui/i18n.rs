@@ -261,17 +261,25 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Group" => "分组",
         "Group order updated." => "分组顺序已更新。",
         "New group" => "新建分组",
+        "New subgroup" => "新建子分组",
         "Rename group" => "重命名分组",
         "Delete group" => "删除分组",
         "Group name" => "分组名称",
+        "Subgroup name" => "子分组名称",
+        "Parent group" => "父级分组",
         "Group name is required." => "请输入分组名称。",
         "Group name is too long." => "分组名称过长。",
+        "Group nesting is limited to 8 levels." => "分组最多嵌套 8 层。",
+        "Group names cannot contain slashes, backslashes, or control characters." => {
+            "分组名称不能包含斜杠、反斜杠或控制字符。"
+        }
+        "The parent group is unavailable." => "父级分组不可用。",
         "UNGROUPED is reserved." => "未分组是保留名称。",
         "A group with this name already exists." => "已存在同名分组。",
         "The group to rename is unavailable." => "要重命名的分组不可用。",
         "The group to delete is unavailable." => "要删除的分组不可用。",
-        "The group will be removed and its hosts moved to Ungrouped." => {
-            "该分组将被删除，其中的主机将移至未分组。"
+        "The group and its subgroups will be removed; their hosts move to Ungrouped." => {
+            "该分组及其子分组将被删除，其中的主机将移至未分组。"
         }
         "Group created." => "分组已创建。",
         "Group renamed." => "分组已重命名。",
@@ -411,8 +419,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Jump key passphrase" => "跳板机密钥口令",
         "Server identity" => "服务器身份",
         "Credential handling" => "凭据处理",
-        "Hosts with the same group are listed under one folder in the sidebar." => {
-            "侧栏会将相同分组的主机归入同一文件夹。"
+        "Use / between group levels, for example Production/Databases." => {
+            "使用 / 分隔分组层级，例如 Production/Databases。"
         }
         "No saved templates. Save the current method as a reusable template." => {
             "没有已保存的模板。保存当前认证方式即可重复使用。"

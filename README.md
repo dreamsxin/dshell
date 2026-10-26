@@ -10,11 +10,13 @@ choose a language, and press `Apply`; the choice is saved in
 `%APPDATA%\dshell\settings.json` on Windows. Terminal content and remote
 command output remain unchanged.
 
-Host groups in the sidebar can be created, renamed, deleted, collapsed with
-their chevron header, and reordered by dragging one group header onto another.
-Deleting a group moves its hosts to `UNGROUPED`. Group definitions, collapsed
-state and order are saved with the UI settings; older settings files load with
-all groups expanded and the groups in their default order. The Simplified
+Host groups in the sidebar support up to eight nested levels. Create a subgroup
+from a group header, drag hosts into nested groups, collapse levels, and reorder
+groups among siblings. Renaming or deleting a group applies to its whole
+subtree; a rename is rejected if it would merge existing groups, and deleting
+moves hosts in the subtree to `UNGROUPED`. Group definitions, collapsed state
+and order are saved with the UI settings; older settings files load with their
+existing flat groups. The Simplified
 Chinese shell also covers profile load/save/delete feedback and the main menu
 footer. The Session menu can export saved host profiles to a versioned JSON
 backup and import that backup later; exported files contain no recent history,

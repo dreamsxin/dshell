@@ -1,5 +1,6 @@
 mod auth_profiles;
 mod forward;
+mod groups;
 mod keygen;
 mod log;
 mod openssh_config;
@@ -34,16 +35,18 @@ use gpui_component::{
     input::{InputState, TextInput},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
 };
+use groups::{
+    GroupPathError, group_ancestors, group_key, group_leaf_name, group_parent_path,
+    group_rename_conflicts, is_group_within, normalize_group_path, normalize_group_segment,
+    rebase_group_path, same_group_parent,
+};
 use openssh_config::import_openssh_config;
 use profiles::{
     AuthMethod, HostData, HostProfile, MAX_FORWARD_RULES, ProfileStore, RecentConnection,
     ReconnectSettings, export_profiles as export_host_profiles,
     import_profiles as import_host_profiles, record_recent,
 };
-use settings::{
-    AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MAX_GROUP_NAME_CHARS, MIN_FONT_SIZE,
-    SettingsStore,
-};
+use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
 use sftp::{
     RemoteEntry, RemoteFilesystemInfo, SftpCommand, SftpEvent, TransferKind,
     format_permission_mode, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
@@ -375,6 +378,7 @@ enum SessionEditorSection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GroupEditorMode {
     Create,
+    CreateChild,
     Rename,
     Delete,
 }
@@ -485,11 +489,12 @@ fn move_profile_to_group(profiles: &mut [HostProfile], name: &str, group: &str) 
 }
 
 fn rename_profile_group(profiles: &mut [HostProfile], old_group: &str, new_group: &str) -> usize {
-    let old_key = collapsed_group_key(old_group);
     let mut renamed = 0;
     for profile in &mut *profiles {
-        if collapsed_group_key(&profile.group) == old_key {
-            profile.group = new_group.to_owned();
+        if let Some(group) = rebase_group_path(&profile.group, old_group, new_group)
+            && profile.group != group
+        {
+            profile.group = group;
             renamed += 1;
         }
     }
@@ -500,10 +505,9 @@ fn rename_profile_group(profiles: &mut [HostProfile], old_group: &str, new_group
 }
 
 fn remove_profile_group(profiles: &mut [HostProfile], group: &str) -> usize {
-    let group_key = collapsed_group_key(group);
     let mut removed = 0;
     for profile in &mut *profiles {
-        if collapsed_group_key(&profile.group) == group_key {
+        if is_group_within(&profile.group, group) {
             profile.group.clear();
             removed += 1;
         }
@@ -517,7 +521,7 @@ fn remove_profile_group(profiles: &mut [HostProfile], group: &str) -> usize {
 fn reorder_group_order(order: &mut Vec<String>, dragged: &str, target: &str) -> bool {
     let dragged = collapsed_group_key(dragged);
     let target = collapsed_group_key(target);
-    if dragged == target {
+    if dragged == target || !same_group_parent(&dragged, &target) {
         return false;
     }
     if !order.iter().any(|entry| entry == &dragged) {
@@ -538,7 +542,46 @@ fn reorder_group_order(order: &mut Vec<String>, dragged: &str, target: &str) -> 
 }
 
 fn collapsed_group_key(group: &str) -> String {
-    group.trim().to_lowercase()
+    group_key(group)
+}
+
+fn collect_group_paths(group_names: &[String], profiles: &[HostProfile]) -> Vec<String> {
+    let mut paths = BTreeMap::new();
+    for group in group_names
+        .iter()
+        .chain(profiles.iter().map(|profile| &profile.group))
+    {
+        let group = normalize_group_path(group).ok().or_else(|| {
+            let legacy_flat_group = group.trim();
+            (!legacy_flat_group.is_empty() && !legacy_flat_group.contains('/'))
+                .then(|| legacy_flat_group.to_owned())
+        });
+        if let Some(group) = group {
+            for ancestor in group_ancestors(&group) {
+                paths
+                    .entry(collapsed_group_key(&ancestor))
+                    .or_insert(ancestor);
+            }
+        }
+    }
+    paths.into_values().collect()
+}
+
+fn remap_group_list(paths: &mut Vec<String>, old_parent: &str, new_parent: &str, keys_only: bool) {
+    let mut remapped = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths.drain(..) {
+        let path = rebase_group_path(&path, old_parent, new_parent).unwrap_or(path);
+        let path = if keys_only {
+            collapsed_group_key(&path)
+        } else {
+            normalize_group_path(&path).unwrap_or(path)
+        };
+        if seen.insert(collapsed_group_key(&path)) {
+            remapped.push(path);
+        }
+    }
+    *paths = remapped;
 }
 
 fn sort_profiles(profiles: &mut [HostProfile]) {
@@ -2281,16 +2324,24 @@ mod session_tests {
         }
 
         let mut profiles = vec![profile("web", ""), profile("db", "Prod")];
-        assert!(move_profile_to_group(&mut profiles, "web", "Prod"));
+        assert!(move_profile_to_group(
+            &mut profiles,
+            "web",
+            "Prod/Databases"
+        ));
         assert_eq!(
             profiles
                 .iter()
                 .find(|profile| profile.name == "web")
                 .unwrap()
                 .group,
-            "Prod"
+            "Prod/Databases"
         );
-        assert!(!move_profile_to_group(&mut profiles, "web", "Prod"));
+        assert!(!move_profile_to_group(
+            &mut profiles,
+            "web",
+            "Prod/Databases"
+        ));
         assert!(move_profile_to_group(&mut profiles, "db", ""));
         assert!(
             profiles
@@ -2348,77 +2399,83 @@ mod session_tests {
         assert_eq!(order, vec!["gamma", "alpha", "beta"]);
         assert!(!reorder_group_order(&mut order, "gamma", "GAMMA"));
         assert!(!reorder_group_order(&mut order, "missing", "missing"));
+        order.extend(["alpha/database".to_owned(), "beta/database".to_owned()]);
+        assert!(!reorder_group_order(
+            &mut order,
+            "alpha/database",
+            "beta/database"
+        ));
     }
 
     #[test]
     fn renaming_a_group_updates_matching_profiles_case_insensitively() {
+        fn profile(name: &str, group: &str) -> HostProfile {
+            HostProfile {
+                name: name.to_owned(),
+                host: format!("{name}.example.com"),
+                port: 22,
+                username: "ops".to_owned(),
+                group: group.to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Password,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+                reconnect: crate::profiles::ReconnectSettings::default(),
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
+            }
+        }
         let mut profiles = vec![
-            HostProfile {
-                name: "prod-a".to_owned(),
-                host: "a.example.com".to_owned(),
-                port: 22,
-                username: "ops".to_owned(),
-                group: "Production".to_owned(),
-                favorite: false,
-                auth_method: AuthMethod::Password,
-                identity_file: String::new(),
-                proxy_jump: String::new(),
-                forwards: Vec::new(),
-                keepalive_seconds: 0,
-                reconnect: crate::profiles::ReconnectSettings::default(),
-                password: String::new(),
-                passphrase: String::new(),
-                jump_password: String::new(),
-                jump_passphrase: String::new(),
-            },
-            HostProfile {
-                name: "prod-b".to_owned(),
-                host: "b.example.com".to_owned(),
-                port: 22,
-                username: "ops".to_owned(),
-                group: "production".to_owned(),
-                favorite: false,
-                auth_method: AuthMethod::Password,
-                identity_file: String::new(),
-                proxy_jump: String::new(),
-                forwards: Vec::new(),
-                keepalive_seconds: 0,
-                reconnect: crate::profiles::ReconnectSettings::default(),
-                password: String::new(),
-                passphrase: String::new(),
-                jump_password: String::new(),
-                jump_passphrase: String::new(),
-            },
+            profile("prod-a", "Production"),
+            profile("prod-b", "production"),
+            profile("prod-db", "production/Databases"),
+            profile("prod-prefix", "Production2/Databases"),
         ];
         assert_eq!(
             rename_profile_group(&mut profiles, " PRODUCTION ", "Live"),
-            2
+            3
         );
-        assert!(profiles.iter().all(|profile| profile.group == "Live"));
+        assert_eq!(profiles[0].group, "Live");
+        assert_eq!(profiles[1].group, "Live");
+        assert_eq!(profiles[2].group, "Live/Databases");
+        assert_eq!(profiles[3].group, "Production2/Databases");
     }
 
     #[test]
     fn deleting_a_group_moves_profiles_to_ungrouped() {
-        let mut profiles = vec![HostProfile {
-            name: "prod".to_owned(),
-            host: "prod.example.com".to_owned(),
-            port: 22,
-            username: "ops".to_owned(),
-            group: "Production".to_owned(),
-            favorite: false,
-            auth_method: AuthMethod::Password,
-            identity_file: String::new(),
-            proxy_jump: String::new(),
-            forwards: Vec::new(),
-            keepalive_seconds: 0,
-            reconnect: crate::profiles::ReconnectSettings::default(),
-            password: String::new(),
-            passphrase: String::new(),
-            jump_password: String::new(),
-            jump_passphrase: String::new(),
-        }];
-        assert_eq!(remove_profile_group(&mut profiles, "production"), 1);
+        fn profile(name: &str, group: &str) -> HostProfile {
+            HostProfile {
+                name: name.to_owned(),
+                host: format!("{name}.example.com"),
+                port: 22,
+                username: "ops".to_owned(),
+                group: group.to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Password,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+                reconnect: crate::profiles::ReconnectSettings::default(),
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
+            }
+        }
+        let mut profiles = vec![
+            profile("prod", "Production"),
+            profile("db", "Production/Databases"),
+            profile("prod-prefix", "Production2/Databases"),
+        ];
+        assert_eq!(remove_profile_group(&mut profiles, "production"), 2);
         assert!(profiles[0].group.is_empty());
+        assert!(profiles[1].group.is_empty());
+        assert_eq!(profiles[2].group, "Production2/Databases");
         assert_eq!(remove_profile_group(&mut profiles, "production"), 0);
     }
 
@@ -4537,12 +4594,12 @@ impl AppView {
     ) {
         self.group_editor_mode = mode;
         self.group_editor_source = group.map(str::to_owned);
-        Self::set_input_value(
-            &self.group_editor_name,
-            group.unwrap_or_default(),
-            window,
-            cx,
-        );
+        let initial_name = match mode {
+            GroupEditorMode::Create | GroupEditorMode::CreateChild => String::new(),
+            GroupEditorMode::Rename => group.map(group_leaf_name).unwrap_or_default().to_owned(),
+            GroupEditorMode::Delete => String::new(),
+        };
+        Self::set_input_value(&self.group_editor_name, &initial_name, window, cx);
         self.group_editor_message.clear();
         self.group_editor_open = true;
         self.request_overlay_focus();
@@ -4558,29 +4615,63 @@ impl AppView {
         cx.notify();
     }
 
-    fn validate_group_name(&self, raw: &str, source: Option<&str>) -> Result<String, String> {
-        let name = raw.trim();
-        if name.is_empty() {
-            return Err(self.tr("Group name is required."));
-        }
-        if name.chars().count() > MAX_GROUP_NAME_CHARS {
-            return Err(self.tr("Group name is too long."));
-        }
-        let key = collapsed_group_key(name);
-        if key == collapsed_group_key("UNGROUPED") {
-            return Err(self.tr("UNGROUPED is reserved."));
-        }
-        let source_key = source.map(collapsed_group_key);
-        let duplicate = self.settings.group_names.iter().any(|existing| {
-            collapsed_group_key(existing) == key && source_key.as_deref() != Some(key.as_str())
-        }) || self.profiles.iter().any(|profile| {
-            collapsed_group_key(&profile.group) == key
-                && source_key.as_deref() != Some(key.as_str())
-        });
+    fn validate_group_editor_target(
+        &self,
+        raw: &str,
+        source: Option<&str>,
+    ) -> Result<String, String> {
+        let segment = normalize_group_segment(raw).map_err(|error| match error {
+            GroupPathError::Empty => self.tr("Group name is required."),
+            GroupPathError::TooLong => self.tr("Group name is too long."),
+            _ => self.tr("Group names cannot contain slashes, backslashes, or control characters."),
+        })?;
+        let path = match self.group_editor_mode {
+            GroupEditorMode::Create => segment,
+            GroupEditorMode::CreateChild => {
+                let parent = source.ok_or_else(|| self.tr("The parent group is unavailable."))?;
+                format!("{parent}/{segment}")
+            }
+            GroupEditorMode::Rename => {
+                let source =
+                    source.ok_or_else(|| self.tr("The group to rename is unavailable."))?;
+                group_parent_path(source)
+                    .map_or(segment.clone(), |parent| format!("{parent}/{segment}"))
+            }
+            GroupEditorMode::Delete => return Err(self.tr("The group to delete is unavailable.")),
+        };
+        let name = normalize_group_path(&path).map_err(|error| match error {
+            GroupPathError::Empty => self.tr("Group name is required."),
+            GroupPathError::TooLong => self.tr("Group name is too long."),
+            GroupPathError::TooDeep => self.tr("Group nesting is limited to 8 levels."),
+            GroupPathError::InvalidSegment => {
+                self.tr("Group names cannot contain slashes, backslashes, or control characters.")
+            }
+            GroupPathError::Reserved => self.tr("UNGROUPED is reserved."),
+        })?;
+        let existing_groups = collect_group_paths(&self.settings.group_names, &self.profiles);
+        let duplicate = if self.group_editor_mode == GroupEditorMode::Rename {
+            let source = source.ok_or_else(|| self.tr("The group to rename is unavailable."))?;
+            group_rename_conflicts(&existing_groups, source, &name).map_err(
+                |error| match error {
+                    GroupPathError::TooLong => self.tr("Group name is too long."),
+                    GroupPathError::TooDeep => self.tr("Group nesting is limited to 8 levels."),
+                    GroupPathError::Reserved => self.tr("UNGROUPED is reserved."),
+                    GroupPathError::Empty => self.tr("Group name is required."),
+                    GroupPathError::InvalidSegment => self.tr(
+                        "Group names cannot contain slashes, backslashes, or control characters.",
+                    ),
+                },
+            )?
+        } else {
+            let key = collapsed_group_key(&name);
+            existing_groups
+                .iter()
+                .any(|existing| collapsed_group_key(existing) == key)
+        };
         if duplicate {
             return Err(self.tr("A group with this name already exists."));
         }
-        Ok(name.to_owned())
+        Ok(name)
     }
 
     fn submit_group_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4590,7 +4681,7 @@ impl AppView {
         }
         let raw = self.group_editor_name.read(cx).value();
         let source = self.group_editor_source.clone();
-        let name = match self.validate_group_name(&raw, source.as_deref()) {
+        let name = match self.validate_group_editor_target(&raw, source.as_deref()) {
             Ok(name) => name,
             Err(error) => {
                 self.group_editor_message = error;
@@ -4600,9 +4691,21 @@ impl AppView {
         };
         let key = collapsed_group_key(&name);
         match self.group_editor_mode {
-            GroupEditorMode::Create => {
-                self.settings.group_names.push(name.clone());
-                self.settings.group_order.push(key);
+            GroupEditorMode::Create | GroupEditorMode::CreateChild => {
+                for path in group_ancestors(&name) {
+                    let path_key = collapsed_group_key(&path);
+                    if !self
+                        .settings
+                        .group_names
+                        .iter()
+                        .any(|existing| collapsed_group_key(existing) == path_key)
+                    {
+                        self.settings.group_names.push(path);
+                    }
+                    if !self.settings.group_order.contains(&path_key) {
+                        self.settings.group_order.push(path_key);
+                    }
+                }
                 self.persist_ui_preferences(cx);
                 self.close_group_editor(window, cx);
                 self.show_toast(self.tr("Group created."), Tone::Success, cx);
@@ -4613,7 +4716,10 @@ impl AppView {
                     cx.notify();
                     return;
                 };
-                let old_key = collapsed_group_key(&source);
+                if collapsed_group_key(&source) == key {
+                    self.close_group_editor(window, cx);
+                    return;
+                }
                 let mut profiles = self.profiles.clone();
                 if rename_profile_group(&mut profiles, &source, &name) > 0
                     && let Err(error) = self.save_workspace(profiles, self.recent.clone())
@@ -4622,26 +4728,29 @@ impl AppView {
                     cx.notify();
                     return;
                 }
-                let mut found = false;
-                for existing in &mut self.settings.group_names {
-                    if collapsed_group_key(existing) == old_key {
-                        *existing = name.clone();
-                        found = true;
+                remap_group_list(&mut self.settings.group_names, &source, &name, false);
+                remap_group_list(&mut self.settings.group_order, &source, &name, true);
+                self.collapsed_groups = self
+                    .collapsed_groups
+                    .iter()
+                    .map(|group| {
+                        rebase_group_path(group, &source, &name)
+                            .map_or_else(|| group.clone(), |group| collapsed_group_key(&group))
+                    })
+                    .collect();
+                for path in group_ancestors(&name) {
+                    let path_key = collapsed_group_key(&path);
+                    if !self
+                        .settings
+                        .group_names
+                        .iter()
+                        .any(|existing| collapsed_group_key(existing) == path_key)
+                    {
+                        self.settings.group_names.push(path);
                     }
-                }
-                if !found {
-                    self.settings.group_names.push(name.clone());
-                }
-                for existing in &mut self.settings.group_order {
-                    if existing == &old_key {
-                        *existing = key.clone();
+                    if !self.settings.group_order.contains(&path_key) {
+                        self.settings.group_order.push(path_key);
                     }
-                }
-                if !self.settings.group_order.iter().any(|entry| entry == &key) {
-                    self.settings.group_order.push(key.clone());
-                }
-                if self.collapsed_groups.remove(&old_key) {
-                    self.collapsed_groups.insert(key);
                 }
                 self.persist_ui_preferences(cx);
                 self.close_group_editor(window, cx);
@@ -4665,12 +4774,14 @@ impl AppView {
             cx.notify();
             return;
         }
-        let key = collapsed_group_key(&source);
         self.settings
             .group_names
-            .retain(|group| collapsed_group_key(group) != key);
-        self.settings.group_order.retain(|group| group != &key);
-        self.collapsed_groups.remove(&key);
+            .retain(|group| !is_group_within(group, &source));
+        self.settings
+            .group_order
+            .retain(|group| !is_group_within(group, &source));
+        self.collapsed_groups
+            .retain(|group| !is_group_within(group, &source));
         self.persist_ui_preferences(cx);
         self.close_group_editor(window, cx);
         self.show_toast(
@@ -4690,10 +4801,9 @@ impl AppView {
 
     fn reorder_groups_before(&mut self, dragged: &str, target: &str, cx: &mut Context<Self>) {
         let mut order = self.settings.group_order.clone();
-        let mut missing = self
-            .profiles
+        let mut missing = collect_group_paths(&self.settings.group_names, &self.profiles)
             .iter()
-            .map(|profile| collapsed_group_key(&profile.group))
+            .map(|group| collapsed_group_key(group))
             .filter(|key| !order.iter().any(|entry| entry == key))
             .collect::<Vec<_>>();
         missing.sort();
@@ -4723,9 +4833,29 @@ impl AppView {
         let preview_tokens = *tokens;
         let mut actions = div().flex().items_center().gap(px(ui_tokens::SPACE_1));
         if !group.is_empty() {
+            let child_parent = group.clone();
             let rename_group = group.clone();
             let delete_group = group.clone();
             actions = actions
+                .child(
+                    components::icon_button(
+                        tokens,
+                        SharedString::from(format!("new-subgroup-{target_group}")),
+                        IconName::Plus,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("New subgroup"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_group_editor(
+                            GroupEditorMode::CreateChild,
+                            Some(&child_parent),
+                            window,
+                            cx,
+                        );
+                    })),
+                )
                 .child(
                     components::icon_button(
                         tokens,
@@ -4806,6 +4936,7 @@ impl AppView {
         let source = self.group_editor_source.clone().unwrap_or_default();
         let title = match mode {
             GroupEditorMode::Create => self.tr("New group"),
+            GroupEditorMode::CreateChild => self.tr("New subgroup"),
             GroupEditorMode::Rename => self.tr("Rename group"),
             GroupEditorMode::Delete => self.tr("Delete group"),
         };
@@ -4824,13 +4955,27 @@ impl AppView {
                     ))
                     .child(components::warning_text(
                         &tokens,
-                        self.tr("The group will be removed and its hosts moved to Ungrouped."),
+                        self.tr(
+                            "The group and its subgroups will be removed; their hosts move to Ungrouped.",
+                        ),
                     ));
             }
-            GroupEditorMode::Create | GroupEditorMode::Rename => {
+            GroupEditorMode::Create | GroupEditorMode::CreateChild | GroupEditorMode::Rename => {
+                if matches!(mode, GroupEditorMode::CreateChild | GroupEditorMode::Rename)
+                    && let Some(parent) = group_parent_path(&source)
+                {
+                    body = body.child(components::help_text(
+                        &tokens,
+                        format!("{}: {parent}", self.tr("Parent group")),
+                    ));
+                }
                 body = body.child(components::field(
                     &tokens,
-                    self.tr("Group name"),
+                    if mode == GroupEditorMode::CreateChild {
+                        self.tr("Subgroup name")
+                    } else {
+                        self.tr("Group name")
+                    },
                     &self.group_editor_name,
                     false,
                 ));
@@ -4844,7 +4989,9 @@ impl AppView {
         }
         let action_label = match mode {
             GroupEditorMode::Delete => self.tr("Delete"),
-            GroupEditorMode::Create | GroupEditorMode::Rename => self.tr("Save"),
+            GroupEditorMode::Create | GroupEditorMode::CreateChild | GroupEditorMode::Rename => {
+                self.tr("Save")
+            }
         };
         let action_kind = if mode == GroupEditorMode::Delete {
             ButtonKind::Danger
@@ -5143,7 +5290,27 @@ impl AppView {
             return;
         }
         let name = self.profile_name.read(cx).value().trim().to_owned();
-        let group = self.profile_group.read(cx).value().trim().to_owned();
+        let raw_group = self.profile_group.read(cx).value().trim().to_owned();
+        let group = if raw_group.contains('/') {
+            match normalize_group_path(&raw_group) {
+                Ok(group) => group,
+                Err(error) => {
+                    self.profile_message = self.tr(match error {
+                        GroupPathError::Empty => "Group name is required.",
+                        GroupPathError::TooLong => "Group name is too long.",
+                        GroupPathError::TooDeep => "Group nesting is limited to 8 levels.",
+                        GroupPathError::InvalidSegment => {
+                            "Group names cannot contain slashes, backslashes, or control characters."
+                        }
+                        GroupPathError::Reserved => "UNGROUPED is reserved.",
+                    });
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            raw_group
+        };
         let host = self.host.read(cx).value().trim().to_owned();
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().trim().to_owned();
@@ -6983,7 +7150,9 @@ impl AppView {
                 )
                 .child(components::help_text(
                     &tokens,
-                    self.tr("Hosts with the same group are listed under one folder in the sidebar."),
+                    self.tr(
+                        "Use / between group levels, for example Production/Databases.",
+                    ),
                 ))
                 .child(components::field(
                     &tokens,
@@ -14049,6 +14218,90 @@ impl AppView {
         self.send_terminal_request(session_id, request, "Terminal scroll", cx);
     }
 
+    fn append_group_tree(
+        &self,
+        mut list: Stateful<Div>,
+        group_paths: &[String],
+        parent: Option<&str>,
+        depth: usize,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let parent_key = parent.map(collapsed_group_key);
+        let mut children = group_paths
+            .iter()
+            .filter(|path| {
+                group_parent_path(path).map_or(parent_key.is_none(), |group_parent| {
+                    parent_key
+                        .as_deref()
+                        .is_some_and(|parent| collapsed_group_key(&group_parent) == parent)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if parent.is_none() && !self.profiles.is_empty() {
+            children.push(String::new());
+        }
+        children.sort_by(|left, right| {
+            let left_key = collapsed_group_key(left);
+            let right_key = collapsed_group_key(right);
+            let order = |key: &str| {
+                self.settings
+                    .group_order
+                    .iter()
+                    .position(|entry| entry == key)
+                    .unwrap_or(usize::MAX)
+            };
+            order(&left_key)
+                .cmp(&order(&right_key))
+                .then_with(|| left_key.cmp(&right_key))
+        });
+
+        for group in children {
+            let key = collapsed_group_key(&group);
+            let display = if group.is_empty() {
+                self.tr("UNGROUPED")
+            } else {
+                group_leaf_name(&group).to_owned()
+            };
+            let collapsed = self.collapsed_groups.contains(&key);
+            let header = self.group_drop_header(tokens, display, group.clone(), !collapsed, cx);
+            list = list.child(
+                div()
+                    .w_full()
+                    .pl(px(depth as f32 * ui_tokens::SPACE_3))
+                    .child(header),
+            );
+            if collapsed {
+                continue;
+            }
+
+            let mut indexes = self
+                .profiles
+                .iter()
+                .enumerate()
+                .filter_map(|(index, profile)| {
+                    (collapsed_group_key(&profile.group) == key).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            indexes.sort_by_key(|index| self.profiles[*index].name.to_lowercase());
+            for index in indexes {
+                list = list.child(self.saved_host_row(
+                    tokens,
+                    "group-host",
+                    index,
+                    &self.profiles[index],
+                    cx,
+                ));
+            }
+            if !group.is_empty() {
+                list =
+                    self.append_group_tree(list, group_paths, Some(&group), depth + 1, tokens, cx);
+            }
+        }
+        list
+    }
+
     fn sidebar(&self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
         if self.sidebar_collapsed {
             let mut rail = div()
@@ -14133,80 +14386,12 @@ impl AppView {
                 matching_profiles += 1;
             }
 
-            let managed_group_names = self
-                .settings
-                .group_names
-                .iter()
-                .map(|name| (collapsed_group_key(name), name.clone()))
-                .collect::<BTreeMap<_, _>>();
-            let mut groups: BTreeMap<String, (String, Vec<usize>)> = BTreeMap::new();
-            for (index, profile) in self.profiles.iter().enumerate() {
-                let key = collapsed_group_key(&profile.group);
-                let display = if profile.group.is_empty() {
-                    self.tr("UNGROUPED")
-                } else {
-                    managed_group_names
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| profile.group.clone())
-                };
-                groups
-                    .entry(key)
-                    .or_insert_with(|| (display, Vec::new()))
-                    .1
-                    .push(index);
-            }
-            for name in &self.settings.group_names {
-                let key = collapsed_group_key(name);
-                groups
-                    .entry(key)
-                    .or_insert_with(|| (name.clone(), Vec::new()));
+            let group_paths = collect_group_paths(&self.settings.group_names, &self.profiles);
+            profile_list = self.append_group_tree(profile_list, &group_paths, None, 0, tokens, cx);
+            if !group_paths.is_empty() {
+                matching_profiles += 1;
             }
             if !self.profiles.is_empty() {
-                groups
-                    .entry(String::new())
-                    .or_insert_with(|| (self.tr("UNGROUPED"), Vec::new()));
-            }
-            let mut group_keys = groups.keys().cloned().collect::<Vec<_>>();
-            let preferred_order = &self.settings.group_order;
-            group_keys.sort_by_key(|key| {
-                preferred_order
-                    .iter()
-                    .position(|preferred| preferred == key)
-                    .unwrap_or(usize::MAX)
-            });
-            for key in group_keys {
-                let Some((display, mut indexes)) = groups.get(&key).cloned() else {
-                    continue;
-                };
-                indexes.sort_by_key(|index| self.profiles[*index].name.to_lowercase());
-                let group_value = if key.is_empty() {
-                    String::new()
-                } else {
-                    display.clone()
-                };
-                let collapsed = self
-                    .collapsed_groups
-                    .contains(&collapsed_group_key(&group_value));
-                profile_list = profile_list.child(self.group_drop_header(
-                    tokens,
-                    display,
-                    group_value,
-                    !collapsed,
-                    cx,
-                ));
-                if !collapsed {
-                    for index in indexes {
-                        let profile = &self.profiles[index];
-                        profile_list = profile_list.child(self.saved_host_row(
-                            tokens,
-                            "group-host",
-                            index,
-                            profile,
-                            cx,
-                        ));
-                    }
-                }
                 matching_profiles += 1;
             }
 

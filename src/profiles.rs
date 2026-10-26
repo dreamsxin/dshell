@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
 use crate::forward::ForwardRuleSpec;
+use crate::groups::normalize_group_path;
 
 const DOCUMENT_VERSION: u8 = 6;
 const SUPPORTED_DOCUMENT_VERSIONS: [u8; 6] = [1, 2, 3, 4, 5, 6];
@@ -421,6 +422,14 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
                 profile.name
             ));
         }
+        if profile.group.contains('/') {
+            normalize_group_path(&profile.group).map_err(|error| {
+                format!(
+                    "Host profile {} has an invalid group path: {error}",
+                    profile.name
+                )
+            })?;
+        }
         if profile.auth_method == AuthMethod::PublicKey && profile.identity_file.trim().is_empty() {
             return Err(format!(
                 "Host profile {} uses public key authentication but has no identity file.",
@@ -770,6 +779,16 @@ mod tests {
         };
 
         assert!(validate_profiles(&[profile, duplicate]).is_err());
+    }
+
+    #[test]
+    fn host_profiles_accept_nested_groups_and_reject_invalid_paths() {
+        let mut profile = profile("prod");
+        profile.group = "Production/Databases/Primary".to_owned();
+        assert!(validate_profiles(std::slice::from_ref(&profile)).is_ok());
+
+        profile.group = "Production//Primary".to_owned();
+        assert!(validate_profiles(&[profile]).is_err());
     }
 
     #[test]

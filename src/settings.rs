@@ -2,6 +2,9 @@ use std::{collections::BTreeSet, env, fs, io::ErrorKind, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::groups::MAX_GROUP_NAME_CHARS;
+use crate::groups::{group_key, normalize_group_path};
+
 use crate::{
     shortcuts::ShortcutSettings,
     terminal::{CursorStyle, TerminalTheme},
@@ -24,7 +27,6 @@ pub const DEFAULT_ALERT_CPU_PERCENT: u8 = 80;
 pub const DEFAULT_ALERT_MEMORY_PERCENT: u8 = 80;
 pub const DEFAULT_ALERT_DISK_PERCENT: u8 = 90;
 const MAX_COLLAPSED_GROUPS: usize = 128;
-pub const MAX_GROUP_NAME_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -347,11 +349,20 @@ fn normalize_width(value: f32, default: f32, minimum: f32, maximum: f32) -> f32 
 fn normalize_collapsed_groups(groups: Vec<String>) -> Vec<String> {
     let mut normalized = BTreeSet::new();
     for group in groups {
-        let key = group.trim().to_lowercase();
-        if key.chars().count() <= MAX_GROUP_NAME_CHARS {
-            normalized.insert(key);
+        if group.trim().is_empty() {
+            normalized.insert(String::new());
+            continue;
+        }
+        let key = if group.contains('/') {
+            normalize_group_path(&group)
+                .ok()
+                .map(|group| group_key(&group))
         } else {
-            normalized.insert(key.chars().take(MAX_GROUP_NAME_CHARS).collect());
+            let key = group.trim().to_lowercase();
+            Some(key.chars().take(MAX_GROUP_NAME_CHARS).collect())
+        };
+        if let Some(key) = key {
+            normalized.insert(key);
         }
     }
     normalized.into_iter().take(MAX_COLLAPSED_GROUPS).collect()
@@ -361,11 +372,27 @@ fn normalize_group_order(groups: Vec<String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut normalized = Vec::new();
     for group in groups {
-        let key = group.trim().to_lowercase();
-        let key = if key.chars().count() <= MAX_GROUP_NAME_CHARS {
-            key
+        if group.trim().is_empty() {
+            if seen.insert(String::new()) {
+                normalized.push(String::new());
+                if normalized.len() == MAX_COLLAPSED_GROUPS {
+                    break;
+                }
+            }
+            continue;
+        }
+        let key = if group.contains('/') {
+            let Ok(group) = normalize_group_path(&group) else {
+                continue;
+            };
+            group_key(&group)
         } else {
-            key.chars().take(MAX_GROUP_NAME_CHARS).collect()
+            group
+                .trim()
+                .chars()
+                .take(MAX_GROUP_NAME_CHARS)
+                .collect::<String>()
+                .to_lowercase()
         };
         if seen.insert(key.clone()) {
             normalized.push(key);
@@ -381,12 +408,19 @@ fn normalize_group_names(groups: Vec<String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut normalized = Vec::new();
     for group in groups {
-        let name = group.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let name = name.chars().take(MAX_GROUP_NAME_CHARS).collect::<String>();
-        let key = name.to_lowercase();
+        let name = if group.contains('/') {
+            let Ok(name) = normalize_group_path(&group) else {
+                continue;
+            };
+            name
+        } else {
+            let name = group.trim();
+            if name.is_empty() {
+                continue;
+            }
+            name.chars().take(MAX_GROUP_NAME_CHARS).collect::<String>()
+        };
+        let key = group_key(&name);
         if seen.insert(key) {
             normalized.push(name);
             if normalized.len() == MAX_COLLAPSED_GROUPS {
@@ -483,6 +517,50 @@ mod tests {
         assert_eq!(loaded.alert_cpu_percent, DEFAULT_ALERT_CPU_PERCENT);
         assert_eq!(loaded.alert_memory_percent, 100);
         assert_eq!(loaded.alert_disk_percent, DEFAULT_ALERT_DISK_PERCENT);
+    }
+
+    #[test]
+    fn nested_group_preferences_round_trip_alongside_legacy_flat_groups() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::at(directory.path().join("settings.json"));
+        let settings = AppSettings {
+            collapsed_groups: vec!["Production/Databases".to_owned(), String::new()],
+            group_order: vec![
+                "Production".to_owned(),
+                "Production/Databases".to_owned(),
+                String::new(),
+            ],
+            group_names: vec![
+                "Production".to_owned(),
+                "Production/Databases".to_owned(),
+                "LegacyFlatGroup".to_owned(),
+                "Production//Invalid".to_owned(),
+            ],
+            ..AppSettings::default()
+        };
+
+        store.save(&settings).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded.group_names,
+            vec![
+                "Production".to_owned(),
+                "Production/Databases".to_owned(),
+                "LegacyFlatGroup".to_owned(),
+            ]
+        );
+        assert_eq!(
+            loaded.group_order,
+            vec![
+                "production".to_owned(),
+                "production/databases".to_owned(),
+                String::new(),
+            ]
+        );
+        assert_eq!(
+            loaded.collapsed_groups,
+            vec![String::new(), "production/databases".to_owned()]
+        );
     }
 
     #[test]
