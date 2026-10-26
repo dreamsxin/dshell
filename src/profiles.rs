@@ -9,12 +9,13 @@ use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
 use crate::forward::ForwardRuleSpec;
 
-const DOCUMENT_VERSION: u8 = 4;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 4] = [1, 2, 3, 4];
+const DOCUMENT_VERSION: u8 = 5;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 5] = [1, 2, 3, 4, 5];
 const EXPORT_DOCUMENT_VERSION: u8 = 1;
 const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 1] = [EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
+const MAX_RECENT_DIRECTORY_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,6 +109,10 @@ pub struct RecentConnection {
     pub username: String,
     #[serde(default)]
     pub last_used_unix: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_local_directory: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_remote_directory: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -386,6 +391,15 @@ fn validate_recent(recent: &[RecentConnection]) -> Result<(), String> {
     }) {
         return Err("Recent connections require a host, username, and valid port.".to_owned());
     }
+    if recent.iter().any(|entry| {
+        [&entry.last_local_directory, &entry.last_remote_directory]
+            .into_iter()
+            .any(|path| {
+                path.len() > MAX_RECENT_DIRECTORY_BYTES || path.chars().any(char::is_control)
+            })
+    }) {
+        return Err("Recent SFTP directories are invalid or too long.".to_owned());
+    }
     Ok(())
 }
 
@@ -421,6 +435,8 @@ mod tests {
             port,
             username: "operator".to_owned(),
             last_used_unix: 1_700_000_000,
+            last_local_directory: String::new(),
+            last_remote_directory: String::new(),
         }
     }
 
@@ -590,6 +606,59 @@ mod tests {
             }]
         );
         assert!(data.recent.is_empty());
+    }
+
+    #[test]
+    fn version_four_recent_connections_migrate_with_empty_sftp_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 4,
+                "profiles": [],
+                "recent": [{
+                    "name": "prod",
+                    "host": "prod.example.com",
+                    "port": 22,
+                    "username": "deploy",
+                    "last_used_unix": 1700000000
+                }]
+            }"#,
+        )
+        .unwrap();
+        let store = ProfileStore::at(path);
+
+        let data = store.load().unwrap();
+        assert!(data.recent[0].last_local_directory.is_empty());
+        assert!(data.recent[0].last_remote_directory.is_empty());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+    }
+
+    #[test]
+    fn recent_sftp_directories_round_trip_and_validate() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProfileStore::at(directory.path().join("hosts.json"));
+        let mut entry = recent("prod.example.com", 22);
+        entry.last_local_directory = r"C:\Users\operator\Downloads".to_owned();
+        entry.last_remote_directory = "/srv/releases".to_owned();
+        let data = HostData {
+            profiles: Vec::new(),
+            recent: vec![entry.clone()],
+        };
+
+        store.save(&data).unwrap();
+        assert_eq!(store.load().unwrap().recent, vec![entry.clone()]);
+
+        entry.last_remote_directory.push('\n');
+        assert!(validate_recent(&[entry]).is_err());
+        let oversized = RecentConnection {
+            last_local_directory: "x".repeat(MAX_RECENT_DIRECTORY_BYTES + 1),
+            ..recent("prod.example.com", 22)
+        };
+        assert!(validate_recent(&[oversized]).is_err());
     }
 
     #[test]

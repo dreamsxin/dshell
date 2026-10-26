@@ -1039,6 +1039,9 @@ struct SftpMetadataEdit {
 struct SftpViewState {
     visible: bool,
     path: String,
+    local_directory: String,
+    home_directory: String,
+    restoring_remote_directory: Option<String>,
     entries: Vec<RemoteEntry>,
     message: String,
     transfer: Option<TransferProgressUi>,
@@ -1284,6 +1287,28 @@ fn session_matches_target(session: &SshSession, host: &str, port: u16, username:
         && session.username == username
 }
 
+fn recent_sftp_directories_for_target(
+    recent: &[RecentConnection],
+    host: &str,
+    port: u16,
+    username: &str,
+) -> (String, String) {
+    recent
+        .iter()
+        .find(|entry| {
+            entry.host.eq_ignore_ascii_case(host)
+                && entry.port == port
+                && entry.username == username
+        })
+        .map(|entry| {
+            (
+                entry.last_local_directory.clone(),
+                entry.last_remote_directory.clone(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 fn saved_profile_for_session<'a>(
     session: &SshSession,
     profiles: &'a [HostProfile],
@@ -1348,9 +1373,9 @@ mod session_tests {
         format_alert_time, format_log_time, format_rate, format_storage_kib,
         is_authentication_failure, is_sftp_transfer_command, keyword_matches, memory_usage_percent,
         merge_unique_profiles, move_profile_to_group, mpsc, parse_alert_percent,
-        recall_compose_history, remember_compose_history, remember_stopped_forward,
-        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
-        reorder_session_ids, saved_profile_for_session, search_result_message,
+        recall_compose_history, recent_sftp_directories_for_target, remember_compose_history,
+        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
+        reorder_group_order, reorder_session_ids, saved_profile_for_session, search_result_message,
         server_alert_observations, session_editor_escape, session_editor_key,
         session_matches_target, session_terminal_size_for_split, split_panel_terminal_size,
         synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
@@ -1358,7 +1383,7 @@ mod session_tests {
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
-    use crate::profiles::{AuthMethod, HostProfile};
+    use crate::profiles::{AuthMethod, HostProfile, RecentConnection};
     use crate::settings::AppSettings;
     use crate::sftp::SftpCommand;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
@@ -1568,6 +1593,32 @@ mod session_tests {
         assert!(saved_profile_for_session(&session, &profiles).is_none());
         session.profile_name = None;
         assert!(saved_profile_for_session(&session, &profiles).is_none());
+    }
+
+    #[test]
+    fn recent_sftp_directories_match_the_same_host_port_and_user() {
+        let recent = vec![RecentConnection {
+            name: "prod".to_owned(),
+            host: "Server.Example.com".to_owned(),
+            port: 2222,
+            username: "deploy".to_owned(),
+            last_used_unix: 1,
+            last_local_directory: r"C:\deploy\releases".to_owned(),
+            last_remote_directory: "/srv/releases".to_owned(),
+        }];
+
+        assert_eq!(
+            recent_sftp_directories_for_target(&recent, "server.example.com", 2222, "deploy"),
+            (r"C:\deploy\releases".to_owned(), "/srv/releases".to_owned())
+        );
+        assert_eq!(
+            recent_sftp_directories_for_target(&recent, "server.example.com", 22, "deploy"),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            recent_sftp_directories_for_target(&recent, "server.example.com", 2222, "operator"),
+            (String::new(), String::new())
+        );
     }
 
     #[test]
@@ -5200,6 +5251,8 @@ impl AppView {
             .map_or(self.terminal_size, |session| session.terminal_size);
         let recent_name = title.clone();
         let recent_host = host.clone();
+        let (last_local_directory, last_remote_directory) =
+            recent_sftp_directories_for_target(&self.recent, &host, port, &username);
         let spec = ConnectionSpec {
             host,
             port,
@@ -5240,7 +5293,13 @@ impl AppView {
                     cancel_tx: Some(cancellation),
                     sftp_tx: Some(sftp),
                     sftp_cancel: Some(sftp_cancel),
-                    sftp: SftpViewState::default(),
+                    sftp: SftpViewState {
+                        path: last_remote_directory.clone(),
+                        local_directory: last_local_directory.clone(),
+                        restoring_remote_directory: (!last_remote_directory.is_empty())
+                            .then(|| last_remote_directory.clone()),
+                        ..SftpViewState::default()
+                    },
                     forward_tx: Some(forwards),
                     forwards: ForwardViewState::default(),
                     profile_name: saved_profile_name.clone(),
@@ -5271,6 +5330,8 @@ impl AppView {
                         port,
                         username,
                         last_used_unix: unix_now(),
+                        last_local_directory,
+                        last_remote_directory,
                     },
                 );
                 if let Err(error) = self.save_workspace(self.profiles.clone(), recent) {
@@ -7337,12 +7398,14 @@ impl AppView {
 
     fn apply_sftp_event(&mut self, id: u64, event: SftpEvent, cx: &mut Context<Self>) -> bool {
         let mut dispatch_next = false;
+        let mut remembered_remote_path = None;
         {
             let Some(session) = self.session_mut(id) else {
                 return false;
             };
             match event {
                 SftpEvent::Ready { path } => {
+                    session.sftp.home_directory = path.clone();
                     if session.sftp.path.is_empty() {
                         session.sftp.path = path;
                     }
@@ -7354,12 +7417,21 @@ impl AppView {
                     }
                 }
                 SftpEvent::Entries { path, entries } => {
-                    session.sftp.path = path;
-                    session.sftp.entries = entries;
-                    session.sftp.message.clear();
-                    let target = session.sftp.path.clone();
-                    if let Some(sftp_tx) = &session.sftp_tx {
-                        let _ = sftp_tx.try_send(SftpCommand::FilesystemInfo(target));
+                    let stale_home_listing = session
+                        .sftp
+                        .restoring_remote_directory
+                        .as_ref()
+                        .is_some_and(|target| target != &path);
+                    if !stale_home_listing {
+                        session.sftp.restoring_remote_directory = None;
+                        remembered_remote_path = Some(path.clone());
+                        session.sftp.path = path;
+                        session.sftp.entries = entries;
+                        session.sftp.message.clear();
+                        let target = session.sftp.path.clone();
+                        if let Some(sftp_tx) = &session.sftp_tx {
+                            let _ = sftp_tx.try_send(SftpCommand::FilesystemInfo(target));
+                        }
                     }
                 }
                 SftpEvent::FilesystemInfo(info) => {
@@ -7373,7 +7445,25 @@ impl AppView {
                     }
                 }
                 SftpEvent::Error(error) => {
-                    session.sftp.message = error;
+                    let restoring_path = session.sftp.restoring_remote_directory.clone();
+                    if restoring_path
+                        .as_ref()
+                        .is_some_and(|path| error.starts_with(&format!("Could not list {path}:")))
+                        && !session.sftp.home_directory.is_empty()
+                    {
+                        session.sftp.restoring_remote_directory = None;
+                        session.sftp.path = session.sftp.home_directory.clone();
+                        session.sftp.message = error;
+                        if let Some(sftp_tx) = &session.sftp_tx {
+                            let _ = sftp_tx
+                                .try_send(SftpCommand::List(session.sftp.home_directory.clone()));
+                        }
+                    } else if restoring_path
+                        .as_ref()
+                        .is_none_or(|path| !error.starts_with(&format!("Could not list {path}:")))
+                    {
+                        session.sftp.message = error;
+                    }
                 }
                 SftpEvent::NeedsOverwrite {
                     kind,
@@ -7470,6 +7560,9 @@ impl AppView {
                     }
                 }
             }
+        }
+        if let Some(path) = remembered_remote_path {
+            self.remember_sftp_directories(id, None, Some(path), cx);
         }
         if dispatch_next {
             self.dispatch_next_sftp_transfer(id, cx);
@@ -7589,11 +7682,115 @@ impl AppView {
 
     fn open_sftp_directory(&mut self, session_id: u64, path: String, cx: &mut Context<Self>) {
         if let Some(session) = self.session_mut(session_id) {
+            session.sftp.restoring_remote_directory = None;
             session.sftp.path = path.clone();
             session.sftp.message = format!("Loading {path}...");
         }
         self.send_sftp_command(session_id, SftpCommand::List(path), cx);
         cx.notify();
+    }
+
+    fn remember_sftp_local_directory(
+        &mut self,
+        session_id: u64,
+        directory: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        if !directory.is_dir() {
+            self.set_sftp_message(session_id, "The selected local folder is unavailable.", cx);
+            return;
+        }
+        let directory = directory.to_string_lossy().into_owned();
+        if let Some(session) = self.session_mut(session_id) {
+            session.sftp.local_directory = directory.clone();
+        }
+        self.remember_sftp_directories(session_id, Some(directory), None, cx);
+    }
+
+    fn remember_sftp_directories(
+        &mut self,
+        session_id: u64,
+        local_directory: Option<String>,
+        remote_directory: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((name, host, port, username)) = self.session(session_id).map(|session| {
+            (
+                session.title.clone(),
+                session.host.clone(),
+                session.port,
+                session.username.clone(),
+            )
+        }) else {
+            return;
+        };
+        let mut recent = self.recent.clone();
+        let existing = recent.iter_mut().find(|entry| {
+            entry.host.eq_ignore_ascii_case(&host)
+                && entry.port == port
+                && entry.username == username
+        });
+        if let Some(entry) = existing {
+            if let Some(directory) = local_directory
+                && entry.last_local_directory != directory
+            {
+                entry.last_local_directory = directory;
+            }
+            if let Some(directory) = remote_directory
+                && entry.last_remote_directory != directory
+            {
+                entry.last_remote_directory = directory;
+            }
+        } else {
+            record_recent(
+                &mut recent,
+                RecentConnection {
+                    name,
+                    host,
+                    port,
+                    username,
+                    last_used_unix: unix_now(),
+                    last_local_directory: local_directory.unwrap_or_default(),
+                    last_remote_directory: remote_directory.unwrap_or_default(),
+                },
+            );
+        }
+        if recent == self.recent {
+            return;
+        }
+        if let Err(error) = self.save_workspace(self.profiles.clone(), recent) {
+            self.profile_message = error;
+        }
+        cx.notify();
+    }
+
+    fn choose_sftp_local_directory(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose local folder".into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(mut paths))) => {
+                if let Some(directory) = paths.pop() {
+                    let _ = this.update(cx, |view, cx| {
+                        view.remember_sftp_local_directory(session_id, &directory, cx);
+                    });
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |view, cx| {
+                    view.set_sftp_message(
+                        session_id,
+                        format!("Could not open a folder picker: {error}"),
+                        cx,
+                    );
+                });
+            }
+            _ => {}
+        })
+        .detach();
     }
 
     fn refresh_sftp(&mut self, session_id: u64, cx: &mut Context<Self>) {
@@ -7653,6 +7850,9 @@ impl AppView {
             cx.notify();
             return;
         };
+        if let Some(directory) = local.parent().filter(|path| !path.as_os_str().is_empty()) {
+            self.remember_sftp_local_directory(session_id, directory, cx);
+        }
         let Some(base) = self
             .session(session_id)
             .map(|session| session.sftp.path.clone())
@@ -7691,6 +7891,23 @@ impl AppView {
             cx.notify();
             return;
         };
+        let remembered_directory = self
+            .session(session_id)
+            .map(|session| session.sftp.local_directory.clone())
+            .unwrap_or_default();
+        if Path::new(&remembered_directory).is_dir() {
+            self.enqueue_sftp_transfer(
+                session_id,
+                SftpCommand::Download {
+                    remote,
+                    local: Path::new(&remembered_directory).join(local_name),
+                    overwrite: false,
+                    resume: false,
+                },
+                cx,
+            );
+            return;
+        }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -7702,6 +7919,7 @@ impl AppView {
                 if let Some(directory) = paths.pop() {
                     let local = directory.join(&local_name);
                     let _ = this.update(cx, |view, cx| {
+                        view.remember_sftp_local_directory(session_id, &directory, cx);
                         view.enqueue_sftp_transfer(
                             session_id,
                             SftpCommand::Download {
@@ -7765,6 +7983,9 @@ impl AppView {
             self.set_sftp_message(session_id, "The selected folder has no name.", cx);
             return;
         };
+        if let Some(directory) = local.parent().filter(|path| !path.as_os_str().is_empty()) {
+            self.remember_sftp_local_directory(session_id, directory, cx);
+        }
         let Some(base) = self
             .session(session_id)
             .map(|session| session.sftp.path.clone())
@@ -7799,6 +8020,23 @@ impl AppView {
             self.set_sftp_message(session_id, "The remote folder name is invalid.", cx);
             return;
         };
+        let remembered_directory = self
+            .session(session_id)
+            .map(|session| session.sftp.local_directory.clone())
+            .unwrap_or_default();
+        if Path::new(&remembered_directory).is_dir() {
+            self.enqueue_sftp_transfer(
+                session_id,
+                SftpCommand::DownloadDirectory {
+                    remote,
+                    local: Path::new(&remembered_directory).join(local_name),
+                    overwrite: false,
+                    resume: false,
+                },
+                cx,
+            );
+            return;
+        }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -7810,6 +8048,7 @@ impl AppView {
                 if let Some(directory) = paths.pop() {
                     let local = directory.join(&local_name);
                     let _ = this.update(cx, |view, cx| {
+                        view.remember_sftp_local_directory(session_id, &directory, cx);
                         view.enqueue_sftp_transfer(
                             session_id,
                             SftpCommand::DownloadDirectory {
@@ -7885,6 +8124,7 @@ impl AppView {
             return div().into_any_element();
         };
         let path = session.sftp.path.clone();
+        let local_directory = session.sftp.local_directory.clone();
         let entries = session.sftp.entries.clone();
         let message = session.sftp.message.clone();
         let transfer = session.sftp.transfer.clone();
@@ -8123,6 +8363,42 @@ impl AppView {
                     } else {
                         path
                     }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_2))
+                    .px(px(ui_tokens::SPACE_2))
+                    .py(px(ui_tokens::SPACE_1))
+                    .border_b_1()
+                    .border_color(tokens.border_subtle)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .text_color(tokens.text_secondary)
+                            .child(if local_directory.is_empty() {
+                                self.tr("No local folder remembered.")
+                            } else {
+                                format!("{}: {local_directory}", self.tr("Local folder"))
+                            }),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            "sftp-choose-local-directory",
+                            IconName::FolderOpen,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            self.tr("Change local folder"),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.choose_sftp_local_directory(session_id, cx);
+                        })),
+                    ),
             );
         if let Some(info) = filesystem {
             let used_bytes = info.total_bytes.saturating_sub(info.available_bytes);

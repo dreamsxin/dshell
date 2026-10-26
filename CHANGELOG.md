@@ -2,6 +2,33 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.33] - 2026-10-26
+
+Remembers SFTP directories for recent connections.
+
+### Added
+
+- Restore the most recently browsed remote directory for the same host, port
+  and user after reconnecting.
+- Remember a local folder per recent connection, reuse it for later downloads,
+  and add an icon action in the SFTP panel to change it.
+- Upgrade recent-connection data to version 5 while loading older files with
+  empty directory defaults; keep local paths out of shareable host-profile
+  exports.
+- Add Simplified Chinese labels and migration, persistence and path-validation
+  tests.
+
+### Verification
+
+- Verification date: 2026-10-26 (Windows/MSVC).
+- `cargo fmt --all` and `cargo test --locked --offline` passed (158 passed,
+  9 Docker-only tests ignored).
+- `scripts\verify-hard-constraints.ps1` passed (158 passed, 9 Docker-only tests
+  ignored).
+- `scripts\test-docker-ssh.ps1` passed all 9 SSH/SFTP integration tests.
+- Isolated Windows GUI screenshots and manual DPI, IME and glyph checks remain
+  outstanding; the GUI was not launched on the user's active desktop.
+
 ## [0.1.32] - 2026-10-26
 
 Adds portable Quick Commands bundles for team sharing.

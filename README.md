@@ -153,7 +153,11 @@ skipped. Each entry shows its permission mode and modification timestamp; the
 metadata action edits octal permissions plus Unix access and modification
 seconds through SFTP `SETSTAT`. The panel also shows remote filesystem usage,
 available/free space, block size and maximum filename length when the server
-supports the OpenSSH `statvfs` extension.
+supports the OpenSSH `statvfs` extension. For each recent host and user,
+dshell remembers the last remote directory and local folder. The remote
+directory is restored on reconnect, and downloads reuse the remembered local
+folder; use the folder icon to change it. Uploads continue to use the native
+file picker.
 
 Use the `Tunnels` button to manage port forwarding for the active session.
 Local forwards listen on this machine and connect through the SSH server;
