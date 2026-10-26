@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.39`.
+`v0.1.40`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -228,6 +228,10 @@ Use the `Quick commands` button to manage reusable commands. Commands are
 stored in `%APPDATA%\dshell\snippets.json` on Windows and shown as a flat
 button grid with icon actions for run, edit and delete. A command can be sent
 to the active session or broadcast to explicitly selected connected sessions.
+Commands can include `{{host}}`, `{{port}}` and `{{user}}`; each target expands
+them from its own connection details when sent, and values are quoted for a
+POSIX shell. Use the variable buttons in the editor to insert a placeholder at
+the cursor. Unknown placeholders remain unchanged.
 The `Send + Enter` / `Paste only` toggle controls whether the command is
 submitted immediately. Use the import and export icon buttons to exchange a
 versioned JSON command bundle with teammates. Import merges by case-insensitive

@@ -508,6 +508,10 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Keys" => "密钥",
         "Compose" => "编辑命令",
         "Quick commands" => "快捷命令",
+        "Variables" => "变量",
+        "Insert host variable" => "插入主机变量",
+        "Insert port variable" => "插入端口变量",
+        "Insert user variable" => "插入用户变量",
         "Keyword highlights" => "关键词高亮",
         "Triggers" => "触发器",
         "Highlight" => "高亮",
@@ -1186,6 +1190,14 @@ mod tests {
             translate(Language::SimplifiedChinese, "Quick commands"),
             "快捷命令"
         );
+        for (key, expected) in [
+            ("Variables", "变量"),
+            ("Insert host variable", "插入主机变量"),
+            ("Insert port variable", "插入端口变量"),
+            ("Insert user variable", "插入用户变量"),
+        ] {
+            assert_eq!(translate(Language::SimplifiedChinese, key), expected);
+        }
         assert_eq!(
             translate(Language::SimplifiedChinese, "Import quick commands"),
             "导入快捷命令"

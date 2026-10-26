@@ -10792,6 +10792,19 @@ impl AppView {
         cx.notify();
     }
 
+    fn insert_snippet_variable(
+        &mut self,
+        variable: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.snippet_command
+            .update(cx, |input, cx| input.insert(variable, window, cx));
+        let focus = self.snippet_command.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
     fn delete_snippet(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.snippet_store.as_ref() else {
             self.snippet_message = self.tr("Command snippet storage is unavailable.");
@@ -11417,17 +11430,16 @@ impl AppView {
         send_enter: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self
-            .session(session_id)
-            .is_none_or(|session| session.state != SessionState::Connected)
-        {
+        let Some((host, port, username)) = self.session(session_id).and_then(|session| {
+            (session.state == SessionState::Connected)
+                .then(|| (session.host.clone(), session.port, session.username.clone()))
+        }) else {
             return false;
-        }
-        if let Err(error) = enqueue_session_request(
-            &self.sessions,
-            session_id,
-            TerminalRequest::Paste(command.to_owned()),
-        ) {
+        };
+        let command = snippets::expand_session_variables(&command, &host, port, &username);
+        if let Err(error) =
+            enqueue_session_request(&self.sessions, session_id, TerminalRequest::Paste(command))
+        {
             self.snippet_message = self
                 .tr("Could not send the command: {error}")
                 .replace("{error}", &error.to_string());
@@ -12899,6 +12911,58 @@ impl AppView {
                         &self.snippet_command,
                         false,
                     ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_tokens::SPACE_1))
+                            .child(components::section_label(&tokens, self.tr("Variables")))
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "snippet-variable-host",
+                                    "{{host}}",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .tooltip(self.tr("Insert host variable"))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.insert_snippet_variable("{{host}}", window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "snippet-variable-port",
+                                    "{{port}}",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .tooltip(self.tr("Insert port variable"))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.insert_snippet_variable("{{port}}", window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "snippet-variable-user",
+                                    "{{user}}",
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .tooltip(self.tr("Insert user variable"))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.insert_snippet_variable("{{user}}", window, cx);
+                                    },
+                                )),
+                            ),
+                    )
                     .child(
                         div()
                             .flex()

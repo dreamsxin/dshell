@@ -21,6 +21,37 @@ pub struct CommandSnippet {
     pub send_enter: bool,
 }
 
+pub fn expand_session_variables(command: &str, host: &str, port: u16, username: &str) -> String {
+    let port = port.to_string();
+    let variables = [
+        ("{{host}}", shell_quote(host)),
+        ("{{port}}", shell_quote(&port)),
+        ("{{user}}", shell_quote(username)),
+    ];
+    let mut rendered = String::with_capacity(command.len());
+    let mut remaining = command;
+
+    loop {
+        let next = variables
+            .iter()
+            .filter_map(|(token, value)| remaining.find(token).map(|index| (index, *token, value)))
+            .min_by_key(|(index, _, _)| *index);
+        let Some((index, token, value)) = next else {
+            rendered.push_str(remaining);
+            break;
+        };
+        rendered.push_str(&remaining[..index]);
+        rendered.push_str(value);
+        remaining = &remaining[index + token.len()..];
+    }
+
+    rendered
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SnippetDocument {
@@ -275,6 +306,39 @@ mod tests {
             ..snippet.clone()
         };
         assert!(validate_snippets(&[snippet, duplicate]).is_err());
+    }
+
+    #[test]
+    fn session_variables_expand_per_target_with_posix_shell_quoting() {
+        assert_eq!(
+            expand_session_variables(
+                "inspect {{host}} {{port}} {{user}}",
+                "db'test",
+                2222,
+                "ops $(id)",
+            ),
+            "inspect 'db'\\''test' '2222' 'ops $(id)'"
+        );
+    }
+
+    #[test]
+    fn session_variable_expansion_leaves_unknown_and_missing_tokens_untouched() {
+        assert_eq!(
+            expand_session_variables("echo {{host}} {{unknown}} {{port", "host", 22, "user"),
+            "echo 'host' {{unknown}} {{port"
+        );
+        assert_eq!(
+            expand_session_variables("uptime", "host", 22, "user"),
+            "uptime"
+        );
+    }
+
+    #[test]
+    fn session_variable_values_are_not_expanded_recursively() {
+        assert_eq!(
+            expand_session_variables("{{user}} {{host}}", "host{{user}}", 22, "user{{host}}"),
+            "'user{{host}}' 'host{{user}}'"
+        );
     }
 
     #[test]

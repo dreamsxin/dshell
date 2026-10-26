@@ -2,6 +2,29 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.40] - 2026-10-27
+
+Adds target-aware variables to reusable quick commands.
+
+### Added
+
+- Insert `{{host}}`, `{{port}}` and `{{user}}` placeholders from the command
+  editor; each active or broadcast session expands them using its own connection
+  metadata.
+- Quote expanded values for POSIX shells and preserve unknown placeholders.
+- Keep the versioned command bundle format unchanged; templates remain portable
+  across teams and do not persist credentials.
+
+### Verification
+
+- Verified 2026-10-27 on Windows/MSVC: `cargo fmt --all` and
+  `scripts\verify-hard-constraints.ps1` passed (187 tests passed, 9 Docker SSH
+  tests ignored by the standard suite). `scripts\test-docker-ssh.ps1` passed
+  all 9 integration tests.
+- The GUI was not launched on the user's active desktop. Isolated screenshots,
+  DPI/IME, glyph alignment and command-editor interaction checks remain
+  outstanding.
+
 ## [0.1.39] - 2026-10-27
 
 Adds a per-session terminal input lock.
