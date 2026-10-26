@@ -36,6 +36,10 @@ pub const CONTROL_HEIGHT: f32 = 32.0;
 pub const CONTROL_HEIGHT_LG: f32 = 36.0;
 pub const ICON_SIZE_INLINE: f32 = 16.0;
 pub const ICON_SIZE_TOOLBAR: f32 = 20.0;
+pub const SWITCH_WIDTH: f32 = 40.0;
+pub const SWITCH_HEIGHT: f32 = 24.0;
+pub const SWITCH_THUMB_SIZE: f32 = 16.0;
+pub const SWITCH_INSET: f32 = 4.0;
 
 // Panel and modal chrome.
 pub const PANEL_HEADER_HEIGHT: f32 = 32.0;

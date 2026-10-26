@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.31`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.34`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -171,6 +171,15 @@ started automatically the next time it connects.
 The session properties also accept a keep-alive interval in seconds (`0`
 disables it). A positive value makes the client send keepalive messages when
 the connection is idle.
+
+Session properties can also enable automatic reconnect after an established
+SSH connection is interrupted. Reconnect is off by default; set an interval of
+1–300 seconds and up to 20 attempts. Retries cover transport failures only:
+authentication and unknown or changed host-key failures stop immediately, and
+every retry checks the existing OpenSSH `known_hosts` file. A successful retry
+starts a new remote shell, restores saved forwarding rules and refreshes the
+remembered SFTP directory. It cannot resume the previous shell, remote
+processes, active transfers or session log.
 
 Use the `Log` button to record terminal output to a file. Logging is off by
 default and starts only after you choose a destination in the native save

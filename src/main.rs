@@ -37,8 +37,8 @@ use gpui_component::{
 use openssh_config::import_openssh_config;
 use profiles::{
     AuthMethod, HostData, HostProfile, MAX_FORWARD_RULES, ProfileStore, RecentConnection,
-    export_profiles as export_host_profiles, import_profiles as import_host_profiles,
-    record_recent,
+    ReconnectSettings, export_profiles as export_host_profiles,
+    import_profiles as import_host_profiles, record_recent,
 };
 use settings::{
     AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MAX_GROUP_NAME_CHARS, MIN_FONT_SIZE,
@@ -215,13 +215,20 @@ enum SessionState {
     Disconnected,
     Connecting,
     Connected,
+    Reconnecting,
     Disconnecting,
+}
+
+fn session_accepts_requests(state: SessionState) -> bool {
+    matches!(state, SessionState::Connecting | SessionState::Connected)
 }
 
 fn session_tone(state: SessionState) -> Tone {
     match state {
         SessionState::Connected => Tone::Success,
-        SessionState::Connecting | SessionState::Disconnecting => Tone::Warning,
+        SessionState::Connecting | SessionState::Reconnecting | SessionState::Disconnecting => {
+            Tone::Warning
+        }
         SessionState::Disconnected => Tone::Neutral,
     }
 }
@@ -231,6 +238,7 @@ fn session_state_label(state: SessionState) -> &'static str {
         SessionState::Disconnected => "Disconnected",
         SessionState::Connecting => "Connecting",
         SessionState::Connected => "Connected",
+        SessionState::Reconnecting => "Reconnecting",
         SessionState::Disconnecting => "Disconnecting",
     }
 }
@@ -1053,6 +1061,8 @@ struct SftpViewState {
     metadata_edit: Option<SftpMetadataEdit>,
     filesystem: Option<RemoteFilesystemInfo>,
     filesystem_supported: Option<bool>,
+    ready_for_requests: bool,
+    refresh_after_reconnect: bool,
 }
 
 #[derive(Default)]
@@ -1084,12 +1094,16 @@ impl SshSession {
 
     fn apply_event(&mut self, event: UiEvent) -> bool {
         if self.state == SessionState::Disconnecting
-            && matches!(&event, UiEvent::Status(_) | UiEvent::Screen(_))
+            && matches!(
+                &event,
+                UiEvent::Status(_) | UiEvent::Screen(_) | UiEvent::Reconnecting { .. }
+            )
         {
             return false;
         }
         match event {
             UiEvent::Status(status) => {
+                let was_reconnecting = self.state == SessionState::Reconnecting;
                 self.status = status;
                 self.state = SessionState::Connected;
                 let pending = std::mem::take(&mut self.pending_forwards);
@@ -1098,6 +1112,44 @@ impl SshSession {
                         let _ = forward_tx.try_send(ForwardCommand::Add(rule));
                     }
                 }
+                if was_reconnecting
+                    && self.sftp.refresh_after_reconnect
+                    && self.sftp.ready_for_requests
+                    && queue_sftp_directory_refresh(self)
+                {
+                    self.sftp.refresh_after_reconnect = false;
+                }
+            }
+            UiEvent::Reconnecting {
+                attempt,
+                max_attempts,
+                delay_seconds,
+            } => {
+                self.clear_terminal(
+                    "Reconnecting...",
+                    format!(
+                        "Connection interrupted. Reconnecting in {delay_seconds}s (attempt {attempt} of {max_attempts}). A new remote shell will start; the previous shell and remote processes cannot be resumed."
+                    ),
+                );
+                self.state = SessionState::Reconnecting;
+                if !self.sftp.path.is_empty() && self.sftp.path != self.sftp.home_directory {
+                    self.sftp.restoring_remote_directory = Some(self.sftp.path.clone());
+                }
+                self.sftp.ready_for_requests = false;
+                self.sftp.refresh_after_reconnect = true;
+                self.sftp.transfer = None;
+                self.sftp.active_transfer = None;
+                self.sftp.transfer_queue.clear();
+                self.sftp.overwrite = None;
+                self.sftp.metadata_edit = None;
+                self.sftp.entries.clear();
+                self.sftp.filesystem = None;
+                self.sftp.filesystem_supported = None;
+                self.forwards.rules.clear();
+                self.forwards.stopped.clear();
+                self.log_path = None;
+                self.connection_info = None;
+                self.server_metrics = ServerMetricsViewState::default();
             }
             UiEvent::LogState(path) => {
                 self.log_path = path;
@@ -1215,6 +1267,8 @@ impl SshSession {
                 self.log_path = None;
                 self.connection_info = None;
                 self.server_metrics = ServerMetricsViewState::default();
+                self.sftp.ready_for_requests = false;
+                self.sftp.refresh_after_reconnect = false;
                 self.state = SessionState::Disconnected;
             }
             UiEvent::Disconnected => {
@@ -1239,6 +1293,8 @@ impl SshSession {
                 self.log_path = None;
                 self.connection_info = None;
                 self.server_metrics = ServerMetricsViewState::default();
+                self.sftp.ready_for_requests = false;
+                self.sftp.refresh_after_reconnect = false;
                 self.state = SessionState::Disconnected;
             }
             UiEvent::AuthPrompt { .. } => {}
@@ -1263,6 +1319,9 @@ fn enqueue_session_request(
     let Some(session) = sessions.iter().find(|session| session.id == id) else {
         return Err("SSH session is no longer available");
     };
+    if !session_accepts_requests(session.state) {
+        return Err("SSH session is not accepting input");
+    }
     let Some(command_tx) = &session.command_tx else {
         return Err("SSH session is not accepting input");
     };
@@ -1270,6 +1329,33 @@ fn enqueue_session_request(
         mpsc::error::TrySendError::Full(_) => "Terminal request queue is full",
         mpsc::error::TrySendError::Closed(_) => "SSH session is not accepting input",
     })
+}
+
+fn queue_sftp_directory_refresh(session: &SshSession) -> bool {
+    let Some(sftp_tx) = &session.sftp_tx else {
+        return false;
+    };
+    let target = session.sftp.path.clone();
+    sftp_tx.try_send(SftpCommand::List(target.clone())).is_ok()
+        && sftp_tx
+            .try_send(SftpCommand::FilesystemInfo(target))
+            .is_ok()
+}
+
+fn mark_sftp_ready(session: &mut SshSession, home: String) {
+    session.sftp.home_directory = home.clone();
+    if session.sftp.path.is_empty() {
+        session.sftp.path = home;
+    }
+    session.sftp.ready_for_requests = true;
+    session.sftp.message.clear();
+    if session_accepts_requests(session.state) {
+        if queue_sftp_directory_refresh(session) {
+            session.sftp.refresh_after_reconnect = false;
+        }
+    } else if session.state == SessionState::Reconnecting {
+        session.sftp.refresh_after_reconnect = true;
+    }
 }
 
 fn keyword_matches(text: &str, keywords: &[String]) -> bool {
@@ -1371,15 +1457,15 @@ mod session_tests {
         UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
         enqueue_session_request, filesystem_usage_percent, forget_stopped_forward,
         format_alert_time, format_log_time, format_rate, format_storage_kib,
-        is_authentication_failure, is_sftp_transfer_command, keyword_matches, memory_usage_percent,
-        merge_unique_profiles, move_profile_to_group, mpsc, parse_alert_percent,
-        recall_compose_history, recent_sftp_directories_for_target, remember_compose_history,
-        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
-        reorder_group_order, reorder_session_ids, saved_profile_for_session, search_result_message,
-        server_alert_observations, session_editor_escape, session_editor_key,
-        session_matches_target, session_terminal_size_for_split, split_panel_terminal_size,
-        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
-        unique_duplicate_session_title, watch,
+        is_authentication_failure, is_sftp_transfer_command, keyword_matches, mark_sftp_ready,
+        memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
+        parse_alert_percent, recall_compose_history, recent_sftp_directories_for_target,
+        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
+        rename_profile_group, reorder_group_order, reorder_session_ids, saved_profile_for_session,
+        search_result_message, server_alert_observations, session_accepts_requests,
+        session_editor_escape, session_editor_key, session_matches_target,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
+        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1467,6 +1553,55 @@ mod session_tests {
             99,
             UiEvent::Disconnected
         ));
+    }
+
+    #[test]
+    fn reconnecting_sessions_reject_queued_terminal_requests() {
+        let (mut session, mut command_rx, _) = test_session(1);
+        session.state = SessionState::Reconnecting;
+        let sessions = vec![session];
+
+        assert_eq!(
+            enqueue_session_request(&sessions, 1, TerminalRequest::Paste("stale".to_owned())),
+            Err("SSH session is not accepting input")
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert!(!session_accepts_requests(SessionState::Reconnecting));
+        assert!(session_accepts_requests(SessionState::Connecting));
+        assert!(session_accepts_requests(SessionState::Connected));
+    }
+
+    #[test]
+    fn reconnect_refreshes_the_remembered_sftp_directory_after_both_channels_are_ready() {
+        let (mut session, _, _) = test_session(1);
+        let (sftp_tx, mut sftp_rx) = mpsc::channel(4);
+        session.sftp_tx = Some(sftp_tx);
+        session.sftp.path = "/srv/project".to_owned();
+
+        assert!(session.apply_event(UiEvent::Reconnecting {
+            attempt: 1,
+            max_attempts: 5,
+            delay_seconds: 5,
+        }));
+        assert_eq!(
+            session.sftp.restoring_remote_directory.as_deref(),
+            Some("/srv/project")
+        );
+        mark_sftp_ready(&mut session, "/home/test".to_owned());
+        assert!(sftp_rx.try_recv().is_err());
+
+        assert!(session.apply_event(UiEvent::Status(
+            "Connected to example.test:22 as test".to_owned()
+        )));
+        assert!(matches!(
+            sftp_rx.try_recv(),
+            Ok(SftpCommand::List(path)) if path == "/srv/project"
+        ));
+        assert!(matches!(
+            sftp_rx.try_recv(),
+            Ok(SftpCommand::FilesystemInfo(path)) if path == "/srv/project"
+        ));
+        assert!(!session.sftp.refresh_after_reconnect);
     }
 
     #[test]
@@ -1576,6 +1711,7 @@ mod session_tests {
             proxy_jump: String::new(),
             forwards: Vec::new(),
             keepalive_seconds: 0,
+            reconnect: crate::profiles::ReconnectSettings::default(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2078,6 +2214,7 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                reconnect: crate::profiles::ReconnectSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2123,6 +2260,7 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                reconnect: crate::profiles::ReconnectSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2169,6 +2307,7 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                reconnect: crate::profiles::ReconnectSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2186,6 +2325,7 @@ mod session_tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                reconnect: crate::profiles::ReconnectSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2213,6 +2353,7 @@ mod session_tests {
             proxy_jump: String::new(),
             forwards: Vec::new(),
             keepalive_seconds: 0,
+            reconnect: crate::profiles::ReconnectSettings::default(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2445,6 +2586,7 @@ struct AppView {
     profile_search: Entity<InputState>,
     profile_group: Entity<InputState>,
     profile_favorite: bool,
+    profile_auto_reconnect: bool,
     auth_method: AuthMethod,
     auth_profiles: Vec<AuthProfile>,
     auth_profile_store: Option<AuthProfileStore>,
@@ -2457,6 +2599,8 @@ struct AppView {
     jump_password: Entity<InputState>,
     jump_passphrase: Entity<InputState>,
     keepalive_seconds: Entity<InputState>,
+    reconnect_interval_seconds: Entity<InputState>,
+    reconnect_max_attempts: Entity<InputState>,
     forward_kind: ForwardKind,
     forward_listen_host: Entity<InputState>,
     forward_listen_port: Entity<InputState>,
@@ -2607,6 +2751,9 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Jump key passphrase"));
         jump_passphrase.update(cx, |state, cx| state.set_masked(true, window, cx));
         let keepalive_seconds = cx.new(|cx| InputState::new(window, cx).default_value("0"));
+        let reconnect_interval_seconds =
+            cx.new(|cx| InputState::new(window, cx).default_value("5"));
+        let reconnect_max_attempts = cx.new(|cx| InputState::new(window, cx).default_value("5"));
         let forward_listen_host =
             cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let forward_listen_port = cx.new(|cx| InputState::new(window, cx).default_value("0"));
@@ -2767,6 +2914,7 @@ impl AppView {
             profile_search,
             profile_group,
             profile_favorite: false,
+            profile_auto_reconnect: false,
             auth_method: AuthMethod::Password,
             auth_profiles,
             auth_profile_store,
@@ -2779,6 +2927,8 @@ impl AppView {
             jump_password,
             jump_passphrase,
             keepalive_seconds,
+            reconnect_interval_seconds,
+            reconnect_max_attempts,
             forward_kind: ForwardKind::Local,
             forward_listen_host,
             forward_listen_port,
@@ -4124,7 +4274,10 @@ impl AppView {
         Self::set_input_value(&self.jump_password, "", window, cx);
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
         Self::set_input_value(&self.keepalive_seconds, "0", window, cx);
+        Self::set_input_value(&self.reconnect_interval_seconds, "5", window, cx);
+        Self::set_input_value(&self.reconnect_max_attempts, "5", window, cx);
         self.profile_favorite = false;
+        self.profile_auto_reconnect = false;
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
         self.selected_profile = None;
@@ -4164,6 +4317,19 @@ impl AppView {
         Self::set_input_value(
             &self.keepalive_seconds,
             &profile.keepalive_seconds.to_string(),
+            window,
+            cx,
+        );
+        self.profile_auto_reconnect = profile.reconnect.enabled;
+        Self::set_input_value(
+            &self.reconnect_interval_seconds,
+            &profile.reconnect.interval_seconds.to_string(),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.reconnect_max_attempts,
+            &profile.reconnect.max_attempts.to_string(),
             window,
             cx,
         );
@@ -4215,7 +4381,10 @@ impl AppView {
         Self::set_input_value(&self.jump_password, "", window, cx);
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
         Self::set_input_value(&self.keepalive_seconds, "0", window, cx);
+        Self::set_input_value(&self.reconnect_interval_seconds, "5", window, cx);
+        Self::set_input_value(&self.reconnect_max_attempts, "5", window, cx);
         self.profile_favorite = false;
+        self.profile_auto_reconnect = false;
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
         self.selected_profile = None;
@@ -4919,6 +5088,28 @@ impl AppView {
                 return;
             }
         };
+        let reconnect = ReconnectSettings {
+            enabled: self.profile_auto_reconnect,
+            interval_seconds: self
+                .reconnect_interval_seconds
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u16>()
+                .unwrap_or(0),
+            max_attempts: self
+                .reconnect_max_attempts
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u8>()
+                .unwrap_or(0),
+        };
+        if let Err(error) = reconnect.validate() {
+            self.profile_message = self.tr(&error);
+            cx.notify();
+            return;
+        }
         let existing_forwards = self
             .selected_profile
             .as_ref()
@@ -4997,6 +5188,7 @@ impl AppView {
             proxy_jump,
             forwards: existing_forwards,
             keepalive_seconds,
+            reconnect,
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -5138,6 +5330,28 @@ impl AppView {
                 return;
             }
         };
+        let reconnect = ReconnectSettings {
+            enabled: self.profile_auto_reconnect,
+            interval_seconds: self
+                .reconnect_interval_seconds
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u16>()
+                .unwrap_or(0),
+            max_attempts: self
+                .reconnect_max_attempts
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u8>()
+                .unwrap_or(0),
+        };
+        if let Err(error) = reconnect.validate() {
+            self.profile_message = self.tr(&error);
+            cx.notify();
+            return;
+        }
         let saved_profile = if requested_title.is_empty() {
             None
         } else {
@@ -5261,6 +5475,7 @@ impl AppView {
             terminal_size,
             jump,
             keepalive_seconds,
+            reconnect,
             theme: self.settings.theme,
             cursor_style: self.settings.cursor_style,
         };
@@ -5414,6 +5629,29 @@ impl AppView {
                                 &event,
                                 UiEvent::Status(status) if status.starts_with("Connected to ")
                             );
+                            let reconnect_data = match &event {
+                                UiEvent::Reconnecting {
+                                    attempt,
+                                    max_attempts,
+                                    delay_seconds,
+                                } => {
+                                    let forwards = view
+                                        .session(id)
+                                        .and_then(|session| {
+                                            saved_profile_for_session(session, &view.profiles)
+                                        })
+                                        .map(|profile| profile.forwards.clone())
+                                        .unwrap_or_default();
+                                    let status = view.tr("Reconnecting");
+                                    let message = view
+                                        .tr("Connection lost. Reconnecting in {seconds}s (attempt {attempt} of {max}). A new remote shell will start.")
+                                        .replace("{seconds}", &delay_seconds.to_string())
+                                        .replace("{attempt}", &attempt.to_string())
+                                        .replace("{max}", &max_attempts.to_string());
+                                    Some((status, message, forwards))
+                                }
+                                _ => None,
+                            };
                             let screen = match &event {
                                 UiEvent::Screen(frame) => Some(frame.clone()),
                                 _ => None,
@@ -5434,8 +5672,17 @@ impl AppView {
                                 }
                                 _ => None,
                             };
-                            if apply_session_event(&mut view.sessions, id, event) {
+                            let event_applied = apply_session_event(&mut view.sessions, id, event);
+                            if event_applied {
                                 cx.notify();
+                            }
+                            if event_applied
+                                && let Some((status, message, forwards)) = reconnect_data
+                                && let Some(session) = view.session_mut(id)
+                            {
+                                session.status = status;
+                                session.terminal_message = message;
+                                session.pending_forwards = forwards;
                             }
                             if server_alerts_changed && view.record_server_alerts(id) {
                                 cx.notify();
@@ -6658,6 +6905,41 @@ impl AppView {
                     false,
                 ))
                 .child(
+                    components::toggle_switch(
+                        &tokens,
+                        "profile-auto-reconnect",
+                        self.tr("Reconnect after connection loss"),
+                        self.profile_auto_reconnect,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.profile_auto_reconnect = !this.profile_auto_reconnect;
+                        cx.notify();
+                    })),
+                )
+                .when(self.profile_auto_reconnect, |section| {
+                    section.child(
+                        div()
+                            .flex()
+                            .gap(px(ui_tokens::SPACE_3))
+                            .child(
+                                div().flex_1().child(components::field(
+                                    &tokens,
+                                    self.tr("Retry interval (seconds)"),
+                                    &self.reconnect_interval_seconds,
+                                    false,
+                                )),
+                            )
+                            .child(
+                                div().flex_1().child(components::field(
+                                    &tokens,
+                                    self.tr("Maximum attempts"),
+                                    &self.reconnect_max_attempts,
+                                    false,
+                                )),
+                            ),
+                    )
+                })
+                .child(
                     div()
                         .flex()
                         .flex_col()
@@ -7403,18 +7685,14 @@ impl AppView {
             let Some(session) = self.session_mut(id) else {
                 return false;
             };
+            if session.state == SessionState::Reconnecting
+                && !matches!(&event, SftpEvent::Ready { .. })
+            {
+                return false;
+            }
             match event {
                 SftpEvent::Ready { path } => {
-                    session.sftp.home_directory = path.clone();
-                    if session.sftp.path.is_empty() {
-                        session.sftp.path = path;
-                    }
-                    session.sftp.message.clear();
-                    let target = session.sftp.path.clone();
-                    if let Some(sftp_tx) = &session.sftp_tx {
-                        let _ = sftp_tx.try_send(SftpCommand::List(target.clone()));
-                        let _ = sftp_tx.try_send(SftpCommand::FilesystemInfo(target));
-                    }
+                    mark_sftp_ready(session, path);
                 }
                 SftpEvent::Entries { path, entries } => {
                     let stale_home_listing = session
@@ -7579,6 +7857,11 @@ impl AppView {
         let Some(session) = self.session_mut(session_id) else {
             return;
         };
+        if !session_accepts_requests(session.state) {
+            session.sftp.message = "SSH session is not accepting requests.".to_owned();
+            cx.notify();
+            return;
+        }
         debug_assert!(is_sftp_transfer_command(&command));
         session.sftp.transfer_queue.push_back(command);
         self.dispatch_next_sftp_transfer(session_id, cx);
@@ -7590,6 +7873,10 @@ impl AppView {
             let Some(session) = self.session_mut(session_id) else {
                 return;
             };
+            if !session_accepts_requests(session.state) {
+                session.sftp.message = "SSH session is not accepting requests.".to_owned();
+                return;
+            }
             if session.sftp.active_transfer.is_some() || session.sftp.overwrite.is_some() {
                 return;
             }
@@ -7640,6 +7927,11 @@ impl AppView {
         let Some(session) = self.session_mut(session_id) else {
             return;
         };
+        if !session_accepts_requests(session.state) {
+            session.sftp.message = "SSH session is not accepting requests.".to_owned();
+            cx.notify();
+            return;
+        }
         let Some(sftp_tx) = &session.sftp_tx else {
             session.sftp.message = "SFTP is not available for this session.".to_owned();
             cx.notify();
@@ -8871,6 +9163,11 @@ impl AppView {
         let Some(session) = self.session_mut(session_id) else {
             return;
         };
+        if !session_accepts_requests(session.state) {
+            session.forwards.message = "SSH session is not accepting requests.".to_owned();
+            cx.notify();
+            return;
+        }
         let Some(forward_tx) = &session.forward_tx else {
             session.forwards.message =
                 "Port forwarding is not available for this session.".to_owned();

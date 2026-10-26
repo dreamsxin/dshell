@@ -363,6 +363,7 @@ fn build_profile(
         proxy_jump: String::new(),
         forwards,
         keepalive_seconds,
+        reconnect: crate::profiles::ReconnectSettings::default(),
         password: String::new(),
         passphrase: String::new(),
         jump_password: String::new(),

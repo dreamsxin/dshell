@@ -18,7 +18,7 @@ use russh::{
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
-    sync::{mpsc, watch},
+    sync::{Mutex as AsyncMutex, mpsc, watch},
     task::JoinHandle,
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -29,12 +29,14 @@ use crate::forward::{
     RemoteTarget, RemoteTargetMap,
 };
 use crate::log;
+use crate::profiles::ReconnectSettings;
 use crate::sftp::{self, SftpCommand, SftpEvent};
 use crate::terminal::{
     CursorStyle, MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton,
     TerminalMouseEvent, TerminalRequest, TerminalSearchResult, TerminalSize, TerminalTheme,
 };
 
+#[derive(Clone)]
 pub enum Authentication {
     Password(Zeroizing<String>),
     KeyboardInteractive {
@@ -48,6 +50,7 @@ pub enum Authentication {
     Agent,
 }
 
+#[derive(Clone)]
 pub struct JumpSpec {
     pub host: String,
     pub port: u16,
@@ -65,6 +68,7 @@ struct RemoteForwardRuntime {
     bound_port: u16,
 }
 
+#[derive(Clone)]
 pub struct ConnectionSpec {
     pub host: String,
     pub port: u16,
@@ -73,6 +77,7 @@ pub struct ConnectionSpec {
     pub terminal_size: TerminalSize,
     pub jump: Option<JumpSpec>,
     pub keepalive_seconds: u16,
+    pub reconnect: ReconnectSettings,
     pub theme: TerminalTheme,
     pub cursor_style: CursorStyle,
 }
@@ -258,6 +263,11 @@ fn connection_info_for_key(key: &PublicKey) -> ConnectionInfo {
 
 pub enum UiEvent {
     Status(String),
+    Reconnecting {
+        attempt: u8,
+        max_attempts: u8,
+        delay_seconds: u16,
+    },
     Screen(TerminalFrame),
     Failed(String),
     Disconnected,
@@ -374,7 +384,9 @@ fn default_known_hosts_path() -> Result<PathBuf> {
 }
 
 fn is_known_host_key(host: &str, port: u16, key: &PublicKey, path: &Path) -> Result<bool> {
-    check_known_hosts_path(host, port, key, path).map_err(Into::into)
+    check_known_hosts_path(host, port, key, path)
+        .map_err(anyhow::Error::from)
+        .context("SSH server key verification failed")
 }
 
 pub struct ConnectionHandles {
@@ -416,21 +428,85 @@ pub fn spawn_connection(
                     return;
                 }
             };
+            runtime.block_on(async move {
+                let sftp_command_target =
+                    Arc::new(AsyncMutex::new(None::<mpsc::Sender<SftpCommand>>));
+                let bridge_target = Arc::clone(&sftp_command_target);
+                let mut sftp_command_rx = sftp_command_rx;
+                let sftp_bridge = tokio::spawn(async move {
+                    while let Some(command) = sftp_command_rx.recv().await {
+                        let target = bridge_target.lock().await.clone();
+                        if let Some(target) = target {
+                            let _ = target.try_send(command);
+                        }
+                    }
+                });
+                let mut command_rx = command_rx;
+                let mut forward_command_rx = forward_command_rx;
+                let mut cancel_rx = cancel_rx;
+                let mut connected_once = false;
+                let mut reconnect_attempt = 0u8;
+                loop {
+                    match run_connection(
+                        spec.clone(),
+                        &mut command_rx,
+                        events.clone(),
+                        sftp_event_tx.clone(),
+                        Arc::clone(&sftp_command_target),
+                        Arc::clone(&thread_sftp_cancel),
+                        &mut forward_command_rx,
+                        forward_event_tx.clone(),
+                        &mut cancel_rx,
+                        &mut connected_once,
+                        &mut reconnect_attempt,
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(error) => {
+                            let can_retry = connected_once
+                                && spec.reconnect.enabled
+                                && reconnect_attempt < spec.reconnect.max_attempts
+                                && is_retryable_reconnect_error(&error);
+                            if !can_retry {
+                                let _ = events
+                                    .send(UiEvent::Failed(format!("Connection failed: {error:#}")))
+                                    .await;
+                                break;
+                            }
 
-            if let Err(error) = runtime.block_on(run_connection(
-                spec,
-                command_rx,
-                events.clone(),
-                sftp_command_rx,
-                sftp_event_tx,
-                thread_sftp_cancel,
-                forward_command_rx,
-                forward_event_tx,
-                cancel_rx,
-            )) {
-                let _ =
-                    events.blocking_send(UiEvent::Failed(format!("Connection failed: {error}")));
-            }
+                            reconnect_attempt = reconnect_attempt.saturating_add(1);
+                            let delay_seconds = spec.reconnect.interval_seconds;
+                            if events
+                                .send(UiEvent::Reconnecting {
+                                    attempt: reconnect_attempt,
+                                    max_attempts: spec.reconnect.max_attempts,
+                                    delay_seconds,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            let cancelled = wait_before_reconnect(
+                                Duration::from_secs(u64::from(delay_seconds)),
+                                &mut command_rx,
+                                &mut forward_command_rx,
+                                &mut cancel_rx,
+                            )
+                            .await;
+                            if cancelled {
+                                let _ = events.send(UiEvent::Disconnected).await;
+                                break;
+                            }
+                            while command_rx.try_recv().is_ok() {}
+                            while forward_command_rx.try_recv().is_ok() {}
+                        }
+                    }
+                }
+                sftp_bridge.abort();
+                let _ = sftp_bridge.await;
+            });
         })
         .context("could not start the SSH runtime thread")?;
 
@@ -447,42 +523,99 @@ pub fn spawn_connection(
 
 async fn run_connection(
     spec: ConnectionSpec,
-    commands: mpsc::Receiver<TerminalRequest>,
+    commands: &mut mpsc::Receiver<TerminalRequest>,
     events: mpsc::Sender<UiEvent>,
-    sftp_commands: mpsc::Receiver<SftpCommand>,
     sftp_events: mpsc::Sender<SftpEvent>,
+    sftp_command_target: Arc<AsyncMutex<Option<mpsc::Sender<SftpCommand>>>>,
     sftp_cancel: Arc<AtomicBool>,
-    forward_commands: mpsc::Receiver<ForwardCommand>,
+    forward_commands: &mut mpsc::Receiver<ForwardCommand>,
     forward_events: mpsc::UnboundedSender<ForwardEvent>,
-    cancellation: watch::Receiver<bool>,
+    cancellation: &mut watch::Receiver<bool>,
+    connected_once: &mut bool,
+    reconnect_attempt: &mut u8,
 ) -> Result<()> {
     let known_hosts_path = default_known_hosts_path()?;
-    run_connection_with_known_hosts(
+    run_connection_attempt_with_known_hosts(
         spec,
         commands,
         events,
-        sftp_commands,
         sftp_events,
+        sftp_command_target,
         sftp_cancel,
         forward_commands,
         forward_events,
         known_hosts_path,
         cancellation,
+        connected_once,
+        reconnect_attempt,
     )
     .await
 }
 
-async fn run_connection_with_known_hosts(
+fn is_retryable_reconnect_error(error: &anyhow::Error) -> bool {
+    let text = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    ![
+        "authentication",
+        "password authentication",
+        "keyboard-interactive",
+        "passphrase",
+        "private key",
+        "identity file",
+        "known_hosts",
+        "host key",
+        "server key",
+        "key mismatch",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+async fn wait_before_reconnect(
+    delay: Duration,
+    commands: &mut mpsc::Receiver<TerminalRequest>,
+    forward_commands: &mut mpsc::Receiver<ForwardCommand>,
+    cancellation: &mut watch::Receiver<bool>,
+) -> bool {
+    let deadline = tokio::time::sleep(delay);
+    tokio::pin!(deadline);
+    let mut forward_commands_open = true;
+
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return false,
+            _ = wait_for_cancellation(cancellation) => return true,
+            request = commands.recv() => {
+                if request.is_none() {
+                    return true;
+                }
+            }
+            request = forward_commands.recv(), if forward_commands_open => {
+                if request.is_none() {
+                    forward_commands_open = false;
+                }
+            }
+        }
+    }
+}
+
+async fn run_connection_attempt_with_known_hosts(
     spec: ConnectionSpec,
-    mut commands: mpsc::Receiver<TerminalRequest>,
+    commands: &mut mpsc::Receiver<TerminalRequest>,
     events: mpsc::Sender<UiEvent>,
-    sftp_commands: mpsc::Receiver<SftpCommand>,
     sftp_events: mpsc::Sender<SftpEvent>,
+    sftp_command_target: Arc<AsyncMutex<Option<mpsc::Sender<SftpCommand>>>>,
     sftp_cancel: Arc<AtomicBool>,
-    mut forward_commands: mpsc::Receiver<ForwardCommand>,
+    forward_commands: &mut mpsc::Receiver<ForwardCommand>,
     forward_events: mpsc::UnboundedSender<ForwardEvent>,
     known_hosts_path: PathBuf,
-    mut cancellation: watch::Receiver<bool>,
+    cancellation: &mut watch::Receiver<bool>,
+    connected_once: &mut bool,
+    reconnect_attempt: &mut u8,
 ) -> Result<()> {
     let ConnectionSpec {
         host,
@@ -494,6 +627,7 @@ async fn run_connection_with_known_hosts(
         keepalive_seconds,
         theme,
         cursor_style,
+        ..
     } = spec;
     let remote_targets: RemoteTargetMap = Arc::new(Mutex::new(HashMap::new()));
     let (accepted_tx, mut accepted_connections) = mpsc::unbounded_channel();
@@ -571,21 +705,15 @@ async fn run_connection_with_known_hosts(
             Ok::<_, russh::Error>(channel)
         })
         .await;
-        match sftp_setup {
-            Ok(Ok(channel)) => {
-                tokio::spawn(sftp::run(
-                    channel.into_stream(),
-                    sftp_commands,
-                    sftp_events,
-                    sftp_cancel,
-                ));
-            }
+        let sftp_channel = match sftp_setup {
+            Ok(Ok(channel)) => Some(channel),
             Ok(Err(error)) => {
                 let _ = sftp_events
                     .send(SftpEvent::Error(format!(
                         "Could not open the SFTP subsystem: {error}"
                     )))
                     .await;
+                None
             }
             Err(_) => {
                 let _ = sftp_events
@@ -593,8 +721,9 @@ async fn run_connection_with_known_hosts(
                         "Timed out opening the SFTP subsystem.".to_owned(),
                     ))
                     .await;
+                None
             }
-        }
+        };
 
         let channel = session.channel_open_session().await?;
         channel
@@ -609,16 +738,27 @@ async fn run_connection_with_known_hosts(
             )
             .await?;
         channel.request_shell(true).await?;
-        Ok::<_, anyhow::Error>((session, channel, jump_session))
+        Ok::<_, anyhow::Error>((session, channel, jump_session, sftp_channel))
     };
     tokio::pin!(setup);
-    let (mut session, channel, jump_session) = tokio::select! {
+    let (mut session, channel, jump_session, sftp_channel) = tokio::select! {
         result = &mut setup => result?,
-        _ = wait_for_cancellation(&mut cancellation) => {
+        _ = wait_for_cancellation(cancellation) => {
             let _ = events.send(UiEvent::Disconnected).await;
             return Ok(());
         }
     };
+    let mut sftp_task = None;
+    if let Some(channel) = sftp_channel {
+        let (command_tx, command_rx) = mpsc::channel(16);
+        *sftp_command_target.lock().await = Some(command_tx);
+        sftp_task = Some(tokio::spawn(sftp::run(
+            channel.into_stream(),
+            command_rx,
+            sftp_events.clone(),
+            Arc::clone(&sftp_cancel),
+        )));
+    }
     events
         .send(UiEvent::Status(format!(
             "Connected to {}:{} as {}",
@@ -626,6 +766,8 @@ async fn run_connection_with_known_hosts(
         )))
         .await
         .context("UI closed while connecting")?;
+    *connected_once = true;
+    *reconnect_attempt = 0;
 
     let (mut reader, writer) = channel.split();
     let mut terminal = TerminalEmulator::new_with_theme(terminal_size, theme);
@@ -636,7 +778,10 @@ async fn run_connection_with_known_hosts(
     let mut log_framed = true;
     let mut render_tick = interval(Duration::from_millis(16));
     render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
+    let mut remote_exited = false;
+    let mut transport_closed = false;
+    let session_loop = async {
+      loop {
         tokio::select! {
             request = commands.recv() => {
                 match request {
@@ -790,7 +935,7 @@ async fn run_connection_with_known_hosts(
                     None => break,
                 }
             }
-            _ = wait_for_cancellation(&mut cancellation) => break,
+            _ = wait_for_cancellation(cancellation) => break,
             command = forward_commands.recv() => {
                 match command {
                     Some(ForwardCommand::Add(spec)) => {
@@ -995,14 +1140,31 @@ async fn run_connection_with_known_hosts(
                         }
                         screen_dirty = true;
                     }
-                    Some(ChannelMsg::ExitStatus { .. }) | None => break,
+                    Some(ChannelMsg::ExitStatus { .. }) => {
+                        remote_exited = true;
+                        break;
+                    }
+                    None => {
+                        transport_closed = true;
+                        break;
+                    }
                     Some(_) => {}
                 }
             }
         }
-    }
+      }
+      Ok::<(), anyhow::Error>(())
+    }.await;
 
     let _ = flush_log(&mut log_file, &mut log_buffer, log_framed).await;
+    if log_file.is_some() {
+        let _ = events.send(UiEvent::LogState(None)).await;
+    }
+    *sftp_command_target.lock().await = None;
+    if let Some(task) = sftp_task {
+        task.abort();
+        let _ = task.await;
+    }
     for (_, runtime) in local_forwards.drain() {
         let _ = runtime.stop.send(true);
         runtime.task.abort();
@@ -1023,8 +1185,22 @@ async fn run_connection_with_known_hosts(
             .disconnect(Disconnect::ByApplication, "target session closed", "en")
             .await;
     }
-    let _ = events.send(UiEvent::Disconnected).await;
-    Ok(())
+    if *cancellation.borrow() || commands.is_closed() {
+        let _ = events.send(UiEvent::Disconnected).await;
+        return Ok(());
+    }
+    session_loop?;
+    if remote_exited {
+        events
+            .send(UiEvent::Disconnected)
+            .await
+            .context("UI closed while reporting remote shell exit")?;
+        return Ok(());
+    }
+    if transport_closed {
+        bail!("The remote SSH shell channel closed.");
+    }
+    bail!("The SSH session ended unexpectedly.");
 }
 
 const SERVER_METRICS_COMMAND: &str = r##"printf '%s\n' 'DSHELL_METRICS_V1'; printf '%s\n' "OS=$(uname -s 2>/dev/null || printf unknown)"; printf '%s\n' "KERNEL=$(uname -r 2>/dev/null || printf unknown)"; printf '%s\n' "LOAD1=$(awk '{print $1}' /proc/loadavg 2>/dev/null)"; printf '%s\n' "LOAD5=$(awk '{print $2}' /proc/loadavg 2>/dev/null)"; printf '%s\n' "LOAD15=$(awk '{print $3}' /proc/loadavg 2>/dev/null)"; printf '%s\n' "MEM_TOTAL_KIB=$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf '%s\n' "MEM_AVAILABLE_KIB=$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; printf '%s\n' "UPTIME_SECONDS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"; printf '%s\n' "DISK_TOTAL_KIB=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $2; exit}')"; printf '%s\n' "DISK_USED_KIB=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $3; exit}')"; printf '%s\n' "DISK_AVAILABLE_KIB=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4; exit}')"; printf '%s\n' "DISK_USE_PERCENT=$(df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5; exit}')"##;
@@ -2378,16 +2554,62 @@ async fn flush_log(
 }
 
 #[cfg(test)]
+async fn run_connection_with_known_hosts(
+    spec: ConnectionSpec,
+    mut commands: mpsc::Receiver<TerminalRequest>,
+    events: mpsc::Sender<UiEvent>,
+    mut sftp_commands: mpsc::Receiver<SftpCommand>,
+    sftp_events: mpsc::Sender<SftpEvent>,
+    sftp_cancel: Arc<AtomicBool>,
+    mut forward_commands: mpsc::Receiver<ForwardCommand>,
+    forward_events: mpsc::UnboundedSender<ForwardEvent>,
+    known_hosts_path: PathBuf,
+    mut cancellation: watch::Receiver<bool>,
+) -> Result<()> {
+    let sftp_command_target = Arc::new(AsyncMutex::new(None::<mpsc::Sender<SftpCommand>>));
+    let bridge_target = Arc::clone(&sftp_command_target);
+    let sftp_bridge = tokio::spawn(async move {
+        while let Some(command) = sftp_commands.recv().await {
+            let target = bridge_target.lock().await.clone();
+            if let Some(target) = target {
+                let _ = target.try_send(command);
+            }
+        }
+    });
+    let mut connected_once = false;
+    let mut reconnect_attempt = 0;
+    let result = run_connection_attempt_with_known_hosts(
+        spec,
+        &mut commands,
+        events,
+        sftp_events,
+        sftp_command_target,
+        sftp_cancel,
+        &mut forward_commands,
+        forward_events,
+        known_hosts_path,
+        &mut cancellation,
+        &mut connected_once,
+        &mut reconnect_attempt,
+    )
+    .await;
+    sftp_bridge.abort();
+    let _ = sftp_bridge.await;
+    result
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, MAX_SERVER_LISTENERS, MAX_SERVER_MOUNTS,
-        MAX_SERVER_SESSIONS, ServerPowerAction, ServiceAction, UiEvent, can_answer_with_password,
-        connection_info_for_key, is_known_host_key, parse_power_action, parse_process_action,
+        MAX_SERVER_SESSIONS, ReconnectSettings, ServerPowerAction, ServiceAction, UiEvent,
+        can_answer_with_password, connection_info_for_key, is_known_host_key,
+        is_retryable_reconnect_error, parse_power_action, parse_process_action,
         parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
         parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
         parse_service_logs, power_action_command, process_termination_command,
         run_connection_with_known_hosts, service_action_command, service_logs_command,
-        valid_process_pid, valid_service_name,
+        valid_process_pid, valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -2411,6 +2633,56 @@ mod tests {
         time::timeout,
     };
     use zeroize::Zeroizing;
+
+    #[test]
+    fn reconnect_retries_only_transport_failures() {
+        assert!(is_retryable_reconnect_error(&anyhow::anyhow!(
+            "connection timed out"
+        )));
+        assert!(is_retryable_reconnect_error(&anyhow::anyhow!(
+            "The remote SSH shell channel closed."
+        )));
+        assert!(!is_retryable_reconnect_error(&anyhow::anyhow!(
+            "SSH password authentication was rejected"
+        )));
+        assert!(!is_retryable_reconnect_error(&anyhow::anyhow!(
+            "Server key is not present in known_hosts"
+        )));
+        assert!(!is_retryable_reconnect_error(&anyhow::anyhow!(
+            "private key passphrase is invalid"
+        )));
+    }
+
+    #[tokio::test]
+    async fn reconnect_wait_discards_terminal_and_forward_requests() {
+        let (command_tx, mut commands) = mpsc::channel(4);
+        let (forward_tx, mut forward_commands) = mpsc::channel(4);
+        let (cancel_tx, mut cancellation) = watch::channel(false);
+        command_tx
+            .send(TerminalRequest::Paste("stale command".to_owned()))
+            .await
+            .unwrap();
+        forward_tx
+            .send(crate::forward::ForwardCommand::Remove(1))
+            .await
+            .unwrap();
+
+        let wait = wait_before_reconnect(
+            Duration::from_secs(10),
+            &mut commands,
+            &mut forward_commands,
+            &mut cancellation,
+        );
+        let cancel = async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = cancel_tx.send(true);
+        };
+        let (was_cancelled, ()) = tokio::join!(wait, cancel);
+
+        assert!(was_cancelled);
+        assert!(commands.try_recv().is_err());
+        assert!(forward_commands.try_recv().is_err());
+    }
 
     fn forward_test_channels() -> (
         mpsc::Receiver<ForwardCommand>,
@@ -2739,6 +3011,17 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_does_not_retry_a_changed_known_host_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("known_hosts");
+        std::fs::write(&path, format!("[localhost]:13265 {KEY_A}\n")).unwrap();
+        let changed_key = PublicKey::from_openssh(KEY_B).unwrap();
+
+        let error = is_known_host_key("localhost", 13265, &changed_key, &path).unwrap_err();
+        assert!(!is_retryable_reconnect_error(&error));
+    }
+
+    #[test]
     fn keyboard_interactive_prompts_choose_between_password_and_ui() {
         let prompt = |text: &str, echo| Prompt {
             prompt: text.to_owned(),
@@ -2805,6 +3088,7 @@ mod tests {
             },
             jump: None,
             keepalive_seconds: 0,
+            reconnect: ReconnectSettings::default(),
             theme: TerminalTheme::Default,
             cursor_style: CursorStyle::Block,
         };
@@ -2893,6 +3177,7 @@ mod tests {
                     },
                     jump: None,
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -2931,7 +3216,7 @@ mod tests {
                             UiEvent::ConnectionInfo(info) => connection_info = Some(info),
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     let info = connection_info
@@ -3033,7 +3318,7 @@ mod tests {
                             UiEvent::Disconnected => {
                                 bail!("SSH disconnected during terminal search")
                             }
-                            UiEvent::Status(_)
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::ConnectionInfo(_)
@@ -3223,7 +3508,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -3282,6 +3567,7 @@ mod tests {
                     },
                     jump: None,
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -3313,6 +3599,7 @@ mod tests {
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3333,6 +3620,7 @@ mod tests {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3403,6 +3691,7 @@ mod tests {
                     },
                     jump: None,
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -3431,6 +3720,7 @@ mod tests {
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3454,6 +3744,7 @@ mod tests {
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected while logging"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3487,6 +3778,7 @@ mod tests {
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected while logging"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3526,6 +3818,7 @@ mod tests {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3599,6 +3892,7 @@ mod tests {
                         authentication: Authentication::Password(Zeroizing::new(password)),
                     }),
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -3627,6 +3921,7 @@ mod tests {
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3659,6 +3954,7 @@ mod tests {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3730,6 +4026,7 @@ mod tests {
                     },
                     jump: None,
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -3758,6 +4055,7 @@ mod tests {
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3778,6 +4076,7 @@ mod tests {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3853,6 +4152,7 @@ mod tests {
                 },
                 jump: None,
                 keepalive_seconds: 0,
+                reconnect: ReconnectSettings::default(),
                 theme: TerminalTheme::Default,
                 cursor_style: CursorStyle::Block,
             };
@@ -3927,6 +4227,7 @@ mod tests {
                     },
                     jump: None,
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -3958,6 +4259,7 @@ mod tests {
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -3978,6 +4280,7 @@ mod tests {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
                             UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
                             | UiEvent::LogState(_)
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
@@ -4070,6 +4373,7 @@ mod tests {
                     },
                     jump: None,
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -4097,7 +4401,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -4514,7 +4818,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -4580,6 +4884,7 @@ mod tests {
                     },
                     jump: None,
                     keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
                     cursor_style: CursorStyle::Block,
                 };
@@ -4607,7 +4912,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -4722,7 +5027,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -4860,6 +5165,7 @@ mod tests {
                     bail!("SSH disconnected while waiting for terminal output")
                 }
                 UiEvent::Status(_)
+                | UiEvent::Reconnecting { .. }
                 | UiEvent::LogState(_)
                 | UiEvent::AuthPrompt { .. }
                 | UiEvent::SearchResult(_)

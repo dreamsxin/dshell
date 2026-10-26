@@ -107,6 +107,47 @@ pub fn button(
     }
 }
 
+pub fn toggle_switch(
+    tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+) -> Stateful<Div> {
+    let track = div()
+        .flex()
+        .items_center()
+        .w(px(tokens::SWITCH_WIDTH))
+        .h(px(tokens::SWITCH_HEIGHT))
+        .px(px(tokens::SWITCH_INSET))
+        .rounded(px(tokens::RADIUS_PILL))
+        .bg(if checked {
+            tokens.accent
+        } else {
+            tokens.border_strong
+        })
+        .child(
+            div()
+                .size(px(tokens::SWITCH_THUMB_SIZE))
+                .rounded(px(tokens::RADIUS_PILL))
+                .bg(tokens.surface),
+        );
+    let track = if checked {
+        track.justify_end()
+    } else {
+        track.justify_start()
+    };
+
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(tokens::SPACE_3))
+        .text_size(px(tokens::FONT_BODY))
+        .text_color(tokens.text_primary)
+        .child(track)
+        .child(label.into())
+}
+
 /// Square icon-only button used by the shell and toolbars.
 pub fn icon_button(
     _tokens: &ThemeTokens,

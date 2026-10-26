@@ -9,13 +9,16 @@ use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
 use crate::forward::ForwardRuleSpec;
 
-const DOCUMENT_VERSION: u8 = 5;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 5] = [1, 2, 3, 4, 5];
-const EXPORT_DOCUMENT_VERSION: u8 = 1;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 1] = [EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 6;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 6] = [1, 2, 3, 4, 5, 6];
+const EXPORT_DOCUMENT_VERSION: u8 = 2;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 2] = [1, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 const MAX_RECENT_DIRECTORY_BYTES: usize = 4096;
+pub const MIN_RECONNECT_INTERVAL_SECONDS: u16 = 1;
+pub const MAX_RECONNECT_INTERVAL_SECONDS: u16 = 300;
+pub const MAX_RECONNECT_ATTEMPTS: u8 = 20;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,6 +58,53 @@ impl AuthMethod {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReconnectSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_reconnect_interval")]
+    pub interval_seconds: u16,
+    #[serde(default = "default_reconnect_attempts")]
+    pub max_attempts: u8,
+}
+
+impl Default for ReconnectSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: default_reconnect_interval(),
+            max_attempts: default_reconnect_attempts(),
+        }
+    }
+}
+
+impl ReconnectSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(MIN_RECONNECT_INTERVAL_SECONDS..=MAX_RECONNECT_INTERVAL_SECONDS)
+            .contains(&self.interval_seconds)
+        {
+            return Err(format!(
+                "Reconnect interval must be between {MIN_RECONNECT_INTERVAL_SECONDS} and {MAX_RECONNECT_INTERVAL_SECONDS} seconds."
+            ));
+        }
+        if !(1..=MAX_RECONNECT_ATTEMPTS).contains(&self.max_attempts) {
+            return Err(format!(
+                "Reconnect attempts must be between 1 and {MAX_RECONNECT_ATTEMPTS}."
+            ));
+        }
+        Ok(())
+    }
+}
+
+const fn default_reconnect_interval() -> u16 {
+    5
+}
+
+const fn default_reconnect_attempts() -> u8 {
+    5
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostProfile {
     pub name: String,
     pub host: String,
@@ -74,6 +124,8 @@ pub struct HostProfile {
     pub forwards: Vec<ForwardRuleSpec>,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub keepalive_seconds: u16,
+    #[serde(default)]
+    pub reconnect: ReconnectSettings,
     #[serde(
         default,
         skip_serializing,
@@ -375,6 +427,10 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
                 profile.name
             ));
         }
+        profile
+            .reconnect
+            .validate()
+            .map_err(|error| format!("Host profile {}: {error}", profile.name))?;
         validate_forward_rules(profile)?;
     }
     Ok(())
@@ -421,6 +477,7 @@ mod tests {
             proxy_jump: String::new(),
             forwards: Vec::new(),
             keepalive_seconds: 0,
+            reconnect: ReconnectSettings::default(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -599,6 +656,7 @@ mod tests {
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
+                reconnect: ReconnectSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -659,6 +717,47 @@ mod tests {
             ..recent("prod.example.com", 22)
         };
         assert!(validate_recent(&[oversized]).is_err());
+    }
+
+    #[test]
+    fn version_five_profiles_migrate_with_auto_reconnect_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 5,
+                "profiles": [{
+                    "name": "prod",
+                    "host": "prod.example.com",
+                    "port": 22,
+                    "username": "deploy"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let store = ProfileStore::at(path);
+
+        let data = store.load().unwrap();
+        assert_eq!(data.profiles[0].reconnect, ReconnectSettings::default());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+    }
+
+    #[test]
+    fn reconnect_settings_enforce_interval_and_attempt_bounds() {
+        let mut settings = ReconnectSettings::default();
+        settings.enabled = true;
+        assert!(settings.validate().is_ok());
+
+        settings.interval_seconds = MIN_RECONNECT_INTERVAL_SECONDS - 1;
+        assert!(settings.validate().is_err());
+        settings.interval_seconds = MAX_RECONNECT_INTERVAL_SECONDS + 1;
+        assert!(settings.validate().is_err());
+        settings.interval_seconds = default_reconnect_interval();
+        settings.max_attempts = MAX_RECONNECT_ATTEMPTS + 1;
+        assert!(settings.validate().is_err());
     }
 
     #[test]

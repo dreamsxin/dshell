@@ -224,6 +224,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Unavailable" => "不可用",
         "Connect to the server before refreshing metrics." => "请先连接服务器，再刷新指标。",
         "The SSH session is not accepting requests." => "SSH 会话当前不接受请求。",
+        "SSH session is not accepting requests." => "SSH 会话当前不接受请求。",
+        "SSH session is not accepting input" => "SSH 会话当前不接受输入。",
         "The SSH request queue is full." => "SSH 请求队列已满。",
         "Timed out waiting for server metrics." => "等待服务器指标超时。",
         "Connect to the server before refreshing processes." => "请先连接服务器，再刷新进程。",
@@ -350,6 +352,12 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
             "正在检查主机密钥并连接到 {host}:{port}{route}……"
         }
         "Connecting..." => "连接中……",
+        "Connection lost. Reconnecting in {seconds}s (attempt {attempt} of {max}). A new remote shell will start." => {
+            "连接已中断，将在 {seconds} 秒后重连（第 {attempt}/{max} 次）。重连后会启动新的远程 Shell。"
+        }
+        "Connection interrupted. Reconnecting in {delay_seconds}s (attempt {attempt} of {max_attempts}). A new remote shell will start; the previous shell and remote processes cannot be resumed." => {
+            "连接已中断，将在 {delay_seconds} 秒后重连（第 {attempt}/{max_attempts} 次）；重连会启动新的远程 Shell，无法恢复之前的 Shell 和远程进程。"
+        }
         "Connected, but recent connections could not be saved: {error}" => {
             "连接成功，但无法保存最近连接：{error}"
         }
@@ -361,6 +369,10 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Authentication template {name} was not found." => "未找到认证模板{name}。",
         "Enter a template name." => "请输入模板名称。",
         "Keep-alive must be a whole number of seconds." => "保活必须是整数秒数。",
+        "Reconnect interval must be between 1 and 300 seconds." => {
+            "重连间隔必须在 1 到 300 秒之间。"
+        }
+        "Reconnect attempts must be between 1 and 20." => "重连次数必须在 1 到 20 次之间。",
         "Authentication profile storage is unavailable." => "认证资料存储不可用。",
         "Could not save the authentication template." => "无法保存认证模板。",
         "Saved authentication template {name}." => "已保存认证模板{name}。",
@@ -373,6 +385,9 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Not favorite" => "未收藏",
         "Jump host" => "跳板机",
         "Keep-alive (seconds, 0 = off)" => "保活（秒，0 = 关闭）",
+        "Reconnect after connection loss" => "连接中断后自动重连",
+        "Retry interval (seconds)" => "重试间隔（秒）",
+        "Maximum attempts" => "最大重试次数",
         "Protocol" => "协议",
         "Username" => "用户名",
         "Authentication method" => "认证方式",
@@ -659,6 +674,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Disconnected" => "未连接",
         "Connecting" => "连接中",
         "Connected" => "已连接",
+        "Reconnecting" => "正在重新连接",
+        "Reconnecting..." => "正在重新连接……",
         "Disconnecting" => "断开中",
         "Disconnect" => "断开连接",
         "Copy selection" => "复制选中内容",
@@ -863,6 +880,17 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Disconnect"),
             "断开连接"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Reconnecting"),
+            "正在重新连接"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Reconnect after connection loss"
+            ),
+            "连接中断后自动重连"
         );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Production"),

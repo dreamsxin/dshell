@@ -2,6 +2,32 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.34] - 2026-10-26
+
+Adds per-host automatic reconnect for interrupted SSH sessions.
+
+### Added
+
+- Add disabled-by-default reconnect settings with a 1–300 second interval and
+  up to 20 attempts, including migration for saved host profiles.
+- Retry transport failures after an established connection, while rechecking
+  the user's existing OpenSSH `known_hosts` file on every attempt. Authentication
+  and host-key failures stop without retrying.
+- Reject and discard terminal, SFTP and forwarding requests during reconnect;
+  start a new remote shell, restore saved forwarding rules and refresh the
+  remembered SFTP directory after reconnection.
+- Add Simplified Chinese labels and reconnect status messages.
+
+### Verification
+
+- Verification date: 2026-10-26 (Windows/MSVC).
+- `cargo fmt --all` and `scripts\verify-hard-constraints.ps1` passed (165
+  passed, 9 Docker-only tests ignored).
+- `cargo test --locked --offline` passed (165 passed, 9 ignored).
+- `scripts\test-docker-ssh.ps1` passed all 9 SSH/SFTP integration tests.
+- Isolated Windows GUI and manual disconnect/reconnect checks remain outstanding;
+  the GUI was not launched on the user's active desktop.
+
 ## [0.1.33] - 2026-10-26
 
 Remembers SFTP directories for recent connections.
