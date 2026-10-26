@@ -17,6 +17,8 @@ All notable changes to dshell are documented here.
   older profiles continue to follow the application theme by default.
 - Let saved sessions use a custom RGB hex color for their tab accent, with
   versioned profile/export support and Simplified Chinese UI text.
+- Filter active session tabs by saved host group, including nested groups and
+  ungrouped sessions, with visible counts and selection-safe split behavior.
 
 ## [0.1.42] - 2026-10-27
 

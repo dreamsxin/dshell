@@ -1754,6 +1754,79 @@ fn matching_saved_profile_for_session<'a>(
     })
 }
 
+fn session_tab_group_path<'a>(session: &SshSession, profiles: &'a [HostProfile]) -> &'a str {
+    matching_saved_profile_for_session(session, profiles).map_or("", |profile| profile.group.trim())
+}
+
+fn session_matches_tab_group(session_group: &str, filter_group: &str) -> bool {
+    if filter_group.is_empty() {
+        session_group.trim().is_empty()
+    } else {
+        !session_group.trim().is_empty() && is_group_within(session_group, filter_group)
+    }
+}
+
+fn session_matches_tab_group_selection(session_group: &str, filter_group: Option<&str>) -> bool {
+    filter_group.is_none_or(|filter_group| session_matches_tab_group(session_group, filter_group))
+}
+
+fn session_tab_group_filter_after_selection(
+    current_filter: Option<&str>,
+    selected_group: &str,
+) -> Option<String> {
+    current_filter
+        .filter(|filter_group| !session_matches_tab_group(selected_group, filter_group))
+        .map(|_| selected_group.to_owned())
+}
+
+fn session_ids_in_tab_group(
+    sessions: &[SshSession],
+    profiles: &[HostProfile],
+    filter_group: Option<&str>,
+) -> Vec<u64> {
+    sessions
+        .iter()
+        .filter(|session| {
+            session_matches_tab_group_selection(
+                session_tab_group_path(session, profiles),
+                filter_group,
+            )
+        })
+        .map(|session| session.id)
+        .collect()
+}
+
+fn session_tab_group_choices(
+    group_paths: impl IntoIterator<Item = String>,
+) -> Vec<(String, usize)> {
+    let mut groups = BTreeMap::<String, (String, usize)>::new();
+    for path in group_paths {
+        let path = path.trim();
+        if path.is_empty() {
+            groups
+                .entry(String::new())
+                .or_insert_with(|| (String::new(), 0))
+                .1 += 1;
+            continue;
+        }
+        for ancestor in group_ancestors(path) {
+            groups
+                .entry(group_key(&ancestor))
+                .or_insert_with(|| (ancestor, 0))
+                .1 += 1;
+        }
+    }
+    let mut choices = groups.into_values().collect::<Vec<_>>();
+    choices.sort_by(
+        |(left, _), (right, _)| match (left.is_empty(), right.is_empty()) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => group_key(left).cmp(&group_key(right)),
+        },
+    );
+    choices
+}
+
 fn profile_tab_title(profile: &HostProfile) -> &str {
     let label = profile.tab_label.trim();
     if label.is_empty() {
@@ -1855,11 +1928,12 @@ mod session_tests {
         remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
         reorder_group_order, reorder_session_ids, saved_profile_for_session, search_result_message,
         server_alert_observations, session_accepts_requests, session_editor_escape,
-        session_editor_key, session_matches_target, session_switcher_matches_ids,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_group_target_ids,
-        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
-        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
-        watch,
+        session_editor_key, session_matches_tab_group, session_matches_tab_group_selection,
+        session_matches_target, session_switcher_matches_ids, session_tab_group_choices,
+        session_tab_group_filter_after_selection, session_terminal_size_for_split,
+        split_panel_terminal_size, synchronized_group_target_ids, synchronized_input_targets,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
+        unique_duplicate_session_title, update_sessions_for_profile, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -2441,6 +2515,60 @@ mod session_tests {
         assert_eq!(
             recent_sftp_directories_for_target(&recent, "server.example.com", 2222, "operator"),
             (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn tab_group_filters_match_nested_paths_and_respect_segment_boundaries() {
+        assert!(session_matches_tab_group("Production/West", "production"));
+        assert!(session_matches_tab_group("Production", "Production"));
+        assert!(!session_matches_tab_group("Production2/West", "Production"));
+        assert!(!session_matches_tab_group(
+            "Production/West",
+            "Production/North"
+        ));
+        assert!(session_matches_tab_group_selection("Production/West", None));
+        assert!(session_matches_tab_group_selection("", Some("")));
+        assert!(!session_matches_tab_group_selection("Production", Some("")));
+    }
+
+    #[test]
+    fn tab_group_choices_count_nested_sessions_and_ungrouped_sessions() {
+        let choices = session_tab_group_choices([
+            "Production/West".to_owned(),
+            "Production/East".to_owned(),
+            "Production/West".to_owned(),
+            String::new(),
+            "Production2/West".to_owned(),
+        ]);
+        let count = |path: &str| {
+            choices
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .map(|(_, count)| *count)
+        };
+
+        assert_eq!(count("Production"), Some(3));
+        assert_eq!(count("Production/West"), Some(2));
+        assert_eq!(count("Production/East"), Some(1));
+        assert_eq!(count("Production2"), Some(1));
+        assert_eq!(count(""), Some(1));
+    }
+
+    #[test]
+    fn selecting_a_hidden_session_switches_the_active_group_filter() {
+        assert_eq!(
+            session_tab_group_filter_after_selection(Some("Production"), "production/West"),
+            None
+        );
+        assert_eq!(
+            session_tab_group_filter_after_selection(Some("Production/West"), "QA"),
+            Some("QA".to_owned())
+        );
+        assert_eq!(session_tab_group_filter_after_selection(Some(""), ""), None);
+        assert_eq!(
+            session_tab_group_filter_after_selection(Some(""), "QA"),
+            Some("QA".to_owned())
         );
     }
 
@@ -3570,6 +3698,7 @@ struct AppView {
     sessions: Vec<SshSession>,
     active_session_id: Option<u64>,
     split: Option<SessionSplit>,
+    session_tab_group_filter: Option<String>,
     next_session_id: u64,
     pending_session_title_override: Option<String>,
     terminal_size: TerminalSize,
@@ -3682,6 +3811,7 @@ struct AppView {
     sync_visible: bool,
     menu_visible: bool,
     layout_menu_visible: bool,
+    session_tab_group_menu_visible: bool,
     tab_menu_session: Option<u64>,
     search_visible: bool,
     search_message: String,
@@ -3931,6 +4061,7 @@ impl AppView {
             sessions: Vec::new(),
             active_session_id: None,
             split: None,
+            session_tab_group_filter: None,
             next_session_id: 1,
             pending_session_title_override: None,
             terminal_size,
@@ -4043,6 +4174,7 @@ impl AppView {
             sync_visible: false,
             menu_visible: false,
             layout_menu_visible: false,
+            session_tab_group_menu_visible: false,
             tab_menu_session: None,
             search_visible: false,
             search_message: String::new(),
@@ -4259,6 +4391,137 @@ impl AppView {
             .iter()
             .find(|session| session_matches_target(session, host, port, username))
             .map(|session| session.id)
+    }
+
+    fn current_session_tab_group_choices(&self) -> Vec<(String, usize)> {
+        session_tab_group_choices(
+            self.sessions
+                .iter()
+                .map(|session| session_tab_group_path(session, &self.profiles).to_owned()),
+        )
+    }
+
+    fn session_matches_current_tab_group_filter(&self, session: &SshSession) -> bool {
+        session_matches_tab_group_selection(
+            session_tab_group_path(session, &self.profiles),
+            self.session_tab_group_filter.as_deref(),
+        )
+    }
+
+    fn reveal_session_tab_group(&mut self, session_id: u64) {
+        let Some(group) = self
+            .session(session_id)
+            .map(|session| session_tab_group_path(session, &self.profiles).to_owned())
+        else {
+            return;
+        };
+        if session_tab_group_filter_after_selection(
+            self.session_tab_group_filter.as_deref(),
+            &group,
+        )
+        .is_some()
+        {
+            self.session_tab_group_filter = Some(group);
+        }
+    }
+
+    fn reconcile_session_tab_group_state(&mut self, cx: &mut Context<Self>) {
+        let choices = self.current_session_tab_group_choices();
+        if self
+            .session_tab_group_filter
+            .as_deref()
+            .is_some_and(|filter| {
+                !choices
+                    .iter()
+                    .any(|(group, _)| group_key(group) == group_key(filter))
+            })
+        {
+            self.session_tab_group_filter = None;
+        }
+
+        let visible_ids = session_ids_in_tab_group(
+            &self.sessions,
+            &self.profiles,
+            self.session_tab_group_filter.as_deref(),
+        );
+        if !self
+            .active_session_id
+            .is_some_and(|active_id| visible_ids.contains(&active_id))
+        {
+            self.active_session_id = visible_ids.first().copied();
+        }
+        if let Some(SearchTarget::Session(search_id)) = self.search_target
+            && !visible_ids.contains(&search_id)
+        {
+            if let Some(active_id) = self.active_session_id {
+                self.search_target = Some(SearchTarget::Session(active_id));
+            } else {
+                self.search_visible = false;
+                self.search_target = None;
+                self.search_message.clear();
+            }
+        }
+
+        let split_is_hidden = self.split.is_some_and(|split| {
+            !visible_ids.contains(&split.first_session_id)
+                || !visible_ids.contains(&split.second_session_id)
+                || self
+                    .active_session_id
+                    .is_none_or(|active_id| !split.contains(active_id))
+        });
+        if split_is_hidden {
+            self.split = None;
+            self.terminal_bounds.borrow_mut().clear();
+            self.resize_sessions(cx);
+        }
+    }
+
+    fn toggle_session_tab_group_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_tab_group_menu_visible {
+            self.close_session_tab_group_menu(window, cx);
+            return;
+        }
+        if self.sessions.is_empty() {
+            return;
+        }
+        self.session_tab_group_menu_visible = true;
+        self.menu_visible = false;
+        self.layout_menu_visible = false;
+        self.tab_menu_session = None;
+        self.session_switcher_visible = false;
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn close_session_tab_group_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_tab_group_menu_visible {
+            self.session_tab_group_menu_visible = false;
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
+    fn set_session_tab_group_filter(
+        &mut self,
+        filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(filter) = filter.as_deref()
+            && !self
+                .current_session_tab_group_choices()
+                .iter()
+                .any(|(group, _)| group_key(group) == group_key(filter))
+        {
+            return;
+        }
+        self.session_tab_group_filter = filter;
+        self.session_tab_group_menu_visible = false;
+        self.overlay_focus_pending = false;
+        self.reconcile_session_tab_group_state(cx);
+        window.focus(&self.terminal_focus);
+        cx.notify();
     }
 
     fn saved_jump_profile(&self, name: &str) -> Option<&HostProfile> {
@@ -4540,7 +4803,14 @@ impl AppView {
         let Some(first_session_id) = self.active_session_id else {
             return;
         };
-        if first_session_id == second_session_id || self.session(second_session_id).is_none() {
+        if first_session_id == second_session_id
+            || self
+                .session(second_session_id)
+                .is_none_or(|session| !self.session_matches_current_tab_group_filter(session))
+            || self
+                .session(first_session_id)
+                .is_none_or(|session| !self.session_matches_current_tab_group_filter(session))
+        {
             return;
         }
         self.split = Some(SessionSplit {
@@ -5517,6 +5787,7 @@ impl AppView {
         match self.save_workspace(profiles.clone(), self.recent.clone()) {
             Ok(()) => {
                 self.profiles = profiles;
+                self.reconcile_session_tab_group_state(cx);
                 self.profile_message = if group.is_empty() {
                     self.tr("Moved {name} to Ungrouped.")
                         .replace("{name}", name)
@@ -5677,6 +5948,7 @@ impl AppView {
                     cx.notify();
                     return;
                 }
+                self.reconcile_session_tab_group_state(cx);
                 remap_group_list(&mut self.settings.group_names, &source, &name, false);
                 remap_group_list(&mut self.settings.group_order, &source, &name, true);
                 self.collapsed_groups = self
@@ -5723,6 +5995,7 @@ impl AppView {
             cx.notify();
             return;
         }
+        self.reconcile_session_tab_group_state(cx);
         self.settings
             .group_names
             .retain(|group| !is_group_within(group, &source));
@@ -6783,6 +7056,7 @@ impl AppView {
             session.profile_name = Some(profile.name.clone());
             session.launch_settings.terminal_theme = profile.terminal_theme;
         }
+        self.reconcile_session_tab_group_state(cx);
         self.profile_edit_session_id = None;
         for session in self.sessions.iter().filter(|session| {
             session
@@ -6831,6 +7105,7 @@ impl AppView {
             cx.notify();
             return;
         }
+        self.reconcile_session_tab_group_state(cx);
         if let Some(profile) = self
             .profiles
             .iter()
@@ -7189,6 +7464,7 @@ impl AppView {
                 self.split = None;
                 self.terminal_bounds.borrow_mut().clear();
                 self.active_session_id = Some(id);
+                self.reveal_session_tab_group(id);
                 self.session_editor_open = false;
                 self.credential_prompt_open = false;
                 self.credential_prompt_session_id = None;
@@ -7496,12 +7772,14 @@ impl AppView {
         if self.session(id).is_none() {
             return;
         }
+        self.reveal_session_tab_group(id);
         if self.split.is_some_and(|split| !split.contains(id)) {
             self.split = None;
             self.terminal_bounds.borrow_mut().clear();
             self.resize_sessions(cx);
         }
         self.active_session_id = Some(id);
+        self.reconcile_session_tab_group_state(cx);
         if matches!(self.search_target, Some(SearchTarget::Session(_))) {
             self.search_target = Some(SearchTarget::Session(id));
             self.search_message.clear();
@@ -7595,6 +7873,7 @@ impl AppView {
             self.split = None;
             self.terminal_bounds.borrow_mut().clear();
         }
+        self.reconcile_session_tab_group_state(cx);
         if self.active_session_id.is_none() {
             self.status = "Ready".to_owned();
         }
@@ -7994,6 +8273,7 @@ impl AppView {
         self.menu_visible = !self.menu_visible;
         if self.menu_visible {
             self.layout_menu_visible = false;
+            self.session_tab_group_menu_visible = false;
             self.tab_menu_session = None;
             self.request_overlay_focus();
         } else {
@@ -8016,6 +8296,7 @@ impl AppView {
         self.layout_menu_visible = !self.layout_menu_visible;
         if self.layout_menu_visible {
             self.menu_visible = false;
+            self.session_tab_group_menu_visible = false;
             self.tab_menu_session = None;
             self.request_overlay_focus();
         } else {
@@ -8041,6 +8322,7 @@ impl AppView {
         self.tab_menu_session = Some(session_id);
         self.menu_visible = false;
         self.layout_menu_visible = false;
+        self.session_tab_group_menu_visible = false;
         self.request_overlay_focus();
         cx.notify();
     }
@@ -8160,6 +8442,7 @@ impl AppView {
         self.session_switcher_scroll
             .scroll_to_item(self.session_switcher_selected);
         self.session_switcher_visible = true;
+        self.session_tab_group_menu_visible = false;
         self.session_switcher_search
             .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
@@ -8272,6 +8555,7 @@ impl AppView {
             let other = active.and_then(|active| {
                 self.sessions
                     .iter()
+                    .filter(|session| self.session_matches_current_tab_group_filter(session))
                     .map(|session| session.id)
                     .find(|id| *id != active)
             });
@@ -8312,6 +8596,7 @@ impl AppView {
         let Some(other) = self
             .sessions
             .iter()
+            .filter(|session| self.session_matches_current_tab_group_filter(session))
             .map(|session| session.id)
             .find(|id| *id != active)
         else {
@@ -16496,6 +16781,16 @@ impl AppView {
 
     fn session_tabs(&self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
         let preview_tokens = *tokens;
+        let visible_session_ids = session_ids_in_tab_group(
+            &self.sessions,
+            &self.profiles,
+            self.session_tab_group_filter.as_deref(),
+        );
+        let group_filter_label = match self.session_tab_group_filter.as_deref() {
+            None => self.tr("All groups"),
+            Some("") => self.tr("Ungrouped"),
+            Some(group) => group.to_owned(),
+        };
         let mut tabs = div()
             .id("session-tabs")
             .flex()
@@ -16504,7 +16799,11 @@ impl AppView {
             .min_w_0()
             .h_full()
             .overflow_x_scroll();
-        for session in &self.sessions {
+        for session in self
+            .sessions
+            .iter()
+            .filter(|session| visible_session_ids.contains(&session.id))
+        {
             let id = session.id;
             let selected = self.active_session_id == Some(id);
             let in_split = self.split.is_some_and(|split| split.contains(id));
@@ -16613,6 +16912,15 @@ impl AppView {
                     .px(px(ui_tokens::SPACE_3))
                     .child(components::help_text(tokens, self.tr("No active sessions"))),
             );
+        } else if visible_session_ids.is_empty() {
+            tabs = tabs.child(
+                div()
+                    .px(px(ui_tokens::SPACE_3))
+                    .child(components::help_text(
+                        tokens,
+                        self.tr("No tabs in this group"),
+                    )),
+            );
         }
 
         let mut right = div()
@@ -16621,6 +16929,39 @@ impl AppView {
             .gap(px(ui_tokens::SPACE_1))
             .px(px(ui_tokens::SPACE_2))
             .flex_shrink_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .min_w_0()
+                    .child(
+                        components::icon_button(
+                            tokens,
+                            "session-tab-group-filter",
+                            IconName::FolderOpen,
+                            if self.session_tab_group_filter.is_some() {
+                                ButtonKind::Secondary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            ButtonSize::Small,
+                            self.tr("Filter tabs by host group"),
+                        )
+                        .disabled(self.sessions.is_empty())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_session_tab_group_menu(window, cx);
+                        })),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(ui_tokens::QUICK_COMMAND_WIDTH))
+                            .overflow_hidden()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .text_color(tokens.text_secondary)
+                            .child(group_filter_label),
+                    ),
+            )
             .child(
                 components::icon_button(
                     tokens,
@@ -17873,6 +18214,143 @@ impl AppView {
                                 self.tr("Use Up/Down to navigate, Enter to switch, Esc to close"),
                             )),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn session_tab_group_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let choices = self.current_session_tab_group_choices();
+        let mut options = div()
+            .id("session-tab-group-options")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .max_h(px(ui_tokens::MENU_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .p(px(ui_tokens::SPACE_2));
+        let all_label = format!("{} ({})", self.tr("All groups"), self.sessions.len());
+        options = options.child(
+            menu_item(
+                tokens,
+                "session-tab-group-all",
+                IconName::FolderOpen,
+                all_label,
+                "",
+                self.session_tab_group_filter.is_none(),
+                true,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_session_tab_group_filter(None, window, cx);
+            })),
+        );
+
+        if let Some((_, count)) = choices.iter().find(|(group, _)| group.is_empty()) {
+            let label = format!("{} ({count})", self.tr("Ungrouped"));
+            options = options.child(
+                menu_item(
+                    tokens,
+                    "session-tab-group-ungrouped",
+                    IconName::Folder,
+                    label,
+                    "",
+                    self.session_tab_group_filter.as_deref() == Some(""),
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_session_tab_group_filter(Some(String::new()), window, cx);
+                })),
+            );
+        }
+
+        for (index, (group, count)) in choices
+            .into_iter()
+            .filter(|(group, _)| !group.is_empty())
+            .enumerate()
+        {
+            let active = self
+                .session_tab_group_filter
+                .as_deref()
+                .is_some_and(|filter| group_key(filter) == group_key(&group));
+            let label = format!("{group} ({count})");
+            let selected_group = group.clone();
+            options = options.child(
+                menu_item(
+                    tokens,
+                    ("session-tab-group", index),
+                    IconName::Folder,
+                    label,
+                    "",
+                    active,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_session_tab_group_filter(Some(selected_group.clone()), window, cx);
+                })),
+            );
+        }
+
+        let menu = div()
+            .id("session-tab-group-filter-menu")
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .flex()
+            .flex_col()
+            .w(px(ui_tokens::MENU_WIDTH))
+            .max_h(px(ui_tokens::MENU_MAX_HEIGHT))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .rounded(px(ui_tokens::RADIUS_PANEL))
+            .shadow_lg()
+            .bg(tokens.surface_overlay)
+            .text_color(tokens.text_primary)
+            .child(
+                components::panel_header(tokens, self.tr("Filter session tabs")).child(
+                    components::icon_button(
+                        tokens,
+                        "session-tab-group-filter-close",
+                        IconName::Close,
+                        ButtonKind::Ghost,
+                        ButtonSize::Small,
+                        self.tr("Close tab group filter"),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_session_tab_group_menu(window, cx);
+                    })),
+                ),
+            )
+            .child(options);
+
+        div()
+            .id("session-tab-group-filter-overlay")
+            .absolute()
+            .size_full()
+            .occlude()
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_session_tab_group_menu(window, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_session_tab_group_menu(window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(ui_tokens::COMMAND_BAR_HEIGHT + ui_tokens::TAB_BAR_HEIGHT))
+                    .right(px(ui_tokens::SPACE_2))
+                    .child(menu),
             )
             .into_any_element()
     }
@@ -20877,6 +21355,9 @@ impl Render for AppView {
         }
         if self.menu_visible {
             root = root.child(self.main_menu_overlay(&tokens, cx));
+        }
+        if self.session_tab_group_menu_visible {
+            root = root.child(self.session_tab_group_overlay(&tokens, cx));
         }
         if self.layout_menu_visible {
             root = root.child(self.layout_menu_overlay(&tokens, cx));

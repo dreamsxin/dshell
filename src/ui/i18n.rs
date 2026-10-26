@@ -833,6 +833,11 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Optional passphrase" => "可选口令",
         "Production" => "生产环境",
         "Ungrouped" => "未分组",
+        "All groups" => "所有分组",
+        "Filter tabs by host group" => "按主机分组筛选标签",
+        "Filter session tabs" => "筛选会话标签",
+        "Close tab group filter" => "关闭标签分组筛选",
+        "No tabs in this group" => "此分组中没有活动标签",
         "Saved jump host name" => "已保存的跳板机名称",
         "Leave empty for a direct connection." => "直接连接时留空。",
         "Snippet name" => "片段名称",
@@ -1416,6 +1421,19 @@ mod tests {
                 "Visible terminal screens only; scrollback is excluded.",
                 "仅比较当前可见终端画面，不包含滚动历史。",
             ),
+        ] {
+            assert_eq!(translate(Language::SimplifiedChinese, key), expected);
+        }
+    }
+
+    #[test]
+    fn simplified_chinese_translates_session_tab_group_filter() {
+        for (key, expected) in [
+            ("All groups", "所有分组"),
+            ("Filter tabs by host group", "按主机分组筛选标签"),
+            ("Filter session tabs", "筛选会话标签"),
+            ("Close tab group filter", "关闭标签分组筛选"),
+            ("No tabs in this group", "此分组中没有活动标签"),
         ] {
             assert_eq!(translate(Language::SimplifiedChinese, key), expected);
         }

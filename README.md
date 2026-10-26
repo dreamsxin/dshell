@@ -37,6 +37,10 @@ in-memory cache only after successful authentication.
 Saved sessions can use a custom tab title, one of eight theme-aware colors, or
 a custom `#RRGGBB` accent; an empty title keeps the session name. Their terminal
 color scheme can follow the application setting or use a per-session palette.
+Use the folder control in the tab bar to filter active sessions by saved host
+group. Parent groups include nested groups, and each option shows its session
+count. Selecting a session from another group in the session switcher reveals
+that group; a split is cleared when filtering would hide one of its sessions.
 SFTP remembers the latest local folder and remote directory per host, port, and
 user. New connections
 restore the remote directory, and downloads reuse the remembered local folder.
