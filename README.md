@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.34`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.35`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -157,7 +157,10 @@ supports the OpenSSH `statvfs` extension. For each recent host and user,
 dshell remembers the last remote directory and local folder. The remote
 directory is restored on reconnect, and downloads reuse the remembered local
 folder; use the folder icon to change it. Uploads continue to use the native
-file picker.
+file picker, or drag files and folders from Windows Explorer onto the SFTP
+panel. Dragged items use the same per-session transfer queue; only regular
+files and directories are accepted, while symbolic links and special files are
+rejected.
 
 Use the `Tunnels` button to manage port forwarding for the active session.
 Local forwards listen on this machine and connect through the SSH server;

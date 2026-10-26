@@ -634,6 +634,23 @@ fn valid_remote_entry_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalUploadKind {
+    File,
+    Directory,
+}
+
+fn local_upload_kind(path: &Path) -> std::io::Result<Option<LocalUploadKind>> {
+    let file_type = std::fs::symlink_metadata(path)?.file_type();
+    Ok(if file_type.is_file() {
+        Some(LocalUploadKind::File)
+    } else if file_type.is_dir() {
+        Some(LocalUploadKind::Directory)
+    } else {
+        None
+    })
+}
+
 fn format_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -1452,20 +1469,21 @@ fn remove_session(
 mod session_tests {
     use super::{
         AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, LayoutDragTarget,
-        MouseTrackingMode, SessionEditorEscape, SessionEditorKey, SessionSplit, SessionState,
-        SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest, TerminalSize,
-        UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
-        enqueue_session_request, filesystem_usage_percent, forget_stopped_forward,
-        format_alert_time, format_log_time, format_rate, format_storage_kib,
-        is_authentication_failure, is_sftp_transfer_command, keyword_matches, mark_sftp_ready,
-        memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
-        parse_alert_percent, recall_compose_history, recent_sftp_directories_for_target,
-        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
-        rename_profile_group, reorder_group_order, reorder_session_ids, saved_profile_for_session,
-        search_result_message, server_alert_observations, session_accepts_requests,
-        session_editor_escape, session_editor_key, session_matches_target,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
-        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title, watch,
+        LocalUploadKind, MouseTrackingMode, SessionEditorEscape, SessionEditorKey, SessionSplit,
+        SessionState, SftpViewState, SplitOrientation, SshSession, TerminalFrame, TerminalRequest,
+        TerminalSize, UiEvent, app_shortcut, apply_session_event, collapsed_group_key,
+        dragged_panel_width, enqueue_session_request, filesystem_usage_percent,
+        forget_stopped_forward, format_alert_time, format_log_time, format_rate,
+        format_storage_kib, is_authentication_failure, is_sftp_transfer_command, keyword_matches,
+        local_upload_kind, mark_sftp_ready, memory_usage_percent, merge_unique_profiles,
+        move_profile_to_group, mpsc, parse_alert_percent, recall_compose_history,
+        recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
+        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
+        reorder_session_ids, saved_profile_for_session, search_result_message,
+        server_alert_observations, session_accepts_requests, session_editor_escape,
+        session_editor_key, session_matches_target, session_terminal_size_for_split,
+        split_panel_terminal_size, synchronized_targets, take_next_sftp_transfer,
+        terminal_size_for_viewport, unique_duplicate_session_title, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1522,6 +1540,37 @@ mod session_tests {
             command_rx,
             cancel_rx,
         )
+    }
+
+    #[test]
+    fn local_upload_kind_accepts_regular_files_and_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("upload.txt");
+        std::fs::write(&file, "payload").unwrap();
+        let child_directory = directory.path().join("folder");
+        std::fs::create_dir(&child_directory).unwrap();
+
+        assert_eq!(
+            local_upload_kind(&file).unwrap(),
+            Some(LocalUploadKind::File)
+        );
+        assert_eq!(
+            local_upload_kind(&child_directory).unwrap(),
+            Some(LocalUploadKind::Directory)
+        );
+        assert!(local_upload_kind(&directory.path().join("missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_upload_kind_rejects_symbolic_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("upload.txt");
+        std::fs::write(&file, "payload").unwrap();
+        let link = directory.path().join("linked.txt");
+        std::os::unix::fs::symlink(file, &link).unwrap();
+
+        assert_eq!(local_upload_kind(&link).unwrap(), None);
     }
 
     #[test]
@@ -8114,7 +8163,7 @@ impl AppView {
             Ok(Ok(Some(paths))) => {
                 let _ = this.update(cx, |view, cx| {
                     for local in paths {
-                        view.queue_upload(session_id, local, cx);
+                        view.queue_upload_path(session_id, local, cx);
                     }
                 });
             }
@@ -8129,6 +8178,25 @@ impl AppView {
             _ => {}
         })
         .detach();
+    }
+
+    fn queue_upload_path(&mut self, session_id: u64, local: PathBuf, cx: &mut Context<Self>) {
+        match local_upload_kind(&local) {
+            Ok(Some(LocalUploadKind::File)) => self.queue_upload(session_id, local, cx),
+            Ok(Some(LocalUploadKind::Directory)) => {
+                self.queue_upload_directory(session_id, local, cx)
+            }
+            Ok(None) => self.set_sftp_message(
+                session_id,
+                self.tr("Only files and folders can be uploaded."),
+                cx,
+            ),
+            Err(_) => self.set_sftp_message(
+                session_id,
+                self.tr("The selected upload path is unavailable."),
+                cx,
+            ),
+        }
     }
 
     fn queue_upload(&mut self, session_id: u64, local: PathBuf, cx: &mut Context<Self>) {
@@ -8249,7 +8317,7 @@ impl AppView {
             Ok(Ok(Some(mut paths))) => {
                 if let Some(local) = paths.pop() {
                     let _ = this.update(cx, |view, cx| {
-                        view.queue_upload_directory(session_id, local, cx);
+                        view.queue_upload_path(session_id, local, cx);
                     });
                 }
             }
@@ -8631,6 +8699,11 @@ impl AppView {
             .border_color(tokens.border_strong)
             .bg(tokens.surface_raised)
             .text_color(tokens.text_primary)
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                for path in paths.paths() {
+                    this.queue_upload_path(session_id, path.clone(), cx);
+                }
+            }))
             .child(
                 div()
                     .flex()
@@ -8692,6 +8765,14 @@ impl AppView {
                         })),
                     ),
             );
+        panel = panel.child(
+            div()
+                .px(px(ui_tokens::SPACE_2))
+                .py(px(ui_tokens::SPACE_1))
+                .text_size(px(ui_tokens::FONT_CAPTION))
+                .text_color(tokens.text_disabled)
+                .child(self.tr("Drop files or folders here to upload")),
+        );
         if let Some(info) = filesystem {
             let used_bytes = info.total_bytes.saturating_sub(info.available_bytes);
             let usage = filesystem_usage_percent(info.total_bytes, info.available_bytes);

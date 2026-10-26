@@ -2,6 +2,27 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.35] - 2026-10-26
+
+Adds drag-and-drop uploads to the SFTP panel.
+
+### Added
+
+- Accept files and folders dragged from Windows Explorer onto the active SFTP
+  panel and queue them using the existing per-session FIFO transfer queue.
+- Reject unavailable paths, symbolic links and special files before queuing;
+  file and folder picker uploads use the same validation.
+- Add English and Simplified Chinese drop-zone guidance and validation messages.
+
+### Verification
+
+- Verification date: 2026-10-26 (Windows/MSVC).
+- `cargo fmt --all` and `scripts\verify-hard-constraints.ps1` passed (166
+  passed, 9 Docker-only tests ignored).
+- `scripts\test-docker-ssh.ps1` passed all 9 SSH/SFTP integration tests.
+- Isolated Windows drag-and-drop, DPI, IME, glyph and screenshot checks remain
+  outstanding; the GUI was not launched on the user's active desktop.
+
 ## [0.1.34] - 2026-10-26
 
 Adds per-host automatic reconnect for interrupted SSH sessions.

@@ -509,6 +509,9 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Refresh" => "刷新",
         "Upload" => "上传",
         "Folder" => "文件夹",
+        "Drop files or folders here to upload" => "将文件或文件夹拖到此处上传",
+        "Only files and folders can be uploaded." => "只能上传普通文件和文件夹。",
+        "The selected upload path is unavailable." => "所选上传路径不可用。",
         "Download" => "下载",
         "Local folder" => "本地文件夹",
         "No local folder remembered." => "尚未记住本地文件夹。",
@@ -1024,6 +1027,27 @@ mod tests {
 
     #[test]
     fn simplified_chinese_covers_recent_panels_and_validation() {
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Drop files or folders here to upload"
+            ),
+            "将文件或文件夹拖到此处上传"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Only files and folders can be uploaded."
+            ),
+            "只能上传普通文件和文件夹。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "The selected upload path is unavailable."
+            ),
+            "所选上传路径不可用。"
+        );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Add tunnel"),
             "添加隧道"
