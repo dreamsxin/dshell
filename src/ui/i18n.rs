@@ -612,6 +612,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Transfers" => "传输",
         "Forwards" => "转发",
         "No connected sessions" => "没有已连接的会话",
+        "No connected sessions in saved groups" => "已保存分组中没有已连接的会话",
+        "Save hosts in a group to add them together." => "将主机保存到分组后即可批量添加。",
         "No entries" => "没有条目",
         "No forwarding rules" => "没有转发规则",
         "SFTP" => "SFTP",
@@ -918,11 +920,19 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Connect at least one session before enabling synchronized input." => {
             "请先连接至少一个会话，再启用同步输入。"
         }
+        "Choose a group to add its connected sessions, including subgroups." => {
+            "选择一个分组以添加其中及子分组的已连接会话。"
+        }
+        "Add connected sessions by saved group." => "按已保存的分组添加已连接会话。",
+        "Select sessions by group" => "按分组选择会话",
+        "Add group sessions" => "添加分组会话",
+        "1 connected session" => "1 个已连接会话",
+        "{count} connected sessions" => "{count} 个已连接会话",
         "Syncing" => "同步中",
         "Add" => "添加",
         "{count} target(s) selected" => "已选择 {count} 个目标",
-        "Keyboard, paste and compose are mirrored; mouse, scrolling and resize stay per-session." => {
-            "键盘、粘贴和命令编辑会镜像到目标会话；鼠标、滚动和尺寸调整仍按会话独立处理。"
+        "The active session is included; locking it suppresses all sends. Selected sessions receive keyboard, paste and compose; mouse, scrolling and resize stay per-session." => {
+            "同步目标包含活动会话；锁定活动会话会停止所有发送。所选会话会同步键盘、粘贴和命令编辑；鼠标、滚动和尺寸调整仍按会话独立处理。"
         }
         "Clear" => "清空",
         "Done" => "完成",
@@ -1255,6 +1265,17 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Synchronized input"),
             "同步输入"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Select sessions by group"),
+            "按分组选择会话"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "The active session is included; locking it suppresses all sends. Selected sessions receive keyboard, paste and compose; mouse, scrolling and resize stay per-session."
+            ),
+            "同步目标包含活动会话；锁定活动会话会停止所有发送。所选会话会同步键盘、粘贴和命令编辑；鼠标、滚动和尺寸调整仍按会话独立处理。"
         );
         assert_eq!(
             translate(

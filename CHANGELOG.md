@@ -9,6 +9,8 @@ All notable changes to dshell are documented here.
 - Add a searchable active-session switcher to locate sessions by title, user,
   host or port, show connection state, and switch with keyboard navigation.
 - Add the `Ctrl+Shift+P` shortcut and Simplified Chinese translations.
+- Add bulk synchronized-input target selection for connected sessions in a
+  saved host group and its subgroups.
 
 ## [0.1.42] - 2026-10-27
 

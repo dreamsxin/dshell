@@ -348,11 +348,13 @@ last 20 drafts are kept for the History button, and opening the pane does not
 clear the terminal selection.
 
 Use the `Sync` button in the command bar to choose connected sessions for
-synchronized input. While enabled, keyboard input, terminal paste and compose
-sends are mirrored to every selected session; mouse input, scrolling and PTY
-resize stay per-session. The status bar shows `Sync N`, and closing a session
-removes it from the target set. Snippet broadcast remains a separate, explicit
-action.
+synchronized input. Add sessions individually or use the group icon to add all
+connected sessions in a saved group and its subgroups. The active session is
+included along with the selected sessions; locking the active session suppresses
+all sends. Keyboard input, terminal paste and compose sends are mirrored, while
+mouse input, scrolling and PTY resize stay per-session. The status bar shows
+`Sync N`, and closing a session removes it from the target set. Snippet broadcast
+remains a separate, explicit action.
 
 The command bar uses flat icon actions with tooltips instead of text buttons.
 The ellipsis opens a grouped menu with icon, label and shortcut hints, plus a

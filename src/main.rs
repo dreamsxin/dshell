@@ -894,6 +894,22 @@ fn synchronized_input_targets(
     })
 }
 
+fn synchronized_group_target_ids(
+    sessions: &[SshSession],
+    profiles: &[HostProfile],
+    group: &str,
+) -> Vec<u64> {
+    sessions
+        .iter()
+        .filter(|session| session.state == SessionState::Connected)
+        .filter(|session| {
+            matching_saved_profile_for_session(session, profiles)
+                .is_some_and(|profile| is_group_within(&profile.group, group))
+        })
+        .map(|session| session.id)
+        .collect()
+}
+
 fn menu_item(
     tokens: &ThemeTokens,
     id: impl Into<ElementId>,
@@ -1828,9 +1844,10 @@ mod session_tests {
         reorder_session_ids, saved_profile_for_session, search_result_message,
         server_alert_observations, session_accepts_requests, session_editor_escape,
         session_editor_key, session_matches_target, session_switcher_matches_ids,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_input_targets,
-        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
-        unique_duplicate_session_title, update_sessions_for_profile, watch,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_group_target_ids,
+        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
+        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
+        watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -3227,6 +3244,61 @@ mod session_tests {
     }
 
     #[test]
+    fn synchronized_group_targets_include_nested_groups_and_only_live_saved_sessions() {
+        fn profile(name: &str, group: &str) -> HostProfile {
+            HostProfile {
+                name: name.to_owned(),
+                host: "127.0.0.1".to_owned(),
+                port: 22,
+                username: "test".to_owned(),
+                tab_label: String::new(),
+                tab_color: TabColor::Default,
+                group: group.to_owned(),
+                favorite: false,
+                auth_method: AuthMethod::Agent,
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                forwards: Vec::new(),
+                keepalive_seconds: 0,
+                reconnect: ReconnectSettings::default(),
+                login_commands: LoginCommandSettings::default(),
+                password: String::new(),
+                passphrase: String::new(),
+                jump_password: String::new(),
+                jump_passphrase: String::new(),
+            }
+        }
+
+        let profiles = vec![
+            profile("database", "Production/Databases/Primary"),
+            profile("web", "Production/Web"),
+            profile("other", "Production2/Databases"),
+            profile("staging", "Staging"),
+            profile("offline", "Production/Offline"),
+        ];
+        let mut database = test_session(1).0;
+        database.profile_name = Some("database".to_owned());
+        let mut web = test_session(2).0;
+        web.profile_name = Some("web".to_owned());
+        let mut other = test_session(3).0;
+        other.profile_name = Some("other".to_owned());
+        let mut offline = test_session(4).0;
+        offline.profile_name = Some("offline".to_owned());
+        offline.state = SessionState::Disconnected;
+        let temporary = test_session(5).0;
+        let sessions = vec![database, web, other, offline, temporary];
+
+        assert_eq!(
+            synchronized_group_target_ids(&sessions, &profiles, "production"),
+            vec![1, 2]
+        );
+        assert_eq!(
+            synchronized_group_target_ids(&sessions, &profiles, "Production/Databases"),
+            vec![1]
+        );
+    }
+
+    #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
         let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
@@ -3543,6 +3615,7 @@ struct AppView {
     compose_recall: usize,
     sync_input_enabled: bool,
     sync_targets: HashSet<u64>,
+    sync_group_picker_open: bool,
     sync_visible: bool,
     menu_visible: bool,
     layout_menu_visible: bool,
@@ -3898,6 +3971,7 @@ impl AppView {
             compose_recall: 0,
             sync_input_enabled: false,
             sync_targets: HashSet::new(),
+            sync_group_picker_open: false,
             sync_visible: false,
             menu_visible: false,
             layout_menu_visible: false,
@@ -7706,6 +7780,7 @@ impl AppView {
         if self.sync_visible {
             self.request_overlay_focus();
         } else {
+            self.sync_group_picker_open = false;
             self.overlay_focus_pending = false;
             window.focus(&self.terminal_focus);
         }
@@ -7733,6 +7808,23 @@ impl AppView {
     fn clear_sync_targets(&mut self, cx: &mut Context<Self>) {
         self.sync_targets.clear();
         self.sync_input_enabled = false;
+        self.sync_group_picker_open = false;
+        cx.notify();
+    }
+
+    fn toggle_sync_group_picker(&mut self, cx: &mut Context<Self>) {
+        self.sync_group_picker_open = !self.sync_group_picker_open;
+        cx.notify();
+    }
+
+    fn add_sync_group_targets(&mut self, group: &str, cx: &mut Context<Self>) {
+        let targets = synchronized_group_target_ids(&self.sessions, &self.profiles, group);
+        if targets.is_empty() {
+            return;
+        }
+        self.sync_targets.extend(targets);
+        self.sync_input_enabled = true;
+        self.sync_group_picker_open = false;
         cx.notify();
     }
 
@@ -16797,6 +16889,14 @@ impl AppView {
                 )
             })
             .collect::<Vec<_>>();
+        let groups = collect_group_paths(&[], &self.profiles)
+            .into_iter()
+            .filter_map(|group| {
+                let count =
+                    synchronized_group_target_ids(&self.sessions, &self.profiles, &group).len();
+                (count > 0).then_some((group, count))
+            })
+            .collect::<Vec<_>>();
         let sync_count = self.sync_target_count();
         let mut list = div()
             .id("sync-targets")
@@ -16807,7 +16907,72 @@ impl AppView {
             .min_h_0()
             .overflow_y_scroll()
             .p(px(ui_tokens::SPACE_4));
-        if connected.is_empty() {
+        if self.sync_group_picker_open {
+            if groups.is_empty() {
+                list = list.child(components::empty_state(
+                    tokens,
+                    self.tr("No connected sessions in saved groups"),
+                    self.tr("Save hosts in a group to add them together."),
+                ));
+            } else {
+                for (index, (group, count)) in groups.iter().enumerate() {
+                    let selected_group = group.clone();
+                    let count_text = if *count == 1 {
+                        self.tr("1 connected session")
+                    } else {
+                        self.tr("{count} connected sessions")
+                            .replace("{count}", &count.to_string())
+                    };
+                    list = list.child(
+                        div()
+                            .id(("sync-group-row", index))
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .p(px(ui_tokens::SPACE_2))
+                            .rounded(px(ui_tokens::RADIUS_CONTROL))
+                            .border_1()
+                            .border_color(tokens.border_subtle)
+                            .bg(tokens.surface)
+                            .child(
+                                Icon::new(IconName::Folder)
+                                    .with_size(Size::Small)
+                                    .text_color(tokens.text_secondary),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_BODY))
+                                            .text_color(tokens.text_primary)
+                                            .child(group.clone()),
+                                    )
+                                    .child(components::help_text(tokens, count_text)),
+                            )
+                            .child(
+                                components::icon_button(
+                                    tokens,
+                                    ("sync-group-add", index),
+                                    IconName::Plus,
+                                    ButtonKind::Secondary,
+                                    ButtonSize::Small,
+                                    self.tr("Add group sessions"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.add_sync_group_targets(&selected_group, cx);
+                                    },
+                                )),
+                            ),
+                    );
+                }
+            }
+        } else if connected.is_empty() {
             list = list.child(components::empty_state(
                 tokens,
                 self.tr("No connected sessions"),
@@ -16896,6 +17061,41 @@ impl AppView {
                             ),
                         ),
                     )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .px(px(ui_tokens::SPACE_4))
+                            .py(px(ui_tokens::SPACE_2))
+                            .child(components::help_text(
+                                tokens,
+                                self.tr(if self.sync_group_picker_open {
+                                    "Choose a group to add its connected sessions, including subgroups."
+                                } else {
+                                    "Add connected sessions by saved group."
+                                }),
+                            ))
+                            .child(
+                                components::icon_button(
+                                    tokens,
+                                    "sync-select-group",
+                                    IconName::FolderOpen,
+                                    if self.sync_group_picker_open {
+                                        ButtonKind::Secondary
+                                    } else {
+                                        ButtonKind::Ghost
+                                    },
+                                    ButtonSize::Small,
+                                    self.tr("Select sessions by group"),
+                                )
+                                .disabled(groups.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_sync_group_picker(cx);
+                                })),
+                            ),
+                    )
                     .child(list)
                     .child(
                         div()
@@ -16903,7 +17103,7 @@ impl AppView {
                             .pb(px(ui_tokens::SPACE_2))
                             .child(components::help_text(
                                 tokens,
-                                self.tr("Keyboard, paste and compose are mirrored; mouse, scrolling and resize stay per-session."),
+                                self.tr("The active session is included; locking it suppresses all sends. Selected sessions receive keyboard, paste and compose; mouse, scrolling and resize stay per-session."),
                             )),
                     )
                     .child(
