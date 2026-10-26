@@ -2,7 +2,11 @@
 
 ## 当前切片
 
-2026-10-27，Windows/MSVC：可共享的 Quick commands 支持按目标会话展开连接变量，版本提升至 `v0.1.40`。编辑器可在光标处插入 `{{host}}`、`{{port}}`、`{{user}}`；运行或广播时逐个目标展开，并按 POSIX shell 单引号规则引用值。未知/不完整占位符原样保留，口令等秘密不可用作变量；JSON 命令包格式不变。新增引用、未知 token、非递归替换测试。依据 G2 Xshell 用户评价对多会话、同步命令、复制会话和团队共享短命令的正面反馈，补齐跨目标可复用的命令模板能力。`cargo fmt --all` 与 `scripts\verify-hard-constraints.ps1` 通过（187 项通过、9 项 Docker 专项忽略）；`scripts\test-docker-ssh.ps1` 通过（9/9）。未在用户活动桌面启动 GUI；隔离截图、DPI/IME/字形与命令编辑器交互仍待人工验收。下一步：实现 Quick commands 分组，继续按用户评价筛选高频工作流。
+2026-10-27，Windows/MSVC：Quick commands 支持可选命令分组，面板按分组名称排序展示，未分组命令集中显示；编辑器可创建和修改分组。新配置和命令包使用 JSON v2，仍可读取 v1，旧命令没有分组时自动归入未分组。分组名限制为 48 个字符、需去除首尾空格且拒绝控制字符；新增分组排序、验证及 v1 兼容测试，并补充简体中文文案。该能力是根据 Xshell 用户称赞快捷命令选项多而作出的产品推导，不是评价者直接提出。`cargo fmt --all`、`scripts\verify-hard-constraints.ps1`、`cargo check --locked --all-targets` 与 `cargo test --locked` 通过（189 项通过、9 项 Docker 专项忽略）。Docker SSH 未运行，本切片没有改动 SSH/SFTP 路径。未在用户活动桌面启动 GUI；隔离截图、DPI/IME/字形及命令分组交互仍待人工验收。下一步：继续按公开评价筛选尚未覆盖的高频工作流，评估命令分组折叠和自定义排序。
+
+## 当前切片
+
+2026-10-27，Windows/MSVC：可共享的 Quick commands 支持按目标会话展开连接变量，版本提升至 `v0.1.40`。编辑器可在光标处插入 `{{host}}`、`{{port}}`、`{{user}}`；运行或广播时逐个目标展开，并按 POSIX shell 单引号规则引用值。未知/不完整占位符原样保留，口令等秘密不可用作变量；JSON 命令包格式不变。新增引用、未知 token、非递归替换测试。依据 G2 Xshell 用户评价对多会话、同步命令、复制会话和团队共享短命令的正面反馈，补齐跨目标可复用的命令模板能力。`cargo fmt --all` 与 `scripts\verify-hard-constraints.ps1` 通过（187 项通过、9 项 Docker 专项忽略）；`scripts\test-docker-ssh.ps1` 通过（9/9）。未在用户活动桌面启动 GUI；隔离截图、DPI/IME/字形与命令编辑器交互仍待人工验收。下一步：继续按公开评价筛选尚未覆盖的高频工作流，评估命令分组折叠和自定义排序。
 
 ## 当前切片
 

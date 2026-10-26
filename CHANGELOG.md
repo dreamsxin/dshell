@@ -2,6 +2,33 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.41] - 2026-10-27
+
+Organizes reusable quick commands into optional named groups.
+
+### Added
+
+- Assign a command to a group from the editor; group headings sort by name and
+  ungrouped commands remain available under `Ungrouped`.
+- Preserve groups in local storage and JSON command bundles. New documents use
+  version 2; version 1 files and bundles remain readable, with commands without
+  a group defaulting to ungrouped.
+- Validate group names for length, surrounding whitespace and control
+  characters. Added Simplified Chinese labels and validation text.
+
+### Verification
+
+- Verified 2026-10-27 on Windows/MSVC: `cargo fmt --all`,
+  `scripts\verify-hard-constraints.ps1`, `cargo check --locked --all-targets` and
+  `cargo test --locked` passed (189 tests passed, 9 Docker SSH tests ignored by
+  the standard suite). Docker SSH tests were not rerun because this change does
+  not touch SSH or SFTP paths.
+- The GUI was not launched on the user's active desktop. Isolated screenshots,
+  DPI/IME, glyph alignment and command-group interaction checks remain
+  outstanding.
+- Group headings are currently expanded and alphabetically ordered; collapse
+  and custom ordering remain future work.
+
 ## [0.1.40] - 2026-10-27
 
 Adds target-aware variables to reusable quick commands.

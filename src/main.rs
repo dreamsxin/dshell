@@ -3188,6 +3188,7 @@ struct AppView {
     snippets: Vec<CommandSnippet>,
     snippet_store: Option<SnippetStore>,
     snippet_name: Entity<InputState>,
+    snippet_group: Entity<InputState>,
     snippet_command: Entity<InputState>,
     snippet_send_enter: bool,
     editing_snippet: Option<String>,
@@ -3305,6 +3306,7 @@ impl AppView {
         let sftp_atime = cx.new(|cx| InputState::new(window, cx).placeholder("Unix seconds"));
         let sftp_mtime = cx.new(|cx| InputState::new(window, cx).placeholder("Unix seconds"));
         let snippet_name = cx.new(|cx| InputState::new(window, cx).placeholder("Snippet name"));
+        let snippet_group = cx.new(|cx| InputState::new(window, cx));
         let snippet_command = cx.new(|cx| InputState::new(window, cx).placeholder("uptime"));
         let keyword_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("ERROR or timeout"));
@@ -3531,6 +3533,7 @@ impl AppView {
             snippets,
             snippet_store,
             snippet_name,
+            snippet_group,
             snippet_command,
             snippet_send_enter: true,
             editing_snippet: None,
@@ -10717,6 +10720,7 @@ impl AppView {
 
     fn new_snippet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input_value(&self.snippet_name, "", window, cx);
+        Self::set_input_value(&self.snippet_group, "", window, cx);
         Self::set_input_value(&self.snippet_command, "", window, cx);
         self.snippet_send_enter = true;
         self.editing_snippet = None;
@@ -10731,6 +10735,7 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         Self::set_input_value(&self.snippet_name, &snippet.name, window, cx);
+        Self::set_input_value(&self.snippet_group, &snippet.group, window, cx);
         Self::set_input_value(&self.snippet_command, &snippet.command, window, cx);
         self.snippet_send_enter = snippet.send_enter;
         self.editing_snippet = Some(snippet.name.clone());
@@ -10740,9 +10745,15 @@ impl AppView {
 
     fn save_snippet(&mut self, cx: &mut Context<Self>) {
         let name = self.snippet_name.read(cx).value().trim().to_owned();
+        let group = self.snippet_group.read(cx).value().trim().to_owned();
         let command = self.snippet_command.read(cx).value().trim().to_owned();
         if name.is_empty() || command.is_empty() {
             self.snippet_message = self.tr("Snippet name and command are required.");
+            cx.notify();
+            return;
+        }
+        if let Err(error) = snippets::validate_group_name(&group) {
+            self.snippet_message = self.tr(error);
             cx.notify();
             return;
         }
@@ -10777,6 +10788,7 @@ impl AppView {
         }
         snippets.push(CommandSnippet {
             name: name.clone(),
+            group,
             command,
             send_enter: self.snippet_send_enter,
         });
@@ -12671,7 +12683,7 @@ impl AppView {
         let mut quick_grid = div()
             .id("quick-command-grid")
             .flex()
-            .flex_wrap()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .content_start()
@@ -12687,111 +12699,132 @@ impl AppView {
                 .w_full(),
             );
         }
-        for (index, snippet) in snippets.into_iter().enumerate() {
-            let load = snippet.clone();
-            let send = snippet.clone();
-            let delete_name = snippet.name.clone();
-            let editing = self
-                .editing_snippet
-                .as_ref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(&snippet.name));
-            let run_button = Button::new(("quick-command-run", index))
-                .w(px(ui_tokens::QUICK_COMMAND_WIDTH))
-                .h(px(ui_tokens::QUICK_COMMAND_HEIGHT))
-                .p(px(ui_tokens::SPACE_2))
-                .rounded(px(ui_tokens::RADIUS_CARD))
-                .border_1()
-                .border_color(if editing {
-                    tokens.accent
-                } else {
-                    tokens.border_subtle
-                })
-                .bg(tokens.surface)
-                .hover(|style| style.bg(tokens.surface_overlay))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(ui_tokens::SPACE_1))
-                        .w_full()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(ui_tokens::SPACE_1))
-                                .child(
-                                    Icon::new(IconName::SquareTerminal)
-                                        .with_size(Size::Small)
-                                        .text_color(tokens.accent),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_size(px(ui_tokens::FONT_BODY))
-                                        .font_semibold()
-                                        .text_color(tokens.text_primary)
-                                        .child(snippet.name.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_size(px(ui_tokens::FONT_CAPTION))
-                                .text_color(tokens.text_secondary)
-                                .child(snippet.command.clone()),
-                        ),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.send_snippet_to_active(&send, cx);
-                }));
-            quick_grid = quick_grid.child(
-                div()
+        for (group_name, indices) in snippets::ordered_group_indices(&snippets) {
+            let group_label = if group_name.is_empty() {
+                self.tr("Ungrouped")
+            } else {
+                group_name
+            };
+            let mut group_grid = div()
+                .flex()
+                .flex_wrap()
+                .content_start()
+                .gap(px(ui_tokens::SPACE_2));
+            for index in indices {
+                let snippet = snippets[index].clone();
+                let load = snippet.clone();
+                let send = snippet.clone();
+                let delete_name = snippet.name.clone();
+                let editing = self
+                    .editing_snippet
+                    .as_ref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&snippet.name));
+                let run_button = Button::new(("quick-command-run", index))
                     .w(px(ui_tokens::QUICK_COMMAND_WIDTH))
-                    .flex()
-                    .flex_col()
-                    .gap(px(ui_tokens::SPACE_1))
-                    .child(run_button)
+                    .h(px(ui_tokens::QUICK_COMMAND_HEIGHT))
+                    .p(px(ui_tokens::SPACE_2))
+                    .rounded(px(ui_tokens::RADIUS_CARD))
+                    .border_1()
+                    .border_color(if editing {
+                        tokens.accent
+                    } else {
+                        tokens.border_subtle
+                    })
+                    .bg(tokens.surface)
+                    .hover(|style| style.bg(tokens.surface_overlay))
                     .child(
                         div()
                             .flex()
-                            .justify_end()
+                            .flex_col()
                             .gap(px(ui_tokens::SPACE_1))
+                            .w_full()
                             .child(
-                                components::icon_button(
-                                    &tokens,
-                                    ("quick-command-edit", index),
-                                    IconName::Settings2,
-                                    ButtonKind::Ghost,
-                                    ButtonSize::Small,
-                                    self.tr("Edit quick command"),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.load_snippet(&load, window, cx);
-                                    },
-                                )),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(ui_tokens::SPACE_1))
+                                    .child(
+                                        Icon::new(IconName::SquareTerminal)
+                                            .with_size(Size::Small)
+                                            .text_color(tokens.accent),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_size(px(ui_tokens::FONT_BODY))
+                                            .font_semibold()
+                                            .text_color(tokens.text_primary)
+                                            .child(snippet.name.clone()),
+                                    ),
                             )
                             .child(
-                                components::icon_button(
-                                    &tokens,
-                                    ("quick-command-delete", index),
-                                    IconName::Delete,
-                                    ButtonKind::Ghost,
-                                    ButtonSize::Small,
-                                    self.tr("Delete quick command"),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.delete_snippet(&delete_name, window, cx);
-                                    },
-                                )),
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(snippet.command.clone()),
                             ),
-                    ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.send_snippet_to_active(&send, cx);
+                    }));
+                group_grid = group_grid.child(
+                    div()
+                        .w(px(ui_tokens::QUICK_COMMAND_WIDTH))
+                        .flex()
+                        .flex_col()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .child(run_button)
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(ui_tokens::SPACE_1))
+                                .child(
+                                    components::icon_button(
+                                        &tokens,
+                                        ("quick-command-edit", index),
+                                        IconName::Settings2,
+                                        ButtonKind::Ghost,
+                                        ButtonSize::Small,
+                                        self.tr("Edit quick command"),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.load_snippet(&load, window, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    components::icon_button(
+                                        &tokens,
+                                        ("quick-command-delete", index),
+                                        IconName::Delete,
+                                        ButtonKind::Ghost,
+                                        ButtonSize::Small,
+                                        self.tr("Delete quick command"),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.delete_snippet(&delete_name, window, cx);
+                                        },
+                                    )),
+                                ),
+                        ),
+                );
+            }
+            quick_grid = quick_grid.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .child(components::section_label(&tokens, group_label))
+                    .child(group_grid),
             );
         }
 
@@ -12903,6 +12936,12 @@ impl AppView {
                         &tokens,
                         self.tr("Name"),
                         &self.snippet_name,
+                        false,
+                    ))
+                    .child(components::field(
+                        &tokens,
+                        self.tr("Group (optional)"),
+                        &self.snippet_group,
                         false,
                     ))
                     .child(components::field(

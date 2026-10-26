@@ -508,6 +508,10 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Keys" => "密钥",
         "Compose" => "编辑命令",
         "Quick commands" => "快捷命令",
+        "Group (optional)" => "分组（可选）",
+        "Command group names must be trimmed, at most 48 characters, and contain no control characters." => {
+            "命令分组名称需去除首尾空格，长度不超过 48 个字符，且不能包含控制字符。"
+        }
         "Variables" => "变量",
         "Insert host variable" => "插入主机变量",
         "Insert port variable" => "插入端口变量",
@@ -1191,6 +1195,8 @@ mod tests {
             "快捷命令"
         );
         for (key, expected) in [
+            ("Group (optional)", "分组（可选）"),
+            ("Ungrouped", "未分组"),
             ("Variables", "变量"),
             ("Insert host variable", "插入主机变量"),
             ("Insert port variable", "插入端口变量"),
@@ -1198,6 +1204,13 @@ mod tests {
         ] {
             assert_eq!(translate(Language::SimplifiedChinese, key), expected);
         }
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Command group names must be trimmed, at most 48 characters, and contain no control characters."
+            ),
+            "命令分组名称需去除首尾空格，长度不超过 48 个字符，且不能包含控制字符。"
+        );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Import quick commands"),
             "导入快捷命令"
