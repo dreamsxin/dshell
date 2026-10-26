@@ -46,7 +46,7 @@ use profiles::{
     AuthMethod, HostData, HostProfile, LoginCommandSettings, MAX_FORWARD_RULES,
     MAX_TAB_LABEL_CHARS, ProfileStore, RecentConnection, ReconnectSettings, TabColor,
     export_profiles as export_host_profiles, import_profiles as import_host_profiles,
-    parse_login_commands, record_recent,
+    parse_custom_tab_color_hex, parse_login_commands, record_recent,
 };
 use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
 use sftp::{
@@ -3530,6 +3530,7 @@ struct AppView {
     inspector_log_open: bool,
     profile_name: Entity<InputState>,
     profile_tab_label: Entity<InputState>,
+    profile_tab_color_hex: Entity<InputState>,
     profile_tab_color: TabColor,
     profile_terminal_theme: Option<TerminalTheme>,
     profile_search: Entity<InputState>,
@@ -3699,6 +3700,7 @@ impl AppView {
         let profile_name = cx.new(|cx| InputState::new(window, cx).placeholder("Production"));
         let profile_tab_label =
             cx.new(|cx| InputState::new(window, cx).placeholder("Optional tab title"));
+        let profile_tab_color_hex = cx.new(|cx| InputState::new(window, cx).placeholder("#2F80ED"));
         let profile_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search saved hosts"));
         let profile_group = cx.new(|cx| InputState::new(window, cx).placeholder("Ungrouped"));
@@ -3889,6 +3891,7 @@ impl AppView {
             inspector_log_open: true,
             profile_name,
             profile_tab_label,
+            profile_tab_color_hex,
             profile_tab_color: TabColor::Default,
             profile_terminal_theme: None,
             profile_search,
@@ -5274,6 +5277,7 @@ impl AppView {
     fn new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input_value(&self.profile_name, "", window, cx);
         Self::set_input_value(&self.profile_tab_label, "", window, cx);
+        Self::set_input_value(&self.profile_tab_color_hex, "", window, cx);
         self.profile_tab_color = TabColor::Default;
         self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
@@ -5310,7 +5314,20 @@ impl AppView {
     fn load_profile(&mut self, profile: &HostProfile, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input_value(&self.profile_name, &profile.name, window, cx);
         Self::set_input_value(&self.profile_tab_label, &profile.tab_label, window, cx);
-        self.profile_tab_color = profile.tab_color;
+        let custom_tab_color_hex = match profile.tab_color {
+            TabColor::Custom(rgb) => format!("#{rgb:06X}"),
+            _ => String::new(),
+        };
+        Self::set_input_value(
+            &self.profile_tab_color_hex,
+            &custom_tab_color_hex,
+            window,
+            cx,
+        );
+        self.profile_tab_color = match profile.tab_color {
+            TabColor::Custom(_) => TabColor::Default,
+            color => color,
+        };
         self.profile_terminal_theme = profile.terminal_theme;
         Self::set_input_value(&self.profile_group, &profile.group, window, cx);
         Self::set_input_value(&self.host, &profile.host, window, cx);
@@ -5429,6 +5446,7 @@ impl AppView {
 
         Self::set_input_value(&self.profile_name, &entry.name, window, cx);
         Self::set_input_value(&self.profile_tab_label, "", window, cx);
+        Self::set_input_value(&self.profile_tab_color_hex, "", window, cx);
         self.profile_tab_color = TabColor::Default;
         self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
@@ -6557,6 +6575,22 @@ impl AppView {
             cx.notify();
             return;
         }
+        let tab_color_hex = self
+            .profile_tab_color_hex
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        let tab_color = match parse_custom_tab_color_hex(&tab_color_hex) {
+            Ok(Some(rgb)) => TabColor::Custom(rgb),
+            Ok(None) => self.profile_tab_color,
+            Err(()) => {
+                self.profile_message =
+                    self.tr("Custom tab color must be a six-digit RGB hex value such as #2F80ED.");
+                cx.notify();
+                return;
+            }
+        };
         let raw_group = self.profile_group.read(cx).value().trim().to_owned();
         let group = if raw_group.contains('/') {
             match normalize_group_path(&raw_group) {
@@ -6708,7 +6742,7 @@ impl AppView {
             port,
             username,
             tab_label,
-            tab_color: self.profile_tab_color,
+            tab_color,
             terminal_theme: self.profile_terminal_theme,
             group,
             favorite: self.profile_favorite,
@@ -8684,9 +8718,21 @@ impl AppView {
                 )
             },
         );
+        let custom_tab_color_hex = self
+            .profile_tab_color_hex
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        let custom_tab_color = parse_custom_tab_color_hex(&custom_tab_color_hex)
+            .ok()
+            .flatten();
+        let custom_tab_color_preview = custom_tab_color
+            .and_then(|rgb| tokens.tab_color(TabColor::Custom(rgb)))
+            .unwrap_or(tokens.accent);
         let mut tab_color_swatches = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_1));
         for (index, color) in TabColor::ALL.into_iter().enumerate() {
-            let selected = self.profile_tab_color == color;
+            let selected = custom_tab_color_hex.is_empty() && self.profile_tab_color == color;
             let swatch = components::color_swatch(
                 &tokens,
                 ("profile-tab-color", index as u32),
@@ -8694,12 +8740,25 @@ impl AppView {
                 tokens.tab_color(color).unwrap_or(tokens.text_disabled),
                 selected,
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                Self::set_input_value(&this.profile_tab_color_hex, "", window, cx);
                 this.profile_tab_color = color;
                 cx.notify();
             }));
             tab_color_swatches = tab_color_swatches.child(swatch);
         }
+        let custom_tab_color_swatch = components::color_swatch(
+            &tokens,
+            "profile-tab-color-custom",
+            self.tr("Custom"),
+            custom_tab_color_preview,
+            !custom_tab_color_hex.is_empty(),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            let focus = this.profile_tab_color_hex.read(cx).focus_handle(cx);
+            window.focus(&focus);
+        }));
+        tab_color_swatches = tab_color_swatches.child(custom_tab_color_swatch);
         let mut terminal_theme_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
         let follow_theme_kind = if self.profile_terminal_theme.is_none() {
             ButtonKind::Primary
@@ -8759,6 +8818,16 @@ impl AppView {
                 ))
                 .child(components::label_text(&tokens, self.tr("Tab color")))
                 .child(tab_color_swatches)
+                .child(components::field(
+                    &tokens,
+                    self.tr("Custom color (#RRGGBB)"),
+                    &self.profile_tab_color_hex,
+                    false,
+                ))
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("Enter a six-digit RGB hex value, such as #2F80ED."),
+                ))
                 .child(components::label_text(
                     &tokens,
                     self.tr("Terminal color scheme"),

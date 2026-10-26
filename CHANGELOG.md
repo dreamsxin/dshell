@@ -15,6 +15,8 @@ All notable changes to dshell are documented here.
   with aligned changes and refresh support.
 - Let saved host profiles choose a terminal color scheme independently, while
   older profiles continue to follow the application theme by default.
+- Let saved sessions use a custom RGB hex color for their tab accent, with
+  versioned profile/export support and Simplified Chinese UI text.
 
 ## [0.1.42] - 2026-10-27
 

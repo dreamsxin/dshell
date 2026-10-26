@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-10-27，Windows/MSVC：已保存会话新增自定义标签强调色，可输入六位 RGB 十六进制值并即时预览；八种固定色继续保留，非法值会阻止保存。主机资料格式升至版本 10，分享格式升至版本 6；v1–v9 本机资料和 v1–v5 分享包仍可读取，固定标签颜色迁移后保持不变。新增十六进制解析边界、主题映射、自定义颜色资料往返、分享包往返、v9 迁移和简体中文测试。`cargo fmt --all` 与 `scripts\verify-hard-constraints.ps1` 通过，单元测试 210 项通过、9 项 Docker 专项忽略；本切片没有修改 SSH/SFTP 通信路径，因此未运行 Docker SSH 集成测试。未在用户活动桌面启动 GUI；颜色选择交互、截图、DPI/IME 和字形检查仍需隔离 Windows 桌面人工验收。此前用户提到的 SFTP 最近本地/远端目录记忆已在 v0.1.33 交付，本轮对应 3 项回归测试通过。下一步：继续按公开 Xshell 评价筛选高频工作流，并完成隔离 GUI 验收。
+
 2026-10-27，Windows/MSVC：保存的 SSH 会话可在属性中选择 Default dark、Solarized dark、Solarized light，或跟随应用主题；临时会话可在属性中调整并保存为主机资料，保存后立即应用到当前连接。全局主题变化只更新跟随全局主题的会话，复制会话继承原配色。主机资料格式升至版本 9、导出格式升至版本 5，旧版本迁移为跟随全局主题；OpenSSH 导入也默认跟随全局主题。新增主题继承/覆盖、重复连接资料转换、运行中资料更新、迁移、导出往返和简体中文测试。`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked` 和 `scripts\verify-hard-constraints.ps1` 全部通过（207 项通过、9 项 Docker 专项忽略）；本轮没有改动 SSH transport、SFTP、认证、转发、日志或 PTY 路径，因此未运行 Docker SSH 集成测试。未在用户活动桌面启动 GUI；配色选择交互、终端渲染、截图及 DPI/IME/字形检查仍需隔离 Windows 桌面人工验收。下一步：完成隔离 GUI 验收，再继续按公开评价筛选高频工作流。
 
 ## 当前切片

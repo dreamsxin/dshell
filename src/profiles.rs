@@ -11,10 +11,10 @@ use crate::forward::ForwardRuleSpec;
 use crate::groups::normalize_group_path;
 use crate::terminal::TerminalTheme;
 
-const DOCUMENT_VERSION: u8 = 9;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-const EXPORT_DOCUMENT_VERSION: u8 = 5;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 5] = [1, 2, 3, 4, EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 10;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, DOCUMENT_VERSION];
+const EXPORT_DOCUMENT_VERSION: u8 = 6;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 6] = [1, 2, 3, 4, 5, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 pub const MAX_TAB_LABEL_CHARS: usize = 80;
@@ -50,6 +50,7 @@ pub enum TabColor {
     Teal,
     Pink,
     Violet,
+    Custom(u32),
 }
 
 impl TabColor {
@@ -76,12 +77,25 @@ impl TabColor {
             Self::Teal => "Teal",
             Self::Pink => "Pink",
             Self::Violet => "Violet",
+            Self::Custom(_) => "Custom",
         }
     }
 
     const fn is_default(value: &Self) -> bool {
         matches!(value, Self::Default)
     }
+}
+
+pub fn parse_custom_tab_color_hex(value: &str) -> Result<Option<u32>, ()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let digits = value.strip_prefix('#').unwrap_or(value);
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    u32::from_str_radix(digits, 16).map(Some).map_err(|_| ())
 }
 
 impl AuthMethod {
@@ -555,6 +569,14 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
                 profile.name
             ));
         }
+        if let TabColor::Custom(rgb) = profile.tab_color
+            && rgb > 0x00ff_ffff
+        {
+            return Err(format!(
+                "Host profile {} has an invalid custom tab color.",
+                profile.name
+            ));
+        }
         if !names.insert(profile.name.to_lowercase()) {
             return Err(format!(
                 "Host profile names must be unique: {}",
@@ -715,7 +737,7 @@ mod tests {
         let path = directory.path().join("export.json");
         let profiles = vec![HostProfile {
             tab_label: "API west".to_owned(),
-            tab_color: TabColor::Teal,
+            tab_color: TabColor::Custom(0x35a8c6),
             terminal_theme: Some(TerminalTheme::SolarizedDark),
             group: "Production".to_owned(),
             favorite: true,
@@ -748,6 +770,11 @@ mod tests {
         expected[0].login_commands.enabled = false;
         assert_eq!(import_profiles(&path).unwrap(), expected);
         let contents = fs::read_to_string(path).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(
+            document["version"].as_u64(),
+            Some(u64::from(EXPORT_DOCUMENT_VERSION))
+        );
         assert!(!contents.contains("recent"));
         assert!(!contents.to_lowercase().contains("password"));
         assert!(!contents.to_lowercase().contains("passphrase"));
@@ -941,11 +968,12 @@ mod tests {
     }
 
     #[test]
-    fn login_commands_round_trip_in_local_host_profiles() {
+    fn profiles_round_trip_terminal_theme_login_commands_and_custom_tab_color() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProfileStore::at(directory.path().join("hosts.json"));
         let profile = HostProfile {
             terminal_theme: Some(TerminalTheme::SolarizedLight),
+            tab_color: TabColor::Custom(0x12abef),
             login_commands: LoginCommandSettings {
                 enabled: true,
                 commands: vec!["cd /srv/app".to_owned(), "uname -a".to_owned()],
@@ -987,6 +1015,35 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+    }
+
+    #[test]
+    fn version_nine_profiles_migrate_and_keep_fixed_tab_colors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 9,
+                "profiles": [{
+                    "name": "prod",
+                    "host": "prod.example.com",
+                    "port": 22,
+                    "username": "deploy",
+                    "tab_color": "teal"
+                }],
+                "recent": []
+            }"#,
+        )
+        .unwrap();
+        let store = ProfileStore::at(path);
+
+        let data = store.load().unwrap();
+        assert_eq!(data.profiles[0].tab_color, TabColor::Teal);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+        assert_eq!(saved["profiles"][0]["tab_color"], "teal");
     }
 
     #[test]
@@ -1045,6 +1102,26 @@ mod tests {
 
         host.tab_label = "production\nblue".to_owned();
         assert!(validate_profiles(&[host]).is_err());
+    }
+
+    #[test]
+    fn custom_tab_color_hex_parses_and_rejects_invalid_values() {
+        assert_eq!(parse_custom_tab_color_hex(""), Ok(None));
+        assert_eq!(
+            parse_custom_tab_color_hex("  #0aBcD3 "),
+            Ok(Some(0x0abc_d3))
+        );
+        assert_eq!(parse_custom_tab_color_hex("ABCDEF"), Ok(Some(0xabcd_ef)));
+        for invalid in ["#12345", "#1234567", "#12GG56", "0x123456", "#１２３４５６"] {
+            assert_eq!(parse_custom_tab_color_hex(invalid), Err(()));
+        }
+        assert!(
+            validate_profiles(&[HostProfile {
+                tab_color: TabColor::Custom(0x0100_0000),
+                ..profile("invalid-color")
+            }])
+            .is_err()
+        );
     }
 
     #[test]

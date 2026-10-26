@@ -281,6 +281,14 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
             "留空则使用会话名称。标题和颜色应用于此已保存会话。"
         }
         "Tab color" => "标签颜色",
+        "Custom" => "自定义",
+        "Custom color (#RRGGBB)" => "自定义颜色（#RRGGBB）",
+        "Enter a six-digit RGB hex value, such as #2F80ED." => {
+            "输入六位 RGB 十六进制颜色值，例如 #2F80ED。"
+        }
+        "Custom tab color must be a six-digit RGB hex value such as #2F80ED." => {
+            "自定义标签颜色必须是六位 RGB 十六进制值，例如 #2F80ED。"
+        }
         "Terminal color scheme" => "终端配色方案",
         "Follow app theme" => "跟随应用主题",
         "Tab title must be at most {count} characters and contain no control characters." => {
@@ -1191,6 +1199,16 @@ mod tests {
             ("Tab title", "标签标题"),
             ("Optional tab title", "可选标签标题"),
             ("Tab color", "标签颜色"),
+            ("Custom", "自定义"),
+            ("Custom color (#RRGGBB)", "自定义颜色（#RRGGBB）"),
+            (
+                "Enter a six-digit RGB hex value, such as #2F80ED.",
+                "输入六位 RGB 十六进制颜色值，例如 #2F80ED。",
+            ),
+            (
+                "Custom tab color must be a six-digit RGB hex value such as #2F80ED.",
+                "自定义标签颜色必须是六位 RGB 十六进制值，例如 #2F80ED。",
+            ),
             ("Terminal color scheme", "终端配色方案"),
             ("Follow app theme", "跟随应用主题"),
             ("Default", "默认"),

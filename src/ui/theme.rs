@@ -163,6 +163,7 @@ impl ThemeTokens {
     pub fn tab_color(self, color: TabColor) -> Option<Hsla> {
         let index = match color {
             TabColor::Default => return None,
+            TabColor::Custom(custom_rgb) => return Some(rgb(custom_rgb).into()),
             TabColor::Blue => 0,
             TabColor::Green => 1,
             TabColor::Amber => 2,
@@ -372,5 +373,14 @@ mod tests {
     fn default_ui_theme_is_dark() {
         assert_eq!(UiTheme::DEFAULT, UiTheme::Dark);
         assert!(UiTheme::default().is_dark());
+    }
+
+    #[test]
+    fn custom_tab_color_uses_the_requested_rgb_value() {
+        let tokens = UiTheme::Dark.tokens();
+        assert_eq!(
+            tokens.tab_color(TabColor::Custom(0x35a8c6)),
+            Some(rgb(0x35a8c6).into())
+        );
     }
 }
