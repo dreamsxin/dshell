@@ -42,8 +42,8 @@ use groups::{
 };
 use openssh_config::import_openssh_config;
 use profiles::{
-    AuthMethod, HostData, HostProfile, MAX_FORWARD_RULES, ProfileStore, RecentConnection,
-    ReconnectSettings, export_profiles as export_host_profiles,
+    AuthMethod, HostData, HostProfile, MAX_FORWARD_RULES, MAX_TAB_LABEL_CHARS, ProfileStore,
+    RecentConnection, ReconnectSettings, TabColor, export_profiles as export_host_profiles,
     import_profiles as import_host_profiles, record_recent,
 };
 use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
@@ -1555,6 +1555,35 @@ fn saved_profile_for_session<'a>(
         .find(|profile| profile.name.eq_ignore_ascii_case(name))
 }
 
+fn profile_tab_title(profile: &HostProfile) -> &str {
+    let label = profile.tab_label.trim();
+    if label.is_empty() {
+        &profile.name
+    } else {
+        label
+    }
+}
+
+fn update_sessions_for_profile(
+    sessions: &mut [SshSession],
+    previous: &HostProfile,
+    updated: &HostProfile,
+) {
+    let previous_title = profile_tab_title(previous);
+    let updated_title = profile_tab_title(updated).to_owned();
+    for session in sessions.iter_mut().filter(|session| {
+        session
+            .profile_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&previous.name))
+    }) {
+        if session.title == previous.name || session.title == previous_title {
+            session.title.clone_from(&updated_title);
+        }
+        session.profile_name = Some(updated.name.clone());
+    }
+}
+
 fn unique_duplicate_session_title(base: &str, existing_titles: &[String]) -> String {
     let mut suffix = 2usize;
     loop {
@@ -1604,8 +1633,8 @@ mod session_tests {
         AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, GroupLaunchState,
         LayoutDragTarget, LocalUploadKind, MouseTrackingMode, SessionEditorEscape,
         SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
-        TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut, apply_session_event,
-        collapsed_group_key, dragged_panel_width, enqueue_session_request,
+        TabColor, TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut,
+        apply_session_event, collapsed_group_key, dragged_panel_width, enqueue_session_request,
         filesystem_usage_percent, forget_stopped_forward, format_alert_time, format_log_time,
         format_rate, format_storage_kib, group_launch_candidates, is_authentication_failure,
         is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
@@ -1616,7 +1645,8 @@ mod session_tests {
         search_result_message, server_alert_observations, session_accepts_requests,
         session_editor_escape, session_editor_key, session_matches_target,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
-        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title, watch,
+        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title,
+        update_sessions_for_profile, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1805,6 +1835,8 @@ mod session_tests {
                 host: host.to_owned(),
                 port: 22,
                 username: "test".to_owned(),
+                tab_label: String::new(),
+                tab_color: TabColor::Default,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Agent,
@@ -1878,6 +1910,8 @@ mod session_tests {
             host: "prod.example.com".to_owned(),
             port: 22,
             username: "deploy".to_owned(),
+            tab_label: String::new(),
+            tab_color: TabColor::Default,
             group: "Production".to_owned(),
             favorite: false,
             auth_method: AuthMethod::Password,
@@ -1997,12 +2031,57 @@ mod session_tests {
     }
 
     #[test]
+    fn profile_tab_title_uses_custom_label_and_updates_live_session_identity() {
+        let previous = HostProfile {
+            name: "production".to_owned(),
+            host: "prod.example.com".to_owned(),
+            port: 22,
+            username: "deploy".to_owned(),
+            tab_label: "API west".to_owned(),
+            tab_color: TabColor::Teal,
+            group: String::new(),
+            favorite: false,
+            auth_method: AuthMethod::Agent,
+            identity_file: String::new(),
+            proxy_jump: String::new(),
+            forwards: Vec::new(),
+            keepalive_seconds: 0,
+            reconnect: ReconnectSettings::default(),
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
+        };
+        let updated = HostProfile {
+            name: "production-west".to_owned(),
+            tab_label: "API west 2".to_owned(),
+            ..previous.clone()
+        };
+        let (mut regular, _, _) = test_session(1);
+        regular.title = "API west".to_owned();
+        regular.profile_name = Some(previous.name.clone());
+        let (mut duplicate, _, _) = test_session(2);
+        duplicate.title = "API west (2)".to_owned();
+        duplicate.profile_name = Some(previous.name.clone());
+        let mut sessions = vec![regular, duplicate];
+
+        update_sessions_for_profile(&mut sessions, &previous, &updated);
+
+        assert_eq!(sessions[0].title, "API west 2");
+        assert_eq!(sessions[0].profile_name.as_deref(), Some("production-west"));
+        assert_eq!(sessions[1].title, "API west (2)");
+        assert_eq!(sessions[1].profile_name.as_deref(), Some("production-west"));
+    }
+
+    #[test]
     fn session_profile_resolution_requires_a_matching_saved_profile() {
         let profile = HostProfile {
             name: "manual-test".to_owned(),
             host: "127.0.0.1".to_owned(),
             port: 22,
             username: "test".to_owned(),
+            tab_label: String::new(),
+            tab_color: TabColor::Default,
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Password,
@@ -2506,6 +2585,8 @@ mod session_tests {
                 host: "example.com".to_owned(),
                 port: 22,
                 username: "ops".to_owned(),
+                tab_label: String::new(),
+                tab_color: TabColor::Default,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -2560,6 +2641,8 @@ mod session_tests {
                 host: format!("{name}.example.com"),
                 port: 22,
                 username: "ops".to_owned(),
+                tab_label: String::new(),
+                tab_color: TabColor::Default,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -2613,6 +2696,8 @@ mod session_tests {
                 host: format!("{name}.example.com"),
                 port: 22,
                 username: "ops".to_owned(),
+                tab_label: String::new(),
+                tab_color: TabColor::Default,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -2651,6 +2736,8 @@ mod session_tests {
                 host: format!("{name}.example.com"),
                 port: 22,
                 username: "ops".to_owned(),
+                tab_label: String::new(),
+                tab_color: TabColor::Default,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -2896,6 +2983,8 @@ struct AppView {
     pending_power_action: Option<(u64, ServerPowerAction)>,
     inspector_log_open: bool,
     profile_name: Entity<InputState>,
+    profile_tab_label: Entity<InputState>,
+    profile_tab_color: TabColor,
     profile_search: Entity<InputState>,
     profile_group: Entity<InputState>,
     profile_favorite: bool,
@@ -3051,6 +3140,8 @@ impl AppView {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let profile_name = cx.new(|cx| InputState::new(window, cx).placeholder("Production"));
+        let profile_tab_label =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Optional tab title"));
         let profile_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search saved hosts"));
         let profile_group = cx.new(|cx| InputState::new(window, cx).placeholder("Ungrouped"));
@@ -3235,6 +3326,8 @@ impl AppView {
             pending_power_action: None,
             inspector_log_open: true,
             profile_name,
+            profile_tab_label,
+            profile_tab_color: TabColor::Default,
             profile_search,
             profile_group,
             profile_favorite: false,
@@ -3394,6 +3487,7 @@ impl AppView {
     fn set_language_placeholders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholders = [
             (&self.profile_name, "Production"),
+            (&self.profile_tab_label, "Optional tab title"),
             (&self.profile_search, "Search saved hosts"),
             (&self.profile_group, "Ungrouped"),
             (&self.group_editor_name, "Group name"),
@@ -3766,7 +3860,7 @@ impl AppView {
             .iter()
             .map(|session| session.title.clone())
             .collect::<Vec<_>>();
-        let title = unique_duplicate_session_title(&profile.name, &existing_titles);
+        let title = unique_duplicate_session_title(profile_tab_title(&profile), &existing_titles);
         self.start_saved_profile_connection(&profile, Some(title), window, cx);
     }
 
@@ -4596,6 +4690,8 @@ impl AppView {
 
     fn new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input_value(&self.profile_name, "", window, cx);
+        Self::set_input_value(&self.profile_tab_label, "", window, cx);
+        self.profile_tab_color = TabColor::Default;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.host, "", window, cx);
         Self::set_input_value(&self.port, "22", window, cx);
@@ -4626,6 +4722,8 @@ impl AppView {
 
     fn load_profile(&mut self, profile: &HostProfile, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input_value(&self.profile_name, &profile.name, window, cx);
+        Self::set_input_value(&self.profile_tab_label, &profile.tab_label, window, cx);
+        self.profile_tab_color = profile.tab_color;
         Self::set_input_value(&self.profile_group, &profile.group, window, cx);
         Self::set_input_value(&self.host, &profile.host, window, cx);
         Self::set_input_value(&self.port, &profile.port.to_string(), window, cx);
@@ -4703,6 +4801,8 @@ impl AppView {
         }
 
         Self::set_input_value(&self.profile_name, &entry.name, window, cx);
+        Self::set_input_value(&self.profile_tab_label, "", window, cx);
+        self.profile_tab_color = TabColor::Default;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.host, &entry.host, window, cx);
         Self::set_input_value(&self.port, &entry.port.to_string(), window, cx);
@@ -5815,6 +5915,16 @@ impl AppView {
             return;
         }
         let name = self.profile_name.read(cx).value().trim().to_owned();
+        let tab_label = self.profile_tab_label.read(cx).value().trim().to_owned();
+        if tab_label.chars().count() > MAX_TAB_LABEL_CHARS
+            || tab_label.chars().any(char::is_control)
+        {
+            self.profile_message = self
+                .tr("Tab title must be at most {count} characters and contain no control characters.")
+                .replace("{count}", &MAX_TAB_LABEL_CHARS.to_string());
+            cx.notify();
+            return;
+        }
         let raw_group = self.profile_group.read(cx).value().trim().to_owned();
         let group = if raw_group.contains('/') {
             match normalize_group_path(&raw_group) {
@@ -5878,7 +5988,7 @@ impl AppView {
             cx.notify();
             return;
         }
-        let existing_forwards = self
+        let previous_profile = self
             .selected_profile
             .as_ref()
             .and_then(|selected| {
@@ -5886,6 +5996,9 @@ impl AppView {
                     .iter()
                     .find(|profile| profile.name.eq_ignore_ascii_case(selected))
             })
+            .cloned();
+        let existing_forwards = previous_profile
+            .as_ref()
             .map(|profile| profile.forwards.clone())
             .unwrap_or_default();
         let Ok(port) = port else {
@@ -5945,6 +6058,8 @@ impl AppView {
             host,
             port,
             username,
+            tab_label,
+            tab_color: self.profile_tab_color,
             group,
             favorite: self.profile_favorite,
             auth_method: self.auth_method,
@@ -5966,12 +6081,16 @@ impl AppView {
         if let Some(selected) = &self.selected_profile {
             profiles.retain(|profile| !profile.name.eq_ignore_ascii_case(selected));
         }
-        profiles.push(profile);
+        profiles.push(profile.clone());
         sort_profiles(&mut profiles);
         if let Err(error) = self.save_workspace(profiles, self.recent.clone()) {
             self.profile_message = error;
             cx.notify();
             return;
+        }
+
+        if let Some(previous) = previous_profile.as_ref() {
+            update_sessions_for_profile(&mut self.sessions, previous, &profile);
         }
 
         self.selected_profile = Some(name.clone());
@@ -6225,11 +6344,16 @@ impl AppView {
             .pending_session_title_override
             .take()
             .unwrap_or_else(|| {
-                if requested_title.is_empty() {
-                    format!("{username}@{host}")
-                } else {
-                    requested_title
-                }
+                saved_profile.as_ref().map_or_else(
+                    || {
+                        if requested_title.is_empty() {
+                            format!("{username}@{host}")
+                        } else {
+                            requested_title
+                        }
+                    },
+                    |profile| profile_tab_title(profile).to_owned(),
+                )
             });
         let route = if jump.is_some() {
             format!(" via {jump_name}")
@@ -7664,6 +7788,22 @@ impl AppView {
                 )
             },
         );
+        let mut tab_color_swatches = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_1));
+        for (index, color) in TabColor::ALL.into_iter().enumerate() {
+            let selected = self.profile_tab_color == color;
+            let swatch = components::color_swatch(
+                &tokens,
+                ("profile-tab-color", index as u32),
+                self.tr(color.label()),
+                tokens.tab_color(color).unwrap_or(tokens.text_disabled),
+                selected,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.profile_tab_color = color;
+                cx.notify();
+            }));
+            tab_color_swatches = tab_color_swatches.child(swatch);
+        }
 
         let section_content = match self.session_editor_section {
             SessionEditorSection::Connection => div()
@@ -7676,6 +7816,18 @@ impl AppView {
                     &self.profile_name,
                     false,
                 ))
+                .child(components::field(
+                    &tokens,
+                    self.tr("Tab title"),
+                    &self.profile_tab_label,
+                    false,
+                ))
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("Leave empty to use the session name. The title and color apply to this saved session."),
+                ))
+                .child(components::label_text(&tokens, self.tr("Tab color")))
+                .child(tab_color_swatches)
                 .child(
                     div()
                         .flex()
@@ -15215,6 +15367,8 @@ impl AppView {
             let id = session.id;
             let selected = self.active_session_id == Some(id);
             let in_split = self.split.is_some_and(|split| split.contains(id));
+            let tab_color = saved_profile_for_session(session, &self.profiles)
+                .and_then(|profile| tokens.tab_color(profile.tab_color));
             let mut tab = div()
                 .id(("session-tab", id))
                 .flex()
@@ -15225,11 +15379,11 @@ impl AppView {
                 .pl(px(ui_tokens::SPACE_3))
                 .pr(px(ui_tokens::SPACE_1))
                 .border_t_2()
-                .border_color(if selected {
+                .border_color(tab_color.unwrap_or(if selected {
                     tokens.accent
                 } else {
                     tokens.surface
-                })
+                }))
                 .bg(if selected {
                     tokens.surface_raised
                 } else {
@@ -16057,7 +16211,8 @@ impl AppView {
             .unwrap_or_default();
         let has_other = self.sessions.iter().any(|session| session.id != session_id);
         let has_right = session_index + 1 < self.sessions.len();
-        let can_duplicate = saved_profile_for_session(session, &self.profiles).is_some();
+        let saved_profile = saved_profile_for_session(session, &self.profiles).cloned();
+        let can_duplicate = saved_profile.is_some();
         let menu = div()
             .id("session-tab-menu")
             .occlude()
@@ -16104,10 +16259,14 @@ impl AppView {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.tab_menu_session = None;
                     this.select_session(session_id, window, cx);
-                    this.session_editor_section = SessionEditorSection::Connection;
-                    this.session_editor_open = true;
-                    this.request_overlay_focus();
-                    cx.notify();
+                    if let Some(profile) = saved_profile.clone() {
+                        this.load_profile(&profile, window, cx);
+                    } else {
+                        this.session_editor_section = SessionEditorSection::Connection;
+                        this.session_editor_open = true;
+                        this.request_overlay_focus();
+                        cx.notify();
+                    }
                 })),
             )
             .child(

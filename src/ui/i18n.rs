@@ -256,6 +256,24 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Authentication" => "认证",
         "Security" => "安全",
         "Session name" => "会话名称",
+        "Tab title" => "标签标题",
+        "Optional tab title" => "可选标签标题",
+        "Leave empty to use the session name. The title and color apply to this saved session." => {
+            "留空则使用会话名称。标题和颜色应用于此已保存会话。"
+        }
+        "Tab color" => "标签颜色",
+        "Tab title must be at most {count} characters and contain no control characters." => {
+            "标签标题最多 {count} 个字符，且不能包含控制字符。"
+        }
+        "Default" => "默认",
+        "Blue" => "蓝色",
+        "Green" => "绿色",
+        "Amber" => "琥珀色",
+        "Red" => "红色",
+        "Cyan" => "青色",
+        "Teal" => "蓝绿色",
+        "Pink" => "粉色",
+        "Violet" => "紫色",
         "Host" => "主机",
         "Port" => "端口",
         "Group" => "分组",
@@ -1101,6 +1119,40 @@ mod tests {
             "dshell {version} · 原生 GPUI · 按 Esc 关闭"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "my-host"), "my-host");
+    }
+
+    #[test]
+    fn simplified_chinese_translates_saved_session_tab_appearance() {
+        for (key, expected) in [
+            ("Tab title", "标签标题"),
+            ("Optional tab title", "可选标签标题"),
+            ("Tab color", "标签颜色"),
+            ("Default", "默认"),
+            ("Blue", "蓝色"),
+            ("Green", "绿色"),
+            ("Amber", "琥珀色"),
+            ("Red", "红色"),
+            ("Cyan", "青色"),
+            ("Teal", "蓝绿色"),
+            ("Pink", "粉色"),
+            ("Violet", "紫色"),
+        ] {
+            assert_eq!(translate(Language::SimplifiedChinese, key), expected);
+        }
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Leave empty to use the session name. The title and color apply to this saved session."
+            ),
+            "留空则使用会话名称。标题和颜色应用于此已保存会话。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Tab title must be at most {count} characters and contain no control characters."
+            ),
+            "标签标题最多 {count} 个字符，且不能包含控制字符。"
+        );
     }
 
     #[test]

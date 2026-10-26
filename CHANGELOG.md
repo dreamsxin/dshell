@@ -2,6 +2,30 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.38] - 2026-10-27
+
+Adds per-session tab titles and colors.
+
+### Added
+
+- Let saved host profiles set an optional tab title and choose a theme-aware
+  accent color. Existing and duplicate sessions retain their identity; new
+  duplicates receive unique titles based on the configured label.
+- Validate tab titles to 80 Unicode characters and reject control characters.
+- Migrate host profile documents to version 7 and profile exports to version 3;
+  older documents default to the session name and theme accent color.
+- Add English and Simplified Chinese labels for title, color, and palette options.
+
+### Verification
+
+- Verified 2026-10-27 on Windows/MSVC: `cargo fmt --all` and
+  `scripts\verify-hard-constraints.ps1` passed (182 tests passed, 9 Docker SSH
+  tests ignored by the standard suite). The Docker SSH script was not run because
+  no SSH transport, authentication, SFTP, forwarding, logging, or PTY behavior
+  changed.
+- Isolated desktop screenshots, DPI/IME, and glyph alignment remain outstanding;
+  the GUI was not launched on the user's active desktop.
+
 ## [0.1.37] - 2026-10-27
 
 Adds one-click startup for saved host groups.

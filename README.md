@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.37`.
+`v0.1.38`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -33,6 +33,11 @@ Connections then run one at a time. An authentication failure pauses the batch
 until you retry or skip that host; the active group header can stop the
 remaining queue. Staged secrets stay in zeroizing memory and enter the reusable
 in-memory cache only after successful authentication.
+
+Saved sessions can use a custom tab title and one of eight theme-aware colors;
+an empty title keeps the session name. SFTP remembers the latest local folder
+and remote directory per host, port, and user. New connections restore the
+remote directory, and downloads reuse the remembered local folder.
 
 The Keys panel can discover existing OpenSSH identities, import a private key
 into `~/.ssh`, export a key pair to a user-selected path, change a passphrase,

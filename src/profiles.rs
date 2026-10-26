@@ -10,12 +10,13 @@ use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 use crate::forward::ForwardRuleSpec;
 use crate::groups::normalize_group_path;
 
-const DOCUMENT_VERSION: u8 = 6;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 6] = [1, 2, 3, 4, 5, 6];
-const EXPORT_DOCUMENT_VERSION: u8 = 2;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 2] = [1, EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 7;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 7] = [1, 2, 3, 4, 5, 6, 7];
+const EXPORT_DOCUMENT_VERSION: u8 = 3;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 3] = [1, 2, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
+pub const MAX_TAB_LABEL_CHARS: usize = 80;
 const MAX_RECENT_DIRECTORY_BYTES: usize = 4096;
 pub const MIN_RECONNECT_INTERVAL_SECONDS: u16 = 1;
 pub const MAX_RECONNECT_INTERVAL_SECONDS: u16 = 300;
@@ -29,6 +30,53 @@ pub enum AuthMethod {
     PublicKey,
     KeyboardInteractive,
     Agent,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabColor {
+    #[default]
+    Default,
+    Blue,
+    Green,
+    Amber,
+    Red,
+    Cyan,
+    Teal,
+    Pink,
+    Violet,
+}
+
+impl TabColor {
+    pub const ALL: [Self; 9] = [
+        Self::Default,
+        Self::Blue,
+        Self::Green,
+        Self::Amber,
+        Self::Red,
+        Self::Cyan,
+        Self::Teal,
+        Self::Pink,
+        Self::Violet,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Blue => "Blue",
+            Self::Green => "Green",
+            Self::Amber => "Amber",
+            Self::Red => "Red",
+            Self::Cyan => "Cyan",
+            Self::Teal => "Teal",
+            Self::Pink => "Pink",
+            Self::Violet => "Violet",
+        }
+    }
+
+    const fn is_default(value: &Self) -> bool {
+        matches!(value, Self::Default)
+    }
 }
 
 impl AuthMethod {
@@ -111,6 +159,10 @@ pub struct HostProfile {
     pub host: String,
     pub port: u16,
     pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tab_label: String,
+    #[serde(default, skip_serializing_if = "TabColor::is_default")]
+    pub tab_color: TabColor,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub group: String,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -416,6 +468,14 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
         {
             return Err("Host profiles require a name, host, username, and valid port.".to_owned());
         }
+        if profile.tab_label.chars().count() > MAX_TAB_LABEL_CHARS
+            || profile.tab_label.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "Host profile {} has an invalid tab label.",
+                profile.name
+            ));
+        }
         if !names.insert(profile.name.to_lowercase()) {
             return Err(format!(
                 "Host profile names must be unique: {}",
@@ -479,6 +539,8 @@ mod tests {
             host: "server.example.com".to_owned(),
             port: 2222,
             username: "operator".to_owned(),
+            tab_label: String::new(),
+            tab_color: TabColor::Default,
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Password,
@@ -567,6 +629,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("export.json");
         let profiles = vec![HostProfile {
+            tab_label: "API west".to_owned(),
+            tab_color: TabColor::Teal,
             group: "Production".to_owned(),
             favorite: true,
             proxy_jump: "bastion".to_owned(),
@@ -658,6 +722,8 @@ mod tests {
                 host: "prod.example.com".to_owned(),
                 port: 22,
                 username: "deploy".to_owned(),
+                tab_label: String::new(),
+                tab_color: TabColor::Default,
                 group: String::new(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -752,6 +818,43 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+    }
+
+    #[test]
+    fn version_six_profiles_migrate_with_default_tab_appearance() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 6,
+                "profiles": [{
+                    "name": "prod",
+                    "host": "prod.example.com",
+                    "port": 22,
+                    "username": "deploy"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let store = ProfileStore::at(path);
+
+        let data = store.load().unwrap();
+        assert!(data.profiles[0].tab_label.is_empty());
+        assert_eq!(data.profiles[0].tab_color, TabColor::Default);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+    }
+
+    #[test]
+    fn tab_labels_are_bounded_and_reject_control_characters() {
+        let mut host = profile("prod");
+        host.tab_label = "x".repeat(MAX_TAB_LABEL_CHARS + 1);
+        assert!(validate_profiles(&[host.clone()]).is_err());
+
+        host.tab_label = "production\nblue".to_owned();
+        assert!(validate_profiles(&[host]).is_err());
     }
 
     #[test]

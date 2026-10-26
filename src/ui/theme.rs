@@ -7,6 +7,8 @@ use gpui::{App, Hsla, px, rgb, rgba};
 use gpui_component::{Theme, ThemeMode};
 use serde::{Deserialize, Serialize};
 
+use crate::profiles::TabColor;
+
 use super::tokens;
 
 /// Which UI palette is active. Terminal palettes stay independent.
@@ -71,6 +73,7 @@ pub struct ThemeTokens {
     pub success: Hsla,
     pub warning: Hsla,
     pub danger: Hsla,
+    pub tab_colors: [Hsla; 8],
     /// Higher-contrast variants for colored text on tinted backgrounds.
     pub accent_text: Hsla,
     pub success_text: Hsla,
@@ -102,6 +105,16 @@ impl ThemeTokens {
                 success: rgb(0x22C55E).into(),
                 warning: rgb(0xF59E0B).into(),
                 danger: rgb(0xEF4444).into(),
+                tab_colors: [
+                    rgb(0x3B82F6).into(),
+                    rgb(0x22C55E).into(),
+                    rgb(0xF59E0B).into(),
+                    rgb(0xEF4444).into(),
+                    rgb(0x22D3EE).into(),
+                    rgb(0x2DD4BF).into(),
+                    rgb(0xF472B6).into(),
+                    rgb(0xA78BFA).into(),
+                ],
                 accent_text: rgb(0x60A5FA).into(),
                 success_text: rgb(0x4ADE80).into(),
                 warning_text: rgb(0xFBBF24).into(),
@@ -126,6 +139,16 @@ impl ThemeTokens {
                 success: rgb(0x16A34A).into(),
                 warning: rgb(0xD97706).into(),
                 danger: rgb(0xDC2626).into(),
+                tab_colors: [
+                    rgb(0x2563EB).into(),
+                    rgb(0x16A34A).into(),
+                    rgb(0xD97706).into(),
+                    rgb(0xDC2626).into(),
+                    rgb(0x0E7490).into(),
+                    rgb(0x0F766E).into(),
+                    rgb(0xBE185D).into(),
+                    rgb(0x6D28D9).into(),
+                ],
                 accent_text: rgb(0x1D4ED8).into(),
                 success_text: rgb(0x166534).into(),
                 warning_text: rgb(0x92400E).into(),
@@ -135,6 +158,21 @@ impl ThemeTokens {
                 scrim: rgba(0x10182852).into(),
             },
         }
+    }
+
+    pub fn tab_color(self, color: TabColor) -> Option<Hsla> {
+        let index = match color {
+            TabColor::Default => return None,
+            TabColor::Blue => 0,
+            TabColor::Green => 1,
+            TabColor::Amber => 2,
+            TabColor::Red => 3,
+            TabColor::Cyan => 4,
+            TabColor::Teal => 5,
+            TabColor::Pink => 6,
+            TabColor::Violet => 7,
+        };
+        Some(self.tab_colors[index])
     }
 }
 
@@ -305,6 +343,14 @@ mod tests {
             }
             assert!(contrast_ratio(tokens.on_accent, tokens.accent) >= 3.0);
             assert!(contrast_ratio(tokens.on_accent, tokens.danger) >= 3.0);
+            for color in tokens.tab_colors {
+                for surface in [tokens.surface, tokens.surface_raised] {
+                    assert!(
+                        contrast_ratio(color, surface) >= 3.0,
+                        "{theme:?} tab color contrast is too low"
+                    );
+                }
+            }
         }
     }
 

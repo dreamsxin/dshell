@@ -352,6 +352,8 @@ fn build_profile(
         host,
         port,
         username,
+        tab_label: String::new(),
+        tab_color: crate::profiles::TabColor::Default,
         group: "Imported".to_owned(),
         favorite: false,
         auth_method: if identity_file.is_empty() {

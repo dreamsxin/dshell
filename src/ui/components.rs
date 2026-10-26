@@ -10,8 +10,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Div, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Stateful, Styled, div, px, relative,
+    AnyElement, Div, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Stateful, Styled, div, px, relative,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _, Size, StyledExt as _,
@@ -105,6 +105,45 @@ pub fn button(
         ButtonKind::Ghost => button.ghost(),
         ButtonKind::Danger => button.danger(),
     }
+}
+
+pub fn color_swatch(
+    tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    color: Hsla,
+    selected: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(tokens::SPACE_1))
+        .h(px(tokens::CONTROL_HEIGHT_SM))
+        .px(px(tokens::SPACE_2))
+        .border_1()
+        .border_color(if selected {
+            tokens.focus_ring
+        } else {
+            tokens.border_subtle
+        })
+        .rounded(px(tokens::RADIUS_CONTROL))
+        .bg(if selected {
+            tokens.accent.opacity(0.12)
+        } else {
+            tokens.surface
+        })
+        .text_size(px(tokens::FONT_CAPTION))
+        .text_color(tokens.text_primary)
+        .hover(|style| style.bg(tokens.surface_raised))
+        .cursor_pointer()
+        .child(
+            div()
+                .size(px(tokens::ICON_SIZE_INLINE))
+                .rounded(px(tokens::RADIUS_PILL))
+                .bg(color),
+        )
+        .child(label.into())
 }
 
 pub fn toggle_switch(
