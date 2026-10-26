@@ -376,6 +376,15 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Keep-alive must be between 0 and 3600 seconds (0 disables it)." => {
             "保活必须介于 0 到 3600 秒之间（0 表示关闭）。"
         }
+        "Enable at least one command to run after login." => "请至少填写一条登录后命令。",
+        "At most 16 login commands are supported." => "最多支持 16 条登录后命令。",
+        "Login command text cannot exceed 4096 bytes." => "登录后命令总长度不能超过 4096 字节。",
+        "Each login command must be a non-empty single line of at most 1024 bytes with no control characters." => {
+            "每条登录后命令必须为非空单行，最多 1024 字节且不能包含控制字符。"
+        }
+        "Login commands cannot exceed 4096 bytes in total." => {
+            "登录后命令总长度不能超过 4096 字节。"
+        }
         "Port must be between 1 and 65535." => "端口必须介于 1 到 65535 之间。",
         "Profile name, host, username, and a valid port are required." => {
             "主机资料名称、主机、用户名和有效端口不能为空。"
@@ -447,6 +456,11 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Reconnect after connection loss" => "连接中断后自动重连",
         "Retry interval (seconds)" => "重试间隔（秒）",
         "Maximum attempts" => "最大重试次数",
+        "Run commands after login" => "登录后运行命令",
+        "Commands after login" => "登录后命令",
+        "Enter one command per line. Enabled commands run once in the visible terminal after the first successful login; reconnects do not replay them. Do not include passwords or other secrets." => {
+            "每行输入一条命令。启用后，仅首次成功登录时在可见终端中运行；自动重连不会重复运行。请勿填写密码或其他秘密。"
+        }
         "Protocol" => "协议",
         "Username" => "用户名",
         "Authentication method" => "认证方式",
@@ -1284,5 +1298,31 @@ mod tests {
             "关闭服务器"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "TABS"), "标签页");
+    }
+
+    #[test]
+    fn simplified_chinese_translates_login_command_settings() {
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Run commands after login"),
+            "登录后运行命令"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Commands after login"),
+            "登录后命令"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Enter one command per line. Enabled commands run once in the visible terminal after the first successful login; reconnects do not replay them. Do not include passwords or other secrets."
+            ),
+            "每行输入一条命令。启用后，仅首次成功登录时在可见终端中运行；自动重连不会重复运行。请勿填写密码或其他秘密。"
+        );
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "Enable at least one command to run after login."
+            ),
+            "请至少填写一条登录后命令。"
+        );
     }
 }

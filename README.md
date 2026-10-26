@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.41`.
+`v0.1.42`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -39,6 +39,14 @@ an empty title keeps the session name. SFTP remembers the latest local folder
 and remote directory per host, port, and user. New connections restore the
 remote directory, and downloads reuse the remembered local folder.
 
+In a saved session's `Connection` properties, enable `Run commands after login`
+and enter up to 16 single-line commands. After the first successful interactive
+login, dshell submits them as one visible shell command sequence; it does not
+replay them after reconnecting or answer authentication prompts. Commands are
+stored with the host profile and included in profile exports, but imported
+profiles have automatic execution disabled until explicitly enabled. Do not put
+passwords, passphrases, tokens, or other secrets in command text.
+
 The Keys panel can discover existing OpenSSH identities, import a private key
 into `~/.ssh`, export a key pair to a user-selected path, change a passphrase,
 copy a public key, and delete a key pair after an explicit confirmation. Key
@@ -71,8 +79,10 @@ connection, credentials are reused from memory until dshell exits and must be
 entered again after restart. A rejected credential clears that cache and
 reopens the dialog, while Cancel abandons and removes the failed connection.
 Each connection opens an independent session tab; choose `Duplicate session`
-from a saved session's tab actions to open another SSH connection with a unique
-tab title. Switching tabs
+from any active tab's actions to open another SSH connection with a unique tab
+title. Ad-hoc sessions retain only non-secret launch settings for duplication;
+passwords and passphrases are reused from memory when available or requested
+again. Switching tabs
 preserves each session's terminal state, and closing a tab ends only that SSH
 session. The password and key passphrase fields are masked and cleared when
 connection starts. Click the terminal area to focus it, then use the

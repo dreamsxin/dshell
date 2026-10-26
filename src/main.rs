@@ -42,9 +42,10 @@ use groups::{
 };
 use openssh_config::import_openssh_config;
 use profiles::{
-    AuthMethod, HostData, HostProfile, MAX_FORWARD_RULES, MAX_TAB_LABEL_CHARS, ProfileStore,
-    RecentConnection, ReconnectSettings, TabColor, export_profiles as export_host_profiles,
-    import_profiles as import_host_profiles, record_recent,
+    AuthMethod, HostData, HostProfile, LoginCommandSettings, MAX_FORWARD_RULES,
+    MAX_TAB_LABEL_CHARS, ProfileStore, RecentConnection, ReconnectSettings, TabColor,
+    export_profiles as export_host_profiles, import_profiles as import_host_profiles,
+    parse_login_commands, record_recent,
 };
 use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
 use sftp::{
@@ -1057,12 +1058,52 @@ struct SshSession {
     forward_tx: Option<mpsc::Sender<ForwardCommand>>,
     forwards: ForwardViewState,
     profile_name: Option<String>,
+    login_commands: Vec<String>,
+    login_commands_pending: bool,
     pending_forwards: Vec<ForwardRuleSpec>,
     log_path: Option<PathBuf>,
     connection_info: Option<ConnectionInfo>,
     server_metrics: ServerMetricsViewState,
     credential_key: Option<CredentialCacheKey>,
+    launch_settings: SessionLaunchSettings,
     state: SessionState,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SessionLaunchSettings {
+    auth_method: AuthMethod,
+    identity_file: String,
+    proxy_jump: String,
+    keepalive_seconds: u16,
+    reconnect: ReconnectSettings,
+    forwards: Vec<ForwardRuleSpec>,
+    login_commands: LoginCommandSettings,
+}
+
+impl SessionLaunchSettings {
+    fn to_profile(&self, name: &str, host: &str, port: u16, username: &str) -> HostProfile {
+        HostProfile {
+            name: name.to_owned(),
+            host: host.to_owned(),
+            port,
+            username: username.to_owned(),
+            tab_label: String::new(),
+            tab_color: TabColor::Default,
+            group: String::new(),
+            favorite: false,
+            auth_method: self.auth_method,
+            identity_file: self.identity_file.clone(),
+            proxy_jump: self.proxy_jump.clone(),
+            forwards: self.forwards.clone(),
+            keepalive_seconds: self.keepalive_seconds,
+            reconnect: self.reconnect.clone(),
+            login_commands: self.login_commands.clone(),
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
+        }
+    }
 }
 
 struct GroupLaunchState {
@@ -1257,8 +1298,27 @@ impl SshSession {
         match event {
             UiEvent::Status(status) => {
                 let was_reconnecting = self.state == SessionState::Reconnecting;
+                let interactive_shell_ready = status.starts_with("Connected to ");
                 self.status = status;
                 self.state = SessionState::Connected;
+                if interactive_shell_ready && self.login_commands_pending {
+                    self.login_commands_pending = false;
+                    if !self.input_locked
+                        && let (Some(command_tx), Some(command_text)) = (
+                            self.command_tx.as_ref(),
+                            login_command_submission(&self.login_commands),
+                        )
+                        && command_tx.capacity() >= 2
+                    {
+                        // Keep the sequence in one shell input line so later commands cannot become a running process's stdin.
+                        let paste_queued = command_tx
+                            .try_send(TerminalRequest::Paste(command_text))
+                            .is_ok();
+                        if paste_queued {
+                            let _ = command_tx.try_send(terminal_enter_request());
+                        }
+                    }
+                }
                 let pending = std::mem::take(&mut self.pending_forwards);
                 if let Some(forward_tx) = &self.forward_tx {
                     for rule in pending {
@@ -1497,6 +1557,22 @@ fn terminal_request_is_input(request: &TerminalRequest) -> bool {
     )
 }
 
+fn login_command_submission(commands: &[String]) -> Option<String> {
+    (!commands.is_empty()).then(|| commands.join("; "))
+}
+
+fn terminal_enter_request() -> TerminalRequest {
+    TerminalRequest::Key(TerminalKeyInput {
+        key: "enter".to_owned(),
+        text: None,
+        control: false,
+        alt: false,
+        shift: false,
+        platform: false,
+        function: false,
+    })
+}
+
 fn queue_sftp_directory_refresh(session: &SshSession) -> bool {
     let Some(sftp_tx) = &session.sftp_tx else {
         return false;
@@ -1610,6 +1686,15 @@ fn saved_profile_for_session<'a>(
         .find(|profile| profile.name.eq_ignore_ascii_case(name))
 }
 
+fn matching_saved_profile_for_session<'a>(
+    session: &SshSession,
+    profiles: &'a [HostProfile],
+) -> Option<&'a HostProfile> {
+    saved_profile_for_session(session, profiles).filter(|profile| {
+        session_matches_target(session, &profile.host, profile.port, &profile.username)
+    })
+}
+
 fn profile_tab_title(profile: &HostProfile) -> &str {
     let label = profile.tab_label.trim();
     if label.is_empty() {
@@ -1643,7 +1728,10 @@ fn unique_duplicate_session_title(base: &str, existing_titles: &[String]) -> Str
     let mut suffix = 2usize;
     loop {
         let candidate = format!("{base} ({suffix})");
-        if !existing_titles.iter().any(|title| title == &candidate) {
+        if !existing_titles
+            .iter()
+            .any(|title| title.eq_ignore_ascii_case(&candidate))
+        {
             return candidate;
         }
         let Some(next_suffix) = suffix.checked_add(1) else {
@@ -1687,12 +1775,13 @@ mod session_tests {
     use super::{
         AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, GroupLaunchState,
         LayoutDragTarget, LocalUploadKind, MouseTrackingMode, SessionEditorEscape,
-        SessionEditorKey, SessionSplit, SessionState, SftpViewState, SplitOrientation, SshSession,
-        TabColor, TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut,
-        apply_session_event, collapsed_group_key, dragged_panel_width, enqueue_session_request,
-        filesystem_usage_percent, forget_stopped_forward, format_alert_time, format_log_time,
-        format_rate, format_storage_kib, group_launch_candidates, is_authentication_failure,
-        is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
+        SessionEditorKey, SessionLaunchSettings, SessionSplit, SessionState, SftpViewState,
+        SplitOrientation, SshSession, TabColor, TerminalFrame, TerminalRequest, TerminalSize,
+        UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
+        enqueue_session_request, filesystem_usage_percent, forget_stopped_forward,
+        format_alert_time, format_log_time, format_rate, format_storage_kib,
+        group_launch_candidates, is_authentication_failure, is_sftp_transfer_command,
+        keyword_matches, local_upload_kind, mark_sftp_ready, matching_saved_profile_for_session,
         memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
         parse_alert_percent, recall_compose_history, recent_sftp_directories_for_target,
         remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
@@ -1705,7 +1794,9 @@ mod session_tests {
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
-    use crate::profiles::{AuthMethod, HostProfile, RecentConnection, ReconnectSettings};
+    use crate::profiles::{
+        AuthMethod, HostProfile, LoginCommandSettings, RecentConnection, ReconnectSettings,
+    };
     use crate::settings::AppSettings;
     use crate::sftp::SftpCommand;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
@@ -1749,11 +1840,14 @@ mod session_tests {
                 forward_tx: None,
                 forwards: ForwardViewState::default(),
                 profile_name: None,
+                login_commands: Vec::new(),
+                login_commands_pending: false,
                 pending_forwards: Vec::new(),
                 log_path: None,
                 connection_info: None,
                 server_metrics: crate::ServerMetricsViewState::default(),
                 credential_key: None,
+                launch_settings: SessionLaunchSettings::default(),
                 state: SessionState::Connected,
             },
             command_rx,
@@ -1901,6 +1995,7 @@ mod session_tests {
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
+                login_commands: crate::profiles::LoginCommandSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -1976,6 +2071,7 @@ mod session_tests {
             forwards: Vec::new(),
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
+            login_commands: crate::profiles::LoginCommandSettings::default(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2084,6 +2180,52 @@ mod session_tests {
             unique_duplicate_session_title("other-host", &existing),
             "other-host (2)"
         );
+        assert_eq!(
+            unique_duplicate_session_title("manual-test", &["Manual-Test (2)".to_owned()]),
+            "manual-test (3)"
+        );
+    }
+
+    #[test]
+    fn duplicate_launch_profile_preserves_connection_settings_without_credentials() {
+        let settings = SessionLaunchSettings {
+            auth_method: AuthMethod::PublicKey,
+            identity_file: "~/.ssh/id_ed25519".to_owned(),
+            proxy_jump: "bastion".to_owned(),
+            keepalive_seconds: 30,
+            reconnect: ReconnectSettings {
+                enabled: true,
+                interval_seconds: 10,
+                max_attempts: 6,
+            },
+            forwards: vec![ForwardRuleSpec {
+                kind: crate::forward::ForwardKind::Local,
+                listen_host: "127.0.0.1".to_owned(),
+                listen_port: 15432,
+                target_host: "db.internal".to_owned(),
+                target_port: 5432,
+            }],
+            login_commands: LoginCommandSettings {
+                enabled: true,
+                commands: vec!["cd /srv/app".to_owned()],
+            },
+        };
+
+        let profile =
+            settings.to_profile("manual-test (2)", "server.example.com", 2222, "operator");
+
+        assert_eq!(profile.name, "manual-test (2)");
+        assert_eq!(profile.auth_method, AuthMethod::PublicKey);
+        assert_eq!(profile.identity_file, "~/.ssh/id_ed25519");
+        assert_eq!(profile.proxy_jump, "bastion");
+        assert_eq!(profile.keepalive_seconds, 30);
+        assert_eq!(profile.reconnect, settings.reconnect);
+        assert_eq!(profile.forwards, settings.forwards);
+        assert_eq!(profile.login_commands, settings.login_commands);
+        assert!(profile.password.is_empty());
+        assert!(profile.passphrase.is_empty());
+        assert!(profile.jump_password.is_empty());
+        assert!(profile.jump_passphrase.is_empty());
     }
 
     #[test]
@@ -2103,6 +2245,7 @@ mod session_tests {
             forwards: Vec::new(),
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
+            login_commands: crate::profiles::LoginCommandSettings::default(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2146,6 +2289,7 @@ mod session_tests {
             forwards: Vec::new(),
             keepalive_seconds: 0,
             reconnect: crate::profiles::ReconnectSettings::default(),
+            login_commands: crate::profiles::LoginCommandSettings::default(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2159,6 +2303,16 @@ mod session_tests {
             saved_profile_for_session(&session, &profiles).map(|profile| profile.name.as_str()),
             Some("manual-test")
         );
+        assert_eq!(
+            matching_saved_profile_for_session(&session, &profiles)
+                .map(|profile| profile.name.as_str()),
+            Some("manual-test")
+        );
+        let changed_target = vec![HostProfile {
+            host: "changed.example.com".to_owned(),
+            ..profiles[0].clone()
+        }];
+        assert!(matching_saved_profile_for_session(&session, &changed_target).is_none());
         session.profile_name = Some("temporary-session".to_owned());
         assert!(saved_profile_for_session(&session, &profiles).is_none());
         session.profile_name = None;
@@ -2210,6 +2364,53 @@ mod session_tests {
             second_rx.try_recv(),
             Ok(TerminalRequest::Paste(text)) if text == "target only"
         ));
+    }
+
+    #[test]
+    fn login_commands_submit_once_after_the_interactive_shell_connects() {
+        let (mut session, mut command_rx, _) = test_session(1);
+        session.state = SessionState::Connecting;
+        session.login_commands = vec!["cd /srv/app".to_owned(), "uname -a".to_owned()];
+        session.login_commands_pending = true;
+
+        assert!(session.apply_event(UiEvent::Status("Connecting".to_owned())));
+        assert!(command_rx.try_recv().is_err());
+
+        assert!(session.apply_event(UiEvent::Status(
+            "Connected to server.example.com:22 as test".to_owned()
+        )));
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(TerminalRequest::Paste(text)) if text == "cd /srv/app; uname -a"
+        ));
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(TerminalRequest::Key(key)) if key.key == "enter"
+        ));
+
+        assert!(session.apply_event(UiEvent::Reconnecting {
+            attempt: 1,
+            max_attempts: 5,
+            delay_seconds: 5,
+        }));
+        assert!(session.apply_event(UiEvent::Status(
+            "Connected to server.example.com:22 as test".to_owned()
+        )));
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn locked_terminal_skips_pending_login_commands() {
+        let (mut session, mut command_rx, _) = test_session(1);
+        session.input_locked = true;
+        session.login_commands = vec!["pwd".to_owned()];
+        session.login_commands_pending = true;
+
+        assert!(session.apply_event(UiEvent::Status(
+            "Connected to server.example.com:22 as test".to_owned()
+        )));
+        assert!(command_rx.try_recv().is_err());
+        assert!(!session.login_commands_pending);
     }
 
     #[test]
@@ -2727,6 +2928,7 @@ mod session_tests {
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
+                login_commands: crate::profiles::LoginCommandSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2783,6 +2985,7 @@ mod session_tests {
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
+                login_commands: crate::profiles::LoginCommandSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2838,6 +3041,7 @@ mod session_tests {
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
+                login_commands: crate::profiles::LoginCommandSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2878,6 +3082,7 @@ mod session_tests {
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
+                login_commands: crate::profiles::LoginCommandSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -3121,6 +3326,8 @@ struct AppView {
     profile_group: Entity<InputState>,
     profile_favorite: bool,
     profile_auto_reconnect: bool,
+    profile_login_commands_enabled: bool,
+    profile_login_commands: Entity<InputState>,
     auth_method: AuthMethod,
     auth_profiles: Vec<AuthProfile>,
     auth_profile_store: Option<AuthProfileStore>,
@@ -3278,6 +3485,7 @@ impl AppView {
         let profile_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search saved hosts"));
         let profile_group = cx.new(|cx| InputState::new(window, cx).placeholder("Ungrouped"));
+        let profile_login_commands = cx.new(|cx| InputState::new(window, cx).multi_line());
         let group_editor_name = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let identity_file =
             cx.new(|cx| InputState::new(window, cx).placeholder("~/.ssh/id_ed25519"));
@@ -3466,6 +3674,8 @@ impl AppView {
             profile_group,
             profile_favorite: false,
             profile_auto_reconnect: false,
+            profile_login_commands_enabled: false,
+            profile_login_commands,
             auth_method: AuthMethod::Password,
             auth_profiles,
             auth_profile_store,
@@ -3971,31 +4181,37 @@ impl AppView {
         }
     }
 
-    fn duplicate_saved_session(
-        &mut self,
-        session_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn duplicate_session(&mut self, session_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.tab_menu_session = None;
-        let Some(profile) = self
-            .session(session_id)
-            .and_then(|session| saved_profile_for_session(session, &self.profiles))
-            .cloned()
+        let Some((saved_profile, source_title, host, port, username, launch_settings)) =
+            self.session(session_id).map(|session| {
+                (
+                    matching_saved_profile_for_session(session, &self.profiles).cloned(),
+                    session.title.clone(),
+                    session.host.clone(),
+                    session.port,
+                    session.username.clone(),
+                    session.launch_settings.clone(),
+                )
+            })
         else {
-            self.show_toast(
-                self.tr("Save this host profile before duplicating the session."),
-                Tone::Warning,
-                cx,
-            );
             return;
         };
-        let existing_titles = self
+        let mut existing_titles = self
             .sessions
             .iter()
             .map(|session| session.title.clone())
             .collect::<Vec<_>>();
-        let title = unique_duplicate_session_title(profile_tab_title(&profile), &existing_titles);
+        let title_base = saved_profile
+            .as_ref()
+            .map_or(source_title.as_str(), profile_tab_title)
+            .to_owned();
+        if saved_profile.is_none() {
+            existing_titles.extend(self.profiles.iter().map(|profile| profile.name.clone()));
+        }
+        let title = unique_duplicate_session_title(&title_base, &existing_titles);
+        let profile = saved_profile
+            .unwrap_or_else(|| launch_settings.to_profile(&title, &host, port, &username));
         self.start_saved_profile_connection(&profile, Some(title), window, cx);
     }
 
@@ -4828,6 +5044,7 @@ impl AppView {
         Self::set_input_value(&self.profile_tab_label, "", window, cx);
         self.profile_tab_color = TabColor::Default;
         Self::set_input_value(&self.profile_group, "", window, cx);
+        Self::set_input_value(&self.profile_login_commands, "", window, cx);
         Self::set_input_value(&self.host, "", window, cx);
         Self::set_input_value(&self.port, "22", window, cx);
         Self::set_input_value(&self.username, "", window, cx);
@@ -4842,6 +5059,7 @@ impl AppView {
         Self::set_input_value(&self.reconnect_max_attempts, "5", window, cx);
         self.profile_favorite = false;
         self.profile_auto_reconnect = false;
+        self.profile_login_commands_enabled = false;
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
         self.selected_profile = None;
@@ -4887,6 +5105,13 @@ impl AppView {
             cx,
         );
         self.profile_auto_reconnect = profile.reconnect.enabled;
+        self.profile_login_commands_enabled = profile.login_commands.enabled;
+        Self::set_input_value(
+            &self.profile_login_commands,
+            &profile.login_commands.commands.join("\n"),
+            window,
+            cx,
+        );
         Self::set_input_value(
             &self.reconnect_interval_seconds,
             &profile.reconnect.interval_seconds.to_string(),
@@ -4939,6 +5164,7 @@ impl AppView {
         Self::set_input_value(&self.profile_tab_label, "", window, cx);
         self.profile_tab_color = TabColor::Default;
         Self::set_input_value(&self.profile_group, "", window, cx);
+        Self::set_input_value(&self.profile_login_commands, "", window, cx);
         Self::set_input_value(&self.host, &entry.host, window, cx);
         Self::set_input_value(&self.port, &entry.port.to_string(), window, cx);
         Self::set_input_value(&self.username, &entry.username, window, cx);
@@ -4953,6 +5179,7 @@ impl AppView {
         Self::set_input_value(&self.reconnect_max_attempts, "5", window, cx);
         self.profile_favorite = false;
         self.profile_auto_reconnect = false;
+        self.profile_login_commands_enabled = false;
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
         self.selected_profile = None;
@@ -6123,6 +6350,23 @@ impl AppView {
             cx.notify();
             return;
         }
+        let login_commands =
+            match parse_login_commands(&self.profile_login_commands.read(cx).text().to_string()) {
+                Ok(commands) => LoginCommandSettings {
+                    enabled: self.profile_login_commands_enabled,
+                    commands,
+                },
+                Err(error) => {
+                    self.profile_message = self.tr(&error);
+                    cx.notify();
+                    return;
+                }
+            };
+        if let Err(error) = login_commands.validate() {
+            self.profile_message = self.tr(&error);
+            cx.notify();
+            return;
+        }
         let previous_profile = self
             .selected_profile
             .as_ref()
@@ -6207,6 +6451,7 @@ impl AppView {
             forwards: existing_forwards,
             keepalive_seconds,
             reconnect,
+            login_commands,
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -6324,6 +6569,23 @@ impl AppView {
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let retrying_session_id = self.credential_prompt_session_id;
+        let login_commands =
+            match parse_login_commands(&self.profile_login_commands.read(cx).text().to_string()) {
+                Ok(commands) => LoginCommandSettings {
+                    enabled: self.profile_login_commands_enabled,
+                    commands,
+                },
+                Err(error) => {
+                    self.profile_message = self.tr(&error);
+                    cx.notify();
+                    return;
+                }
+            };
+        if let Err(error) = login_commands.validate() {
+            self.profile_message = self.tr(&error);
+            cx.notify();
+            return;
+        }
         let host = self.host.read(cx).value().trim().to_owned();
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().trim().to_owned();
@@ -6408,6 +6670,15 @@ impl AppView {
             .as_ref()
             .map(|profile| profile.forwards.clone())
             .unwrap_or_default();
+        let launch_settings = SessionLaunchSettings {
+            auth_method: self.auth_method,
+            identity_file: identity_file.clone(),
+            proxy_jump: jump_name.clone(),
+            keepalive_seconds,
+            reconnect: reconnect.clone(),
+            forwards: saved_forwards.clone(),
+            login_commands: login_commands.clone(),
+        };
         let authentication =
             match build_authentication(self.auth_method, &identity_file, password, passphrase) {
                 Ok(authentication) => authentication,
@@ -6567,11 +6838,14 @@ impl AppView {
                     forward_tx: Some(forwards),
                     forwards: ForwardViewState::default(),
                     profile_name: saved_profile_name.clone(),
+                    login_commands: login_commands.commands.clone(),
+                    login_commands_pending: login_commands.enabled,
                     pending_forwards: saved_forwards.clone(),
                     log_path: None,
                     connection_info: None,
                     server_metrics: ServerMetricsViewState::default(),
                     credential_key: Some(credential_key.clone()),
+                    launch_settings,
                     state: SessionState::Connecting,
                 });
                 if let Some(launch) = self.group_launch.as_mut()
@@ -8091,6 +8365,32 @@ impl AppView {
                             ),
                     )
                 })
+                .child(
+                    components::toggle_switch(
+                        &tokens,
+                        "profile-login-commands",
+                        self.tr("Run commands after login"),
+                        self.profile_login_commands_enabled,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.profile_login_commands_enabled =
+                            !this.profile_login_commands_enabled;
+                        cx.notify();
+                    })),
+                )
+                .child(components::label_text(
+                    &tokens,
+                    self.tr("Commands after login"),
+                ))
+                .child(
+                    TextInput::new(&self.profile_login_commands)
+                        .h(px(ui_tokens::INPUT_MULTILINE_HEIGHT))
+                        .w_full(),
+                )
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("Enter one command per line. Enabled commands run once in the visible terminal after the first successful login; reconnects do not replay them. Do not include passwords or other secrets."),
+                ))
                 .child(
                     div()
                         .flex()
@@ -16480,7 +16780,6 @@ impl AppView {
         let has_other = self.sessions.iter().any(|session| session.id != session_id);
         let has_right = session_index + 1 < self.sessions.len();
         let saved_profile = saved_profile_for_session(session, &self.profiles).cloned();
-        let can_duplicate = saved_profile.is_some();
         let menu = div()
             .id("session-tab-menu")
             .occlude()
@@ -16565,10 +16864,10 @@ impl AppView {
                     self.tr("Duplicate session"),
                     "",
                     false,
-                    can_duplicate,
+                    true,
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.duplicate_saved_session(session_id, window, cx);
+                    this.duplicate_session(session_id, window, cx);
                 })),
             )
             .child(

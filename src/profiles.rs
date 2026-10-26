@@ -10,13 +10,17 @@ use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 use crate::forward::ForwardRuleSpec;
 use crate::groups::normalize_group_path;
 
-const DOCUMENT_VERSION: u8 = 7;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 7] = [1, 2, 3, 4, 5, 6, 7];
-const EXPORT_DOCUMENT_VERSION: u8 = 3;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 3] = [1, 2, EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 8;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+const EXPORT_DOCUMENT_VERSION: u8 = 4;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 4] = [1, 2, 3, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 pub const MAX_TAB_LABEL_CHARS: usize = 80;
+pub const MAX_LOGIN_COMMANDS: usize = 16;
+pub const MAX_LOGIN_COMMAND_BYTES: usize = 1024;
+pub const MAX_LOGIN_COMMAND_TOTAL_BYTES: usize = 4096;
+const MAX_LOGIN_COMMAND_TEXT_BYTES: usize = MAX_LOGIN_COMMAND_TOTAL_BYTES + MAX_LOGIN_COMMANDS;
 const MAX_RECENT_DIRECTORY_BYTES: usize = 4096;
 pub const MIN_RECONNECT_INTERVAL_SECONDS: u16 = 1;
 pub const MAX_RECONNECT_INTERVAL_SECONDS: u16 = 300;
@@ -144,6 +148,72 @@ impl ReconnectSettings {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginCommandSettings {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
+}
+
+impl LoginCommandSettings {
+    fn is_default(&self) -> bool {
+        !self.enabled && self.commands.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_login_commands(&self.commands)?;
+        if self.enabled && self.commands.is_empty() {
+            return Err("Enable at least one command to run after login.".to_owned());
+        }
+        Ok(())
+    }
+}
+
+pub fn parse_login_commands(text: &str) -> Result<Vec<String>, String> {
+    if text.len() > MAX_LOGIN_COMMAND_TEXT_BYTES {
+        return Err(format!(
+            "Login command text cannot exceed {MAX_LOGIN_COMMAND_TOTAL_BYTES} bytes."
+        ));
+    }
+
+    let commands = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    validate_login_commands(&commands)?;
+    Ok(commands)
+}
+
+fn validate_login_commands(commands: &[String]) -> Result<(), String> {
+    if commands.len() > MAX_LOGIN_COMMANDS {
+        return Err(format!(
+            "At most {MAX_LOGIN_COMMANDS} login commands are supported."
+        ));
+    }
+    let mut total_bytes = commands.len().saturating_sub(1);
+    for command in commands {
+        if command.trim().is_empty()
+            || command.len() > MAX_LOGIN_COMMAND_BYTES
+            || command.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "Each login command must be a non-empty single line of at most {MAX_LOGIN_COMMAND_BYTES} bytes with no control characters."
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(command.len());
+    }
+    if total_bytes > MAX_LOGIN_COMMAND_TOTAL_BYTES {
+        return Err(format!(
+            "Login commands cannot exceed {MAX_LOGIN_COMMAND_TOTAL_BYTES} bytes in total."
+        ));
+    }
+    Ok(())
+}
+
 const fn default_reconnect_interval() -> u16 {
     5
 }
@@ -179,6 +249,8 @@ pub struct HostProfile {
     pub keepalive_seconds: u16,
     #[serde(default)]
     pub reconnect: ReconnectSettings,
+    #[serde(default, skip_serializing_if = "LoginCommandSettings::is_default")]
+    pub login_commands: LoginCommandSettings,
     #[serde(
         default,
         skip_serializing,
@@ -398,7 +470,11 @@ pub fn import_profiles(path: &Path) -> Result<Vec<HostProfile>, String> {
         ));
     }
     validate_profiles(&document.profiles)?;
-    Ok(document.profiles)
+    let mut profiles = document.profiles;
+    for profile in &mut profiles {
+        profile.login_commands.enabled = false;
+    }
+    Ok(profiles)
 }
 
 pub fn record_recent(recent: &mut Vec<RecentConnection>, entry: RecentConnection) {
@@ -500,6 +576,10 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
             .reconnect
             .validate()
             .map_err(|error| format!("Host profile {}: {error}", profile.name))?;
+        profile
+            .login_commands
+            .validate()
+            .map_err(|error| format!("Host profile {}: {error}", profile.name))?;
         validate_forward_rules(profile)?;
     }
     Ok(())
@@ -549,6 +629,7 @@ mod tests {
             forwards: Vec::new(),
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
+            login_commands: LoginCommandSettings::default(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -642,6 +723,10 @@ mod tests {
                 target_port: 5432,
             }],
             keepalive_seconds: 30,
+            login_commands: LoginCommandSettings {
+                enabled: true,
+                commands: vec!["cd /srv/app".to_owned(), "uname -a".to_owned()],
+            },
             password: "secret".to_owned(),
             passphrase: "key-secret".to_owned(),
             jump_password: "jump-secret".to_owned(),
@@ -655,6 +740,7 @@ mod tests {
         expected[0].passphrase.clear();
         expected[0].jump_password.clear();
         expected[0].jump_passphrase.clear();
+        expected[0].login_commands.enabled = false;
         assert_eq!(import_profiles(&path).unwrap(), expected);
         let contents = fs::read_to_string(path).unwrap();
         assert!(!contents.contains("recent"));
@@ -732,6 +818,7 @@ mod tests {
                 forwards: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
+                login_commands: LoginCommandSettings::default(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -845,6 +932,74 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+    }
+
+    #[test]
+    fn login_commands_round_trip_in_local_host_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProfileStore::at(directory.path().join("hosts.json"));
+        let profile = HostProfile {
+            login_commands: LoginCommandSettings {
+                enabled: true,
+                commands: vec!["cd /srv/app".to_owned(), "uname -a".to_owned()],
+            },
+            ..profile("production")
+        };
+        let data = HostData {
+            profiles: vec![profile.clone()],
+            recent: Vec::new(),
+        };
+
+        store.save(&data).unwrap();
+        assert_eq!(store.load().unwrap().profiles, vec![profile]);
+    }
+
+    #[test]
+    fn version_seven_profiles_migrate_with_login_commands_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 7,
+                "profiles": [{
+                    "name": "prod",
+                    "host": "prod.example.com",
+                    "port": 22,
+                    "username": "deploy"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let store = ProfileStore::at(path);
+
+        let data = store.load().unwrap();
+        assert_eq!(
+            data.profiles[0].login_commands,
+            LoginCommandSettings::default()
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+        assert!(saved["profiles"][0].get("login_commands").is_none());
+    }
+
+    #[test]
+    fn login_commands_parse_and_enforce_bounds() {
+        assert_eq!(
+            parse_login_commands("  pwd  \n\nuname -a\r\n").unwrap(),
+            vec!["pwd", "uname -a"]
+        );
+        assert!(parse_login_commands("pwd\nuname\t-a").is_err());
+        assert!(parse_login_commands(&"x".repeat(MAX_LOGIN_COMMAND_BYTES + 1)).is_err());
+        assert!(parse_login_commands(&vec!["pwd"; MAX_LOGIN_COMMANDS + 1].join("\n")).is_err());
+        assert!(parse_login_commands(&"x".repeat(MAX_LOGIN_COMMAND_TOTAL_BYTES + 1)).is_err());
+
+        let empty_enabled = LoginCommandSettings {
+            enabled: true,
+            commands: Vec::new(),
+        };
+        assert!(empty_enabled.validate().is_err());
     }
 
     #[test]

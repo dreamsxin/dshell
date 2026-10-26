@@ -2,6 +2,34 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.42] - 2026-10-27
+
+Adds optional commands after login and allows duplicating any active SSH session.
+
+### Added
+
+- Configure up to 16 single-line commands in session properties. When enabled,
+  dshell submits them together through the visible interactive terminal after
+  the first successful login; failed connections and automatic reconnects do
+  not run them.
+- Keep command text in version 8 host profiles and version 4 profile exports.
+  Older local profiles migrate with the feature disabled, and imported profiles
+  always have automatic execution disabled until the user opts in.
+- Validate command count, per-command and total size, empty lines, and control
+  characters. Added Simplified Chinese labels and validation messages.
+- Duplicate a session directly from any active tab, including ad-hoc connections.
+  Reuse non-secret launch settings and in-memory credentials when available;
+  reopen the existing authentication flow when they are not.
+
+### Verification
+
+- Verified 2026-10-27 on Windows/MSVC: `cargo fmt --all`,
+  `scripts\verify-hard-constraints.ps1`, `cargo check --locked --all-targets`
+  and `cargo test --locked` passed (196 tests passed, 9 Docker SSH tests ignored
+  by the standard suite). `scripts\test-docker-ssh.ps1` passed all 9 tests.
+- Isolated Windows GUI interaction, screenshots, DPI/IME and glyph checks remain
+  manual; the GUI was not launched on the user's active desktop.
+
 ## [0.1.41] - 2026-10-27
 
 Organizes reusable quick commands into optional named groups.
