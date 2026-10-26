@@ -1284,6 +1284,30 @@ fn session_matches_target(session: &SshSession, host: &str, port: u16, username:
         && session.username == username
 }
 
+fn saved_profile_for_session<'a>(
+    session: &SshSession,
+    profiles: &'a [HostProfile],
+) -> Option<&'a HostProfile> {
+    let name = session.profile_name.as_deref()?;
+    profiles
+        .iter()
+        .find(|profile| profile.name.eq_ignore_ascii_case(name))
+}
+
+fn unique_duplicate_session_title(base: &str, existing_titles: &[String]) -> String {
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base} ({suffix})");
+        if !existing_titles.iter().any(|title| title == &candidate) {
+            return candidate;
+        }
+        let Some(next_suffix) = suffix.checked_add(1) else {
+            return format!("{base} (copy)");
+        };
+        suffix = next_suffix;
+    }
+}
+
 fn is_authentication_failure(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("authentication")
@@ -1326,10 +1350,11 @@ mod session_tests {
         merge_unique_profiles, move_profile_to_group, mpsc, parse_alert_percent,
         recall_compose_history, remember_compose_history, remember_stopped_forward,
         remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
-        reorder_session_ids, search_result_message, server_alert_observations,
-        session_editor_escape, session_editor_key, session_matches_target,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
-        take_next_sftp_transfer, terminal_size_for_viewport, watch,
+        reorder_session_ids, saved_profile_for_session, search_result_message,
+        server_alert_observations, session_editor_escape, session_editor_key,
+        session_matches_target, session_terminal_size_for_split, split_panel_terminal_size,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
+        unique_duplicate_session_title, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1492,6 +1517,57 @@ mod session_tests {
             &Zeroizing::new(String::new()),
         );
         assert!(cached.contains_secret());
+    }
+
+    #[test]
+    fn duplicate_session_title_uses_the_first_available_suffix() {
+        let existing = vec![
+            "manual-test".to_owned(),
+            "manual-test (2)".to_owned(),
+            "manual-test (3)".to_owned(),
+        ];
+
+        assert_eq!(
+            unique_duplicate_session_title("manual-test", &existing),
+            "manual-test (4)"
+        );
+        assert_eq!(
+            unique_duplicate_session_title("other-host", &existing),
+            "other-host (2)"
+        );
+    }
+
+    #[test]
+    fn session_profile_resolution_requires_a_matching_saved_profile() {
+        let profile = HostProfile {
+            name: "manual-test".to_owned(),
+            host: "127.0.0.1".to_owned(),
+            port: 22,
+            username: "test".to_owned(),
+            group: String::new(),
+            favorite: false,
+            auth_method: AuthMethod::Password,
+            identity_file: String::new(),
+            proxy_jump: String::new(),
+            forwards: Vec::new(),
+            keepalive_seconds: 0,
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
+        };
+        let profiles = vec![profile];
+        let (mut session, _commands, _cancel) = test_session(1);
+
+        session.profile_name = Some("MANUAL-TEST".to_owned());
+        assert_eq!(
+            saved_profile_for_session(&session, &profiles).map(|profile| profile.name.as_str()),
+            Some("manual-test")
+        );
+        session.profile_name = Some("temporary-session".to_owned());
+        assert!(saved_profile_for_session(&session, &profiles).is_none());
+        session.profile_name = None;
+        assert!(saved_profile_for_session(&session, &profiles).is_none());
     }
 
     #[test]
@@ -2348,6 +2424,7 @@ struct AppView {
     active_session_id: Option<u64>,
     split: Option<SessionSplit>,
     next_session_id: u64,
+    pending_session_title_override: Option<String>,
     terminal_size: TerminalSize,
     terminal_bounds: Rc<RefCell<HashMap<u64, Bounds<Pixels>>>>,
     terminal_focus: FocusHandle,
@@ -2669,6 +2746,7 @@ impl AppView {
             active_session_id: None,
             split: None,
             next_session_id: 1,
+            pending_session_title_override: None,
             terminal_size,
             terminal_bounds: Rc::default(),
             terminal_focus: cx.focus_handle(),
@@ -3104,19 +3182,58 @@ impl AppView {
             return;
         }
 
+        self.start_saved_profile_connection(profile, None, window, cx);
+    }
+
+    fn start_saved_profile_connection(
+        &mut self,
+        profile: &HostProfile,
+        title_override: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.load_profile(profile, window, cx);
+        self.pending_session_title_override = title_override;
         let key = CredentialCacheKey::from_profile(profile);
         if let Some(credentials) = self.credential_cache.get(&key).cloned() {
             self.apply_cached_credentials(&credentials, window, cx);
             self.connect(window, cx);
         } else if self.profile_needs_credential_prompt(profile) {
             let message = self
-                .tr("Enter credentials for {name}. They will be saved with this host profile after a successful connection.")
+                .tr("Enter credentials for {name} to connect.")
                 .replace("{name}", &profile.name);
             self.open_credential_prompt(message, cx);
         } else {
             self.connect(window, cx);
         }
+    }
+
+    fn duplicate_saved_session(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab_menu_session = None;
+        let Some(profile) = self
+            .session(session_id)
+            .and_then(|session| saved_profile_for_session(session, &self.profiles))
+            .cloned()
+        else {
+            self.show_toast(
+                self.tr("Save this host profile before duplicating the session."),
+                Tone::Warning,
+                cx,
+            );
+            return;
+        };
+        let existing_titles = self
+            .sessions
+            .iter()
+            .map(|session| session.title.clone())
+            .collect::<Vec<_>>();
+        let title = unique_duplicate_session_title(&profile.name, &existing_titles);
+        self.start_saved_profile_connection(&profile, Some(title), window, cx);
     }
 
     fn size_for_window(
@@ -4010,7 +4127,7 @@ impl AppView {
         self.request_overlay_focus();
         self.confirm_delete = false;
         self.profile_message = self
-            .tr("Loaded {name}. Saved credentials will be used when you connect.")
+            .tr("Loaded {name}. Authentication is needed only when no credentials are cached.")
             .replace("{name}", &profile.name);
         cx.notify();
     }
@@ -4734,10 +4851,6 @@ impl AppView {
         let host = self.host.read(cx).value().trim().to_owned();
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().trim().to_owned();
-        let password = Zeroizing::new(self.password.read(cx).text().to_string());
-        let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
-        let jump_password = Zeroizing::new(self.jump_password.read(cx).text().to_string());
-        let jump_passphrase = Zeroizing::new(self.jump_passphrase.read(cx).text().to_string());
         let identity_file = self.identity_file.read(cx).value().trim().to_owned();
         let proxy_jump = self.jump_profile.read(cx).value().trim().to_owned();
         let keepalive_seconds = self
@@ -4833,10 +4946,10 @@ impl AppView {
             proxy_jump,
             forwards: existing_forwards,
             keepalive_seconds,
-            password: password.to_string(),
-            passphrase: passphrase.to_string(),
-            jump_password: jump_password.to_string(),
-            jump_passphrase: jump_passphrase.to_string(),
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
         };
         let mut profiles = self.profiles.clone();
         if let Some(selected) = &self.selected_profile {
@@ -4899,6 +5012,7 @@ impl AppView {
 
     fn cancel_session_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let credential_session_id = self.credential_prompt_session_id.take();
+        self.pending_session_title_override = None;
         Self::set_input_value(&self.password, "", window, cx);
         Self::set_input_value(&self.key_passphrase, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
@@ -4915,35 +5029,12 @@ impl AppView {
         cx.notify();
     }
 
-    fn persist_credentials_for_session(
+    fn cache_credentials_for_session(
         &mut self,
-        session_id: u64,
+        key: CredentialCacheKey,
         credentials: &CachedCredentials,
-        cx: &mut Context<Self>,
     ) {
-        let Some(profile_name) = self
-            .session(session_id)
-            .and_then(|session| session.profile_name.clone())
-        else {
-            return;
-        };
-        let mut profiles = self.profiles.clone();
-        let Some(profile) = profiles
-            .iter_mut()
-            .find(|profile| profile.name.eq_ignore_ascii_case(&profile_name))
-        else {
-            return;
-        };
-        profile.password = credentials.password.to_string();
-        profile.passphrase = credentials.passphrase.to_string();
-        profile.jump_password = credentials.jump_password.to_string();
-        profile.jump_passphrase = credentials.jump_passphrase.to_string();
-        if let Err(error) = self.save_workspace(profiles, self.recent.clone()) {
-            self.profile_message = self
-                .tr("Connected, but credentials could not be saved: {error}")
-                .replace("{error}", &error);
-            self.show_toast(self.profile_message.clone(), Tone::Warning, cx);
-        }
+        self.credential_cache.insert(key, credentials.clone());
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5076,11 +5167,16 @@ impl AppView {
 
         let id = self.next_session_id;
         self.next_session_id = self.next_session_id.saturating_add(1);
-        let title = if requested_title.is_empty() {
-            format!("{username}@{host}")
-        } else {
-            requested_title
-        };
+        let title = self
+            .pending_session_title_override
+            .take()
+            .unwrap_or_else(|| {
+                if requested_title.is_empty() {
+                    format!("{username}@{host}")
+                } else {
+                    requested_title
+                }
+            });
         let route = if jump.is_some() {
             format!(" via {jump_name}")
         } else {
@@ -5307,8 +5403,7 @@ impl AppView {
                                     view.pending_credentials.remove(&id)
                                 && credentials.contains_secret()
                             {
-                                view.persist_credentials_for_session(id, &credentials, cx);
-                                view.credential_cache.insert(key, credentials);
+                                view.cache_credentials_for_session(key, &credentials);
                             }
                             if failure.is_some() {
                                 view.pending_credentials.remove(&id);
@@ -6624,7 +6719,7 @@ impl AppView {
                     )
                     .child(components::help_text(
                         &tokens,
-                        self.tr("Templates store the method, identity file path, jump-host reference and keep-alive only. Applying a template clears secret inputs; saved host profiles keep their own credentials."),
+                        self.tr("Templates store the method, identity file path, jump-host reference and keep-alive only. Applying a template clears secret inputs; missing credentials are requested when you connect."),
                     ))
                     .when(!self.auth_profile_message.is_empty(), |panel| {
                         panel.child(components::help_text(
@@ -6667,7 +6762,7 @@ impl AppView {
                                 if self.auth_method == AuthMethod::KeyboardInteractive {
                                     self.tr("Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet.")
                                 } else {
-                        self.tr("Passwords and passphrases are saved with host profiles and reused on the next connection.")
+                                    self.tr("Passwords and passphrases are kept in memory until dshell exits.")
                                 },
                             ))
                     })
@@ -6687,7 +6782,7 @@ impl AppView {
                             ))
                             .child(components::help_text(
                                 &tokens,
-                                self.tr("The identity file path and passphrase are saved with the host. Private key material is never copied."),
+                                self.tr("The identity file path is saved with the host. Passphrases are kept only in memory; private key material is never copied."),
                             ))
                     })
                     .when(self.auth_method == AuthMethod::Agent, |panel| {
@@ -6718,7 +6813,7 @@ impl AppView {
                             })
                             .child(components::help_text(
                                 &tokens,
-                                    self.tr("Jump credentials are saved with this host profile and reused for its jump host."),
+                                    self.tr("Jump credentials are kept in memory until dshell exits."),
                             ))
                     })
             }
@@ -6734,7 +6829,7 @@ impl AppView {
                 .child(components::subheading(&tokens, self.tr("Credential handling")))
                 .child(components::help_text(
                     &tokens,
-                    self.tr("Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles also keep the credentials needed for the next connection; private key material is never copied."),
+                    self.tr("Password and key passphrase fields are cleared when you connect or cancel. Credentials stay only in memory until dshell exits; private key material is never copied."),
                 )),
         };
 
@@ -6961,7 +7056,7 @@ impl AppView {
                     if self.auth_method == AuthMethod::KeyboardInteractive {
                         self.tr("Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet.")
                     } else {
-                        self.tr("The password is saved with this host profile after a successful connection and reused next time.")
+                        self.tr("The password is kept in memory until dshell exits and reused during this run.")
                     },
                 ));
         }
@@ -6975,7 +7070,7 @@ impl AppView {
                 ))
                 .child(components::help_text(
                     &tokens,
-                    self.tr("Leave the passphrase empty when the private key is not encrypted. A supplied passphrase is saved with this host profile."),
+                    self.tr("Leave the passphrase empty when the private key is not encrypted. A supplied passphrase is kept in memory until dshell exits."),
                 ));
         }
         if self.auth_method == AuthMethod::Agent {
@@ -7046,7 +7141,7 @@ impl AppView {
         }
         body = body.child(components::help_text(
             &tokens,
-            self.tr("Credentials are cleared from the form after connecting or cancelling. A successful connection saves them with the host profile for the next connection."),
+            self.tr("Credentials are cleared from the form after connecting or cancelling. Successful connections keep them only in memory until dshell exits."),
         ));
 
         components::modal_overlay(&tokens, "credential-prompt-overlay")
@@ -14066,6 +14161,7 @@ impl AppView {
             .unwrap_or_default();
         let has_other = self.sessions.iter().any(|session| session.id != session_id);
         let has_right = session_index + 1 < self.sessions.len();
+        let can_duplicate = saved_profile_for_session(session, &self.profiles).is_some();
         let menu = div()
             .id("session-tab-menu")
             .occlude()
@@ -14116,6 +14212,20 @@ impl AppView {
                     this.session_editor_open = true;
                     this.request_overlay_focus();
                     cx.notify();
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "tab-menu-duplicate",
+                    IconName::Copy,
+                    self.tr("Duplicate session"),
+                    "",
+                    false,
+                    can_duplicate,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.duplicate_saved_session(session_id, window, cx);
                 })),
             )
             .child(

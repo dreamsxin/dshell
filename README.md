@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.30`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.31`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -25,8 +25,10 @@ The Keys panel can discover existing OpenSSH identities, import a private key
 into `~/.ssh`, export a key pair to a user-selected path, change a passphrase,
 copy a public key, and delete a key pair after an explicit confirmation. Key
 files are parsed before transfer, existing destinations are never overwritten,
-and passwords or passphrases are stored with saved host profiles for direct
-reconnection. Exported profile backups still omit all credentials.
+and credentials are never written to host profiles. Successful connections
+keep passwords and passphrases in a `Zeroizing` in-memory cache until dshell
+exits; existing profile files are cleaned of legacy credential fields when
+loaded. Exported profile backups omit all credentials.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;
@@ -45,11 +47,14 @@ authentication, or the system SSH agent (Windows OpenSSH named pipe or Pageant;
 `SSH_AUTH_SOCK` on Unix). A plain password prompt in keyboard-interactive mode
 uses the password field; one-time-password or other extra prompts open a masked
 dialog that sends responses only to the SSH server. Clicking a saved host row or
-its connect icon opens a credential-only dialog when no in-memory credential is
-available in the saved profile or current run; the edit icon opens the session properties. After a successful
-connection, the password or passphrase is saved to the host profile and reused
-on the next connection. A rejected credential clears that cache and reopens the
-dialog, while Cancel abandons and removes the failed connection. Each connection opens an independent session tab; switching tabs
+its connect icon opens a credential-only dialog when no credential is cached in
+the current run; the edit icon opens session properties. After a successful
+connection, credentials are reused from memory until dshell exits and must be
+entered again after restart. A rejected credential clears that cache and
+reopens the dialog, while Cancel abandons and removes the failed connection.
+Each connection opens an independent session tab; choose `Duplicate session`
+from a saved session's tab actions to open another SSH connection with a unique
+tab title. Switching tabs
 preserves each session's terminal state, and closing a tab ends only that SSH
 session. The password and key passphrase fields are masked and cleared when
 connection starts. Click the terminal area to focus it, then use the
@@ -111,17 +116,18 @@ Match blocks, agent/X11 forwarding or connection multiplexing — are skipped or
 reported rather than silently imported. Imported hosts are placed in the
 `Imported` group.
 The profile file stores the display name, host, port, username, group, favorite
-flag, authentication method, optional identity file path, optional jump host
-name and saved credentials, plus the recent connection history. On Windows it
-is stored at `%APPDATA%\dshell\hosts.json`; the private key itself is never
-copied, and exported profile backups omit all credentials.
+flag, authentication method, optional identity file path and optional jump host
+name, plus recent connection history. Passwords and passphrases are never
+written to it. On Windows it is stored at `%APPDATA%\dshell\hosts.json`; the
+private key itself is never copied, and exported profile backups omit all
+credentials.
 
 To connect through another saved host, enter its name in the `Jump host` field
 of the session properties. The jump host and the target authenticate
 separately, and both server keys must already be present in known_hosts.
 Jump-host passwords and key passphrases are requested in their own fields,
-saved with the target host profile after a successful connection and cleared
-from the form when the connection starts. The Services inspector also exposes
+kept in memory only until dshell exits and cleared from the form when the
+connection starts. The Services inspector also exposes
 confirmed Start, Stop and Restart actions for supported remote service managers.
 
 The Authentication section can save reusable templates in

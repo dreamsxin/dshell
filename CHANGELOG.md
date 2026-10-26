@@ -2,6 +2,29 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.31] - 2026-10-26
+
+Adds independent duplicate sessions and keeps reusable credentials in memory only.
+
+### Added
+
+- Add `Duplicate session` to saved session tab actions. Each duplicate opens an
+  independent SSH connection and receives a unique session title.
+- Keep passwords and key passphrases in the zeroizing runtime credential cache
+  until dshell exits; do not write them to host profiles.
+- Upgrade legacy host profile data while discarding any credential fields.
+- Add Simplified Chinese labels and tests for duplicate titles and credential
+  cache behavior.
+
+### Verification
+
+- Verification date: 2026-10-26 (Windows/MSVC).
+- `cargo fmt --all` and hard-constraint verification passed (152 tests passed,
+  9 Docker-only tests skipped by that script).
+- Docker SSH integration passed 9/9.
+- Isolated Windows GUI screenshots and manual DPI, IME and glyph checks remain
+  outstanding.
+
 ## [0.1.30] - 2026-10-25
 
 Adds logged-in session inspection to the server inspector.

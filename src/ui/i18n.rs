@@ -275,27 +275,27 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Group renamed." => "分组已重命名。",
         "Group deleted; hosts moved to Ungrouped." => "分组已删除，主机已移至未分组。",
         "Loaded {name}. Enter the credentials to connect." => "已载入{name}。请输入凭据以连接。",
-        "Loaded {name}. Saved credentials will be used when you connect." => {
-            "已载入{name}。连接时会使用已保存的凭据。"
+        "Loaded {name}. Authentication is needed only when no credentials are cached." => {
+            "已载入{name}。仅在没有内存凭据时才需要认证。"
         }
-        "Enter credentials for {name}. They will be saved with this host profile after a successful connection." => {
-            "请输入{name}的认证信息。连接成功后会保存到该主机资料。"
-        }
+        "Enter credentials for {name} to connect." => "请输入{name}的认证信息以连接。",
+        "Save this host profile before duplicating the session." => "复制会话前请先保存主机资料。",
+        "Duplicate session" => "复制会话",
         "Authenticate {name}" => "认证{name}",
         "Authenticate {target}" => "认证{target}",
         "SSH connection" => "SSH 连接",
         "Enter the authentication information and confirm to connect." => {
             "请输入认证信息，然后确认连接。"
         }
-        "The password is saved with this host profile after a successful connection and reused next time." => {
-            "连接成功后会将密码保存到该主机资料，下次连接时自动使用。"
+        "The password is kept in memory until dshell exits and reused during this run." => {
+            "密码仅保存在 dshell 运行期间的内存中，并在本次运行期间复用。"
         }
-        "Leave the passphrase empty when the private key is not encrypted. A supplied passphrase is saved with this host profile." => {
-            "如果私钥未加密，可将口令留空。填写的口令会保存到该主机资料。"
+        "Leave the passphrase empty when the private key is not encrypted. A supplied passphrase is kept in memory until dshell exits." => {
+            "如果私钥未加密，可将口令留空。填写的口令仅在 dshell 运行期间保存在内存中。"
         }
         "Uses the SSH agent; no password is required." => "使用 SSH agent，无需密码。",
-        "Credentials are cleared from the form after connecting or cancelling. A successful connection saves them with the host profile for the next connection." => {
-            "连接或取消后会清空表单中的凭据。连接成功后会将凭据保存到主机资料，下次连接时自动使用。"
+        "Credentials are cleared from the form after connecting or cancelling. Successful connections keep them only in memory until dshell exits." => {
+            "连接或取消后会清空表单中的凭据。连接成功后只会在 dshell 运行期间保留在内存中。"
         }
         "Loaded {name} from recent connections." => "已从最近连接载入{name}。",
         "Loaded a recent connection. Save it as a host profile if you want to keep it." => {
@@ -377,8 +377,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Username" => "用户名",
         "Authentication method" => "认证方式",
         "Password" => "密码",
-        "Passwords and passphrases are saved with host profiles and reused on the next connection." => {
-            "密码和口令会随主机资料保存，下次连接时自动使用。"
+        "Passwords and passphrases are kept in memory until dshell exits." => {
+            "密码和口令仅在 dshell 运行期间保存在内存中。"
         }
         "Hidden keyboard-interactive prompts are answered with this password. One-time codes and visible prompts are not supported yet." => {
             "隐藏的键盘交互提示会使用此密码回答。一次性验证码和明文提示暂不支持。"
@@ -402,20 +402,20 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "No saved templates. Save the current method as a reusable template." => {
             "没有已保存的模板。保存当前认证方式即可重复使用。"
         }
-        "Templates store the method, identity file path, jump-host reference and keep-alive only. Applying a template clears secret inputs; saved host profiles keep their own credentials." => {
-            "模板只保存认证方式、身份文件路径、跳板机引用和保活设置。应用模板会清空秘密输入；主机资料会保存自己的认证信息。"
+        "Templates store the method, identity file path, jump-host reference and keep-alive only. Applying a template clears secret inputs; missing credentials are requested when you connect." => {
+            "模板只保存认证方式、身份文件路径、跳板机引用和保活设置。应用模板会清空秘密输入；连接时会提示输入缺少的凭据。"
         }
-        "The identity file path and passphrase are saved with the host. Private key material is never copied." => {
-            "身份文件路径和口令会随主机保存。不会复制私钥材料。"
+        "The identity file path is saved with the host. Passphrases are kept only in memory; private key material is never copied." => {
+            "身份文件路径会随主机保存。口令只保存在内存中；不会复制私钥材料。"
         }
-        "Jump credentials are saved with this host profile and reused for its jump host." => {
-            "跳板机凭据会随该主机资料保存，并在连接跳板机时自动使用。"
+        "Jump credentials are kept in memory until dshell exits." => {
+            "跳板机凭据仅在 dshell 运行期间保存在内存中。"
         }
         "Host keys must already match an entry in the user's OpenSSH known_hosts file. Unknown and changed keys are rejected. When a jump host is used, both the jump host and the target are verified independently." => {
             "主机密钥必须已匹配用户 OpenSSH known_hosts 中的条目。未知或变更的密钥会被拒绝。使用跳板机时，跳板机和目标主机会分别验证。"
         }
-        "Password and key passphrase fields are cleared when you connect or cancel. Saved host profiles also keep the credentials needed for the next connection; private key material is never copied." => {
-            "连接或取消时会清空密码和密钥口令。已保存的主机资料也会保留下次连接所需的凭据；不会复制私钥材料。"
+        "Password and key passphrase fields are cleared when you connect or cancel. Credentials stay only in memory until dshell exits; private key material is never copied." => {
+            "连接或取消时会清空密码和密钥口令。凭据只保留在 dshell 运行期间的内存中；不会复制私钥材料。"
         }
         "Save" => "保存",
         "Cancel" => "取消",
@@ -859,9 +859,9 @@ mod tests {
         assert_eq!(
             translate(
                 Language::SimplifiedChinese,
-                "Passwords and passphrases are saved with host profiles and reused on the next connection."
+                "Passwords and passphrases are kept in memory until dshell exits."
             ),
-            "密码和口令会随主机资料保存，下次连接时自动使用。"
+            "密码和口令仅在 dshell 运行期间保存在内存中。"
         );
         assert_eq!(
             translate(
@@ -922,9 +922,13 @@ mod tests {
         assert_eq!(
             translate(
                 Language::SimplifiedChinese,
-                "Enter credentials for {name}. They will be saved with this host profile after a successful connection."
+                "Enter credentials for {name} to connect."
             ),
-            "请输入{name}的认证信息。连接成功后会保存到该主机资料。"
+            "请输入{name}的认证信息以连接。"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Duplicate session"),
+            "复制会话"
         );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Authenticate {name}"),

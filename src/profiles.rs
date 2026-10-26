@@ -5,12 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
 use crate::forward::ForwardRuleSpec;
 
-const DOCUMENT_VERSION: u8 = 3;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 3] = [1, 2, 3];
+const DOCUMENT_VERSION: u8 = 4;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 4] = [1, 2, 3, 4];
 const EXPORT_DOCUMENT_VERSION: u8 = 1;
 const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 1] = [EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
@@ -73,13 +73,29 @@ pub struct HostProfile {
     pub forwards: Vec<ForwardRuleSpec>,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub keepalive_seconds: u16,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "ignore_legacy_credential"
+    )]
     pub password: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "ignore_legacy_credential"
+    )]
     pub passphrase: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "ignore_legacy_credential"
+    )]
     pub jump_password: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "ignore_legacy_credential"
+    )]
     pub jump_passphrase: String,
 }
 
@@ -173,12 +189,17 @@ impl ProfileStore {
                 document.version
             ));
         }
+        let requires_migration = document.version < DOCUMENT_VERSION;
         validate_profiles(&document.profiles)?;
         validate_recent(&document.recent)?;
-        Ok(HostData {
+        let data = HostData {
             profiles: document.profiles,
             recent: document.recent,
-        })
+        };
+        if requires_migration {
+            self.save(&data)?;
+        }
+        Ok(data)
     }
 
     pub fn save(&self, data: &HostData) -> Result<(), String> {
@@ -282,6 +303,14 @@ pub fn record_recent(recent: &mut Vec<RecentConnection>, entry: RecentConnection
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn ignore_legacy_credential<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer)?;
+    Ok(String::new())
 }
 
 fn is_zero_u16(value: &u16) -> bool {
@@ -396,35 +425,59 @@ mod tests {
     }
 
     #[test]
-    fn profiles_round_trip_with_credentials() {
+    fn legacy_profile_credentials_are_ignored_and_removed_from_disk() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProfileStore::at(directory.path().join("hosts.json"));
-        let data = HostData {
-            profiles: vec![HostProfile {
-                group: "Production".to_owned(),
-                favorite: true,
-                proxy_jump: "bastion".to_owned(),
-                forwards: vec![ForwardRuleSpec {
-                    kind: ForwardKind::Local,
-                    listen_host: "127.0.0.1".to_owned(),
-                    listen_port: 15432,
-                    target_host: "db.internal".to_owned(),
-                    target_port: 5432,
-                }],
-                keepalive_seconds: 30,
-                password: "secret".to_owned(),
-                passphrase: "key-secret".to_owned(),
-                jump_password: "jump-secret".to_owned(),
-                jump_passphrase: "jump-key-secret".to_owned(),
-                ..profile("staging")
+        let mut legacy_profile = serde_json::to_value(HostProfile {
+            group: "Production".to_owned(),
+            favorite: true,
+            proxy_jump: "bastion".to_owned(),
+            forwards: vec![ForwardRuleSpec {
+                kind: ForwardKind::Local,
+                listen_host: "127.0.0.1".to_owned(),
+                listen_port: 15432,
+                target_host: "db.internal".to_owned(),
+                target_port: 5432,
             }],
-            recent: vec![recent("server.example.com", 2222)],
-        };
+            keepalive_seconds: 30,
+            ..profile("staging")
+        })
+        .unwrap();
+        legacy_profile["password"] = serde_json::json!("secret");
+        legacy_profile["passphrase"] = serde_json::json!("key-secret");
+        legacy_profile["jump_password"] = serde_json::json!("jump-secret");
+        legacy_profile["jump_passphrase"] = serde_json::json!("jump-key-secret");
+        let legacy_document = serde_json::json!({
+            "version": DOCUMENT_VERSION - 1,
+            "profiles": [legacy_profile],
+            "recent": [recent("server.example.com", 2222)],
+        });
+        fs::write(
+            &store.path,
+            serde_json::to_vec_pretty(&legacy_document).unwrap(),
+        )
+        .unwrap();
 
-        store.save(&data).unwrap();
-        assert_eq!(store.load().unwrap(), data);
+        let data = store.load().unwrap();
+        let loaded = &data.profiles[0];
+        assert_eq!(loaded.group, "Production");
+        assert_eq!(loaded.proxy_jump, "bastion");
+        assert_eq!(loaded.forwards.len(), 1);
+        assert!(loaded.password.is_empty());
+        assert!(loaded.passphrase.is_empty());
+        assert!(loaded.jump_password.is_empty());
+        assert!(loaded.jump_passphrase.is_empty());
+
         let contents = fs::read_to_string(&store.path).unwrap();
-        assert!(contents.contains("secret"));
+        for secret in ["secret", "key-secret", "jump-secret", "jump-key-secret"] {
+            assert!(!contents.contains(secret));
+        }
+        let saved: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
+        let saved_profile = saved["profiles"][0].as_object().unwrap();
+        for field in ["password", "passphrase", "jump_password", "jump_passphrase"] {
+            assert!(!saved_profile.contains_key(field));
+        }
     }
 
     #[test]
