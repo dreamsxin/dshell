@@ -870,10 +870,55 @@ fn synchronized_targets(
     targets
 }
 
+fn synchronized_input_targets(
+    sessions: &[SshSession],
+    active_session_id: u64,
+    enabled: bool,
+    selected: &HashSet<u64>,
+) -> Vec<u64> {
+    if sessions
+        .iter()
+        .find(|session| session.id == active_session_id)
+        .is_some_and(|session| session.input_locked)
+    {
+        return Vec::new();
+    }
+    synchronized_targets(active_session_id, enabled, selected, |id| {
+        sessions
+            .iter()
+            .find(|session| session.id == id)
+            .is_some_and(|session| {
+                session.state == SessionState::Connected && !session.input_locked
+            })
+    })
+}
+
 fn menu_item(
     tokens: &ThemeTokens,
     id: impl Into<ElementId>,
     icon: IconName,
+    label: impl Into<SharedString>,
+    shortcut: &'static str,
+    active: bool,
+    enabled: bool,
+) -> Button {
+    menu_item_with_icon(
+        tokens,
+        id,
+        Icon::new(icon)
+            .with_size(Size::Small)
+            .text_color(tokens.text_secondary),
+        label,
+        shortcut,
+        active,
+        enabled,
+    )
+}
+
+fn menu_item_with_icon(
+    tokens: &ThemeTokens,
+    id: impl Into<ElementId>,
+    icon: impl IntoElement,
     label: impl Into<SharedString>,
     shortcut: &'static str,
     active: bool,
@@ -891,11 +936,7 @@ fn menu_item(
                 .items_center()
                 .gap(px(ui_tokens::SPACE_2))
                 .w_full()
-                .child(
-                    Icon::new(icon)
-                        .with_size(Size::Small)
-                        .text_color(tokens.text_secondary),
-                )
+                .child(icon)
                 .child(
                     div()
                         .flex_1()
@@ -1008,6 +1049,7 @@ struct SshSession {
     scroll_remainder: f32,
     mouse_position: Option<TerminalPosition>,
     command_tx: Option<mpsc::Sender<TerminalRequest>>,
+    input_locked: bool,
     cancel_tx: Option<watch::Sender<bool>>,
     sftp_tx: Option<mpsc::Sender<SftpCommand>>,
     sftp_cancel: Option<Arc<AtomicBool>>,
@@ -1433,6 +1475,9 @@ fn enqueue_session_request(
     if !session_accepts_requests(session.state) {
         return Err("SSH session is not accepting input");
     }
+    if session.input_locked && terminal_request_is_input(&request) {
+        return Err("Terminal input is locked");
+    }
     let Some(command_tx) = &session.command_tx else {
         return Err("SSH session is not accepting input");
     };
@@ -1440,6 +1485,16 @@ fn enqueue_session_request(
         mpsc::error::TrySendError::Full(_) => "Terminal request queue is full",
         mpsc::error::TrySendError::Closed(_) => "SSH session is not accepting input",
     })
+}
+
+fn terminal_request_is_input(request: &TerminalRequest) -> bool {
+    matches!(
+        request,
+        TerminalRequest::Key(_)
+            | TerminalRequest::Mouse(_)
+            | TerminalRequest::Paste(_)
+            | TerminalRequest::PasteSecret(_)
+    )
 }
 
 fn queue_sftp_directory_refresh(session: &SshSession) -> bool {
@@ -1644,9 +1699,9 @@ mod session_tests {
         rename_profile_group, reorder_group_order, reorder_session_ids, saved_profile_for_session,
         search_result_message, server_alert_observations, session_accepts_requests,
         session_editor_escape, session_editor_key, session_matches_target,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_targets,
-        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title,
-        update_sessions_for_profile, watch,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_input_targets,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
+        unique_duplicate_session_title, update_sessions_for_profile, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -1686,6 +1741,7 @@ mod session_tests {
                 scroll_remainder: 0.0,
                 mouse_position: None,
                 command_tx: Some(command_tx),
+                input_locked: false,
                 cancel_tx: Some(cancel_tx),
                 sftp_tx: None,
                 sftp_cancel: None,
@@ -2154,6 +2210,82 @@ mod session_tests {
             second_rx.try_recv(),
             Ok(TerminalRequest::Paste(text)) if text == "target only"
         ));
+    }
+
+    #[test]
+    fn terminal_input_lock_blocks_input_but_allows_session_controls() {
+        let (mut session, mut command_rx, _) = test_session(1);
+        session.input_locked = true;
+        let sessions = vec![session];
+        let position = crate::terminal::TerminalPosition { row: 0, column: 0 };
+        let requests = [
+            TerminalRequest::Key(crate::terminal::TerminalKeyInput {
+                key: "a".to_owned(),
+                text: Some("a".to_owned()),
+                control: false,
+                alt: false,
+                shift: false,
+                platform: false,
+                function: false,
+            }),
+            TerminalRequest::Mouse(crate::terminal::TerminalMouseEvent::Wheel {
+                rows: -1,
+                position,
+                modifiers: Default::default(),
+            }),
+            TerminalRequest::Paste("text".to_owned()),
+            TerminalRequest::PasteSecret(Zeroizing::new("secret".to_owned())),
+        ];
+
+        for request in requests {
+            assert_eq!(
+                enqueue_session_request(&sessions, 1, request),
+                Err("Terminal input is locked")
+            );
+        }
+        assert!(command_rx.try_recv().is_err());
+
+        assert!(
+            enqueue_session_request(
+                &sessions,
+                1,
+                TerminalRequest::Resize(TerminalSize {
+                    columns: 100,
+                    rows: 30,
+                }),
+            )
+            .is_ok()
+        );
+        assert!(
+            enqueue_session_request(&sessions, 1, TerminalRequest::RefreshServerProcesses,).is_ok()
+        );
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(TerminalRequest::Resize(TerminalSize {
+                columns: 100,
+                rows: 30
+            }))
+        ));
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(TerminalRequest::RefreshServerProcesses)
+        ));
+    }
+
+    #[test]
+    fn locked_active_session_disables_all_synchronized_input_targets() {
+        let (active, _, _) = test_session(1);
+        let (mut secondary, _, _) = test_session(2);
+        secondary.input_locked = true;
+        let selected = HashSet::from([2]);
+        let mut sessions = vec![active, secondary];
+
+        assert_eq!(
+            synchronized_input_targets(&sessions, 1, true, &selected),
+            vec![1]
+        );
+        sessions[0].input_locked = true;
+        assert!(synchronized_input_targets(&sessions, 1, true, &selected).is_empty());
     }
 
     #[test]
@@ -6418,6 +6550,7 @@ impl AppView {
                     scroll_remainder: 0.0,
                     mouse_position: None,
                     command_tx: Some(terminal),
+                    input_locked: false,
                     cancel_tx: Some(cancellation),
                     sftp_tx: Some(sftp),
                     sftp_cancel: Some(sftp_cancel),
@@ -7137,6 +7270,9 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         if let Err(error) = enqueue_session_request(&self.sessions, session_id, request) {
+            if error == "Terminal input is locked" {
+                return;
+            }
             if let Some(session) = self.session_mut(session_id) {
                 session.status = format!("{action} queue is unavailable: {error}");
             }
@@ -7158,14 +7294,11 @@ impl AppView {
     }
 
     fn input_targets(&self, active_session_id: u64) -> Vec<u64> {
-        synchronized_targets(
+        synchronized_input_targets(
+            &self.sessions,
             active_session_id,
             self.sync_input_enabled,
             &self.sync_targets,
-            |id| {
-                self.session(id)
-                    .is_some_and(|session| session.state == SessionState::Connected)
-            },
         )
     }
 
@@ -7182,6 +7315,9 @@ impl AppView {
             match enqueue_session_request(&self.sessions, target, request()) {
                 Ok(()) => delivered += 1,
                 Err(error) => {
+                    if error == "Terminal input is locked" {
+                        continue;
+                    }
                     if let Some(session) = self.session_mut(target) {
                         session.status = format!("{action} queue is unavailable: {error}");
                     }
@@ -7281,6 +7417,20 @@ impl AppView {
         self.menu_visible = false;
         self.layout_menu_visible = false;
         self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn toggle_session_input_lock(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        session.input_locked = !session.input_locked;
+        let message = if session.input_locked {
+            self.tr("Terminal input locked")
+        } else {
+            self.tr("Terminal input unlocked")
+        };
+        self.show_toast(message, Tone::Neutral, cx);
         cx.notify();
     }
 
@@ -13135,12 +13285,15 @@ impl AppView {
         if text.trim().is_empty() {
             return;
         }
-        self.send_input_to_targets(
+        if self.send_input_to_targets(
             session_id,
             || TerminalRequest::Paste(text.clone()),
             "Compose",
             cx,
-        );
+        ) == 0
+        {
+            return;
+        }
         remember_compose_history(&mut self.compose_history, text);
         self.compose_recall = 0;
         Self::set_input_value(&self.compose_input, "", window, cx);
@@ -15431,6 +15584,17 @@ impl AppView {
                         .text_size(px(ui_tokens::FONT_BODY))
                         .child(session.title.clone()),
                 );
+            if session.input_locked {
+                let tooltip = self.tr("Terminal input is locked");
+                tab = tab.child(
+                    div()
+                        .id(("session-input-locked", id))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                        })
+                        .child(components::asset_icon(tokens, "lock")),
+                );
+            }
             if in_split {
                 tab = tab.child(
                     div()
@@ -16199,6 +16363,7 @@ impl AppView {
             return div().into_any_element();
         };
         let title = session.title.clone();
+        let input_locked = session.input_locked;
         let active = self.active_session_id == Some(session_id);
         let connected = matches!(
             session.state,
@@ -16267,6 +16432,26 @@ impl AppView {
                         this.request_overlay_focus();
                         cx.notify();
                     }
+                })),
+            )
+            .child(
+                menu_item_with_icon(
+                    tokens,
+                    "tab-menu-input-lock",
+                    components::asset_icon(tokens, if input_locked { "unlock" } else { "lock" }),
+                    self.tr(if input_locked {
+                        "Unlock terminal input"
+                    } else {
+                        "Lock terminal input"
+                    }),
+                    "",
+                    input_locked,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.tab_menu_session = None;
+                    this.toggle_session_input_lock(session_id, cx);
+                    window.focus(&this.terminal_focus);
                 })),
             )
             .child(

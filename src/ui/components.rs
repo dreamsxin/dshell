@@ -11,7 +11,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Div, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Stateful, Styled, div, px, relative,
+    ParentElement as _, SharedString, Stateful, Styled, Svg, div, px, relative, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _, Size, StyledExt as _,
@@ -208,6 +208,13 @@ pub fn icon_button(
         ButtonKind::Ghost => button.ghost(),
         ButtonKind::Danger => button.danger(),
     }
+}
+
+pub fn asset_icon(tokens: &ThemeTokens, name: &str) -> Svg {
+    svg()
+        .path(format!("icons/{name}.svg"))
+        .size(px(tokens::ICON_SIZE_INLINE))
+        .text_color(tokens.text_secondary)
 }
 
 /// Label, input and optional caller-provided help/error rows.

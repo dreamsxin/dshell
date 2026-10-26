@@ -2,6 +2,28 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.39] - 2026-10-27
+
+Adds a per-session terminal input lock.
+
+### Added
+
+- Lock or unlock terminal input from a session tab's actions menu; locked tabs
+  show a lock icon with a tooltip.
+- Block keyboard, terminal mouse, clipboard paste and secret-paste requests for
+  locked sessions while leaving terminal output and non-input controls active.
+- Prevent synchronized input from being sent elsewhere when the active session
+  is locked, and keep unsent Compose drafts in the editor.
+
+### Verification
+
+- Verified 2026-10-27 on Windows/MSVC: `cargo fmt --all` and
+  `scripts\verify-hard-constraints.ps1` passed (184 tests passed, 9 Docker SSH
+  tests ignored by the standard suite). `scripts\test-docker-ssh.ps1` passed
+  all 9 integration tests.
+- The GUI was not launched on the user's active desktop. Isolated screenshots,
+  DPI/IME, glyph alignment and tab interaction checks remain outstanding.
+
 ## [0.1.38] - 2026-10-27
 
 Adds per-session tab titles and colors.

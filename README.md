@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.38`.
+`v0.1.39`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -79,7 +79,12 @@ connection starts. Click the terminal area to focus it, then use the
 keyboard as you would in a remote terminal. The terminal grid follows window
 resizing. When the remote application enables mouse tracking, clicks, motion,
 and the wheel are sent to it; otherwise, left-button dragging selects text and
-the wheel browses terminal history.
+the wheel browses terminal history. A tab's right-click menu can lock terminal
+input; a lock icon marks that tab. Locked sessions still receive output and
+allow tab actions, terminal resizing, and server controls, while keyboard input,
+mouse input, paste, and Compose sends are blocked. A Compose draft stays in the
+editor when nothing receives it. Input locks last only for the current session
+and clear when its tab closes.
 
 For a repeatable local manual test, run
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start-docker-ssh-manual.ps1`.
@@ -341,8 +346,8 @@ terminal) and `Split` (two sessions side by side). The split preset is disabled
 until two sessions are open; the same menu also offers side-by-side or stacked
 orientation and a close-split action. Divider handles remain available for fine
 tuning. The session-tab ellipsis button or a tab right-click opens icon actions
-for properties, split, disconnect, close, close other tabs and close tabs to the
-right.
+for properties, input lock, split, disconnect, close, close other tabs and close
+tabs to the right.
 
 The layout preset and More menus use application-provided SVG icon assets, so
 their icons render in a fresh `cargo run` build. Windows UI evidence:

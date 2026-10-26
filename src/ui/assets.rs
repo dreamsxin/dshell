@@ -55,6 +55,8 @@ fn icon_svg(name: &str) -> &'static str {
         "folder" | "folder-closed" => FOLDER,
         "folder-open" => FOLDER_OPEN,
         "file" => FILE,
+        "lock" => LOCK,
+        "lock-open" | "unlock" => LOCK_OPEN,
         "globe" => GLOBE,
         "book-open" => BOOK_OPEN,
         "square-terminal" => TERMINAL,
@@ -152,6 +154,12 @@ const FOLDER: &str = svg_icon!(
 const FOLDER_OPEN: &str =
     svg_icon!(r#"<path d="m3 7 2 12h14l2-10H5"/><path d="M3 7V5a1 1 0 0 1 1-1h6l2 3h8"/>"#);
 const FILE: &str = svg_icon!(r#"<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>"#);
+const LOCK: &str = svg_icon!(
+    r#"<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 1 1 8 0v4"/>"#
+);
+const LOCK_OPEN: &str = svg_icon!(
+    r#"<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-1.8"/>"#
+);
 const GLOBE: &str = svg_icon!(
     r#"<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>"#
 );
@@ -261,8 +269,12 @@ mod tests {
             .load("icons/not-in-the-catalog.svg")
             .unwrap()
             .unwrap();
+        let lock = assets.load("icons/lock.svg").unwrap().unwrap();
+        let unlock = assets.load("icons/unlock.svg").unwrap().unwrap();
         assert!(known.windows(5).any(|window| window == b"<svg "));
         assert!(fallback.windows(5).any(|window| window == b"<svg "));
+        assert_ne!(lock.as_ref(), fallback.as_ref());
+        assert_ne!(unlock.as_ref(), fallback.as_ref());
         assert!(assets.load("images/logo.svg").unwrap().is_none());
     }
 }
