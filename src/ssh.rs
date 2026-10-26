@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use bytes::Bytes;
 use russh::{
     ChannelMsg, Disconnect,
     client::{self, AuthResult, Handler, KeyboardInteractiveAuthResponse, Prompt},
@@ -838,6 +839,10 @@ async fn run_connection_attempt_with_known_hosts(
                     }
                     Some(TerminalRequest::Paste(text)) => {
                         writer.data_bytes(terminal.paste_bytes(&text)).await?;
+                    }
+                    Some(TerminalRequest::PasteSecret(text)) => {
+                        let bytes = Zeroizing::new(terminal.paste_bytes(&text));
+                        writer.data_bytes(Bytes::from_owner(bytes)).await?;
                     }
                     Some(TerminalRequest::StartLog(path)) => {
                         match open_log_file(&path).await {

@@ -2,6 +2,35 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.36] - 2026-10-26
+
+Adds prompt-based responses to terminal triggers.
+
+### Added
+
+- Save trigger engine state and non-secret rules in versioned JSON; rules stay
+  disabled by default.
+- Add an ask-and-send action that opens a masked response prompt when terminal
+  output matches. The response is sent to that SSH session followed by Enter,
+  held in zeroizing buffers, and omitted from saved trigger settings.
+- Queue trigger prompts alongside keyboard-interactive authentication prompts
+  so one prompt cannot replace another; cancelling a trigger prompt keeps the
+  SSH session connected.
+- Keep preset-text trigger rules in memory for the current run and omit their
+  text from disk.
+- Add English and Simplified Chinese labels, bounds and storage tests.
+
+### Verification
+
+- Verification date: 2026-10-26 (Windows/MSVC).
+- `cargo fmt --all`, `cargo check --locked --all-targets` and
+  `cargo test --locked` passed; the tests reported 168 passed and 9
+  Docker-only tests ignored.
+- `scripts\verify-hard-constraints.ps1` passed (168 passed, 9 ignored), and
+  `scripts\test-docker-ssh.ps1` passed all 9 SSH/SFTP integration tests.
+- Isolated Windows GUI, masked-input, DPI, IME, glyph and screenshot checks
+  remain outstanding; the GUI was not launched on the user's active desktop.
+
 ## [0.1.35] - 2026-10-26
 
 Adds drag-and-drop uploads to the SFTP panel.

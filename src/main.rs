@@ -65,8 +65,8 @@ use terminal::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use triggers::{
-    MAX_TRIGGER_RULES, TriggerAction, TriggerActionKind, TriggerRule, matching_keys,
-    normalize_keyword, normalize_trigger_text,
+    MAX_TRIGGER_RULES, TriggerAction, TriggerActionKind, TriggerRule, TriggerSettings,
+    TriggerStore, matching_keys, normalize_keyword, normalize_prompt_label, normalize_trigger_text,
 };
 use ui::{
     assets::AppAssets,
@@ -81,6 +81,7 @@ const TERMINAL_PANEL_HEADER_PX: f32 = ui_tokens::PANEL_HEADER_HEIGHT;
 const TERMINAL_CARD_BORDER_PX: f32 = 2.0;
 const LAYOUT_DIVIDER_PX: f32 = 4.0;
 const MAX_AUTH_PROMPTS: usize = 8;
+const MAX_PENDING_TRIGGER_PROMPTS: usize = 32;
 const MAX_LOG_REPLAY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_KEYWORD_HIGHLIGHTS: usize = 32;
 const MAX_SERVER_ALERT_HISTORY: usize = 32;
@@ -243,12 +244,20 @@ fn session_state_label(state: SessionState) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthPromptSource {
+    SshAuthentication,
+    TriggerResponse,
+}
+
 struct AuthPromptState {
     session_id: u64,
     name: String,
     instructions: String,
     prompts: Vec<AuthPromptInfo>,
     respond_to: Option<oneshot::Sender<Vec<Zeroizing<String>>>>,
+    source: AuthPromptSource,
+    trigger_keyword: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -2715,6 +2724,7 @@ struct AppView {
     keywords_visible: bool,
     trigger_keyword_input: Entity<InputState>,
     trigger_text_input: Entity<InputState>,
+    trigger_store: Option<TriggerStore>,
     trigger_rules: Vec<TriggerRule>,
     trigger_action_kind: TriggerActionKind,
     trigger_send_enter: bool,
@@ -2722,6 +2732,8 @@ struct AppView {
     trigger_message: String,
     triggers_visible: bool,
     trigger_latches: HashMap<u64, HashSet<String>>,
+    pending_trigger_prompts: VecDeque<(u64, String, String)>,
+    pending_auth_prompts: VecDeque<AuthPromptState>,
     settings: AppSettings,
     settings_store: Option<SettingsStore>,
     settings_font_family: Entity<InputState>,
@@ -2919,6 +2931,13 @@ impl AppView {
             },
             Err(error) => (None, Vec::new(), error),
         };
+        let (trigger_store, trigger_settings, trigger_message) = match TriggerStore::discover() {
+            Ok(store) => match store.load() {
+                Ok(settings) => (Some(store), settings, String::new()),
+                Err(error) => (Some(store), TriggerSettings::default(), error),
+            },
+            Err(error) => (None, TriggerSettings::default(), error),
+        };
         let bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
             this.resize_terminal(window, cx);
         });
@@ -3043,13 +3062,16 @@ impl AppView {
             keywords_visible: false,
             trigger_keyword_input,
             trigger_text_input,
-            trigger_rules: Vec::new(),
+            trigger_store,
+            trigger_rules: trigger_settings.rules,
             trigger_action_kind: TriggerActionKind::Notify,
             trigger_send_enter: false,
-            trigger_engine_enabled: false,
-            trigger_message: String::new(),
+            trigger_engine_enabled: trigger_settings.engine_enabled,
+            trigger_message,
             triggers_visible: false,
             trigger_latches: HashMap::new(),
+            pending_trigger_prompts: VecDeque::new(),
+            pending_auth_prompts: VecDeque::new(),
             settings_theme: settings.theme,
             settings_cursor: settings.cursor_style,
             settings_language: settings.language,
@@ -3125,10 +3147,6 @@ impl AppView {
             (&self.snippet_name, "Snippet name"),
             (&self.keyword_input, "ERROR or timeout"),
             (&self.trigger_keyword_input, "ERROR or timeout"),
-            (
-                &self.trigger_text_input,
-                "preset command, for example: systemctl status ssh",
-            ),
             (&self.search_input, "Search terminal"),
             (&self.key_path, "Path for the new private key"),
             (&self.new_key_passphrase, "Optional passphrase"),
@@ -3143,6 +3161,15 @@ impl AppView {
             let localized = self.tr(placeholder);
             input.update(cx, |state, cx| state.set_placeholder(localized, window, cx));
         }
+        let trigger_placeholder = if self.trigger_action_kind == TriggerActionKind::PromptResponse {
+            "Enter a prompt label"
+        } else {
+            "preset command, for example: systemctl status ssh"
+        };
+        let localized_trigger_placeholder = self.tr(trigger_placeholder);
+        self.trigger_text_input.update(cx, |state, cx| {
+            state.set_placeholder(localized_trigger_placeholder, window, cx)
+        });
         for inputs in [&self.auth_prompt_inputs, &self.auth_prompt_plain_inputs] {
             for (index, input) in inputs.iter().enumerate() {
                 let localized = format!("{} {}", self.tr("Response"), index + 1);
@@ -5781,9 +5808,14 @@ impl AppView {
                                     view.auth_prompt = None;
                                     view.auth_prompt_needs_clear = true;
                                 }
+                                view.pending_trigger_prompts
+                                    .retain(|(session_id, _, _)| *session_id != id);
+                                view.pending_auth_prompts
+                                    .retain(|prompt| prompt.session_id != id);
                                 if had_auth_prompt || had_trigger_latch {
                                     cx.notify();
                                 }
+                                view.present_next_auth_prompt(cx);
                                 if let Some(error) = failure {
                                     view.reopen_authentication_after_failure(id, error, cx);
                                 }
@@ -5819,6 +5851,11 @@ impl AppView {
                         view.auth_prompt = None;
                         view.auth_prompt_needs_clear = true;
                     }
+                    view.pending_trigger_prompts
+                        .retain(|(session_id, _, _)| *session_id != id);
+                    view.pending_auth_prompts
+                        .retain(|prompt| prompt.session_id != id);
+                    view.present_next_auth_prompt(cx);
                     cx.notify();
                 }
             });
@@ -5870,6 +5907,10 @@ impl AppView {
 
     fn disconnect_session(&mut self, id: u64, cx: &mut Context<Self>) {
         self.pending_credentials.remove(&id);
+        self.pending_trigger_prompts
+            .retain(|(session_id, _, _)| *session_id != id);
+        self.pending_auth_prompts
+            .retain(|prompt| prompt.session_id != id);
         if self
             .auth_prompt
             .as_ref()
@@ -5885,11 +5926,13 @@ impl AppView {
         }
         self.trigger_latches.remove(&id);
         let Some(session) = self.session_mut(id) else {
+            self.present_next_auth_prompt(cx);
             return;
         };
         if session.state == SessionState::Disconnected
             || session.state == SessionState::Disconnecting
         {
+            self.present_next_auth_prompt(cx);
             return;
         }
 
@@ -5903,10 +5946,15 @@ impl AppView {
         session.scroll_remainder = 0.0;
         session.status = "Disconnecting...".to_owned();
         cx.notify();
+        self.present_next_auth_prompt(cx);
     }
 
     fn close_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_credentials.remove(&id);
+        self.pending_trigger_prompts
+            .retain(|(session_id, _, _)| *session_id != id);
+        self.pending_auth_prompts
+            .retain(|prompt| prompt.session_id != id);
         let closes_split_pane = self.split.is_some_and(|split| split.contains(id));
         if !remove_session(&mut self.sessions, &mut self.active_session_id, id) {
             return;
@@ -5945,6 +5993,7 @@ impl AppView {
         }
         window.focus(&self.terminal_focus);
         cx.notify();
+        self.present_next_auth_prompt(cx);
     }
 
     fn send_key(
@@ -9873,11 +9922,39 @@ impl AppView {
         } else {
             self.tr("Trigger engine disabled.")
         };
+        self.persist_trigger_settings();
         cx.notify();
     }
 
-    fn set_trigger_action_kind(&mut self, kind: TriggerActionKind, cx: &mut Context<Self>) {
+    fn persist_trigger_settings(&mut self) {
+        let Some(store) = &self.trigger_store else {
+            return;
+        };
+        let settings = TriggerSettings {
+            engine_enabled: self.trigger_engine_enabled,
+            rules: self.trigger_rules.clone(),
+        };
+        if let Err(error) = store.save(&settings) {
+            self.trigger_message = error;
+        }
+    }
+
+    fn set_trigger_action_kind(
+        &mut self,
+        kind: TriggerActionKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.trigger_action_kind = kind;
+        let placeholder = if kind == TriggerActionKind::PromptResponse {
+            "Enter a prompt label"
+        } else {
+            "preset command, for example: systemctl status ssh"
+        };
+        let placeholder = self.tr(placeholder);
+        self.trigger_text_input.update(cx, |state, cx| {
+            state.set_placeholder(placeholder, window, cx)
+        });
         cx.notify();
     }
 
@@ -9929,6 +10006,19 @@ impl AppView {
                     send_enter: self.trigger_send_enter,
                 }
             }
+            TriggerActionKind::PromptResponse => {
+                let label =
+                    match normalize_prompt_label(self.trigger_text_input.read(cx).value().as_str())
+                    {
+                        Ok(label) => label,
+                        Err(error) => {
+                            self.trigger_message = self.tr(error);
+                            cx.notify();
+                            return;
+                        }
+                    };
+                TriggerAction::PromptResponse { label }
+            }
         };
         self.trigger_rules.push(TriggerRule {
             keyword: keyword.clone(),
@@ -9936,6 +10026,7 @@ impl AppView {
             enabled: false,
         });
         self.trigger_message = format!("{} {keyword}", self.tr("Added disabled trigger:"));
+        self.persist_trigger_settings();
         Self::set_input_value(&self.trigger_keyword_input, "", window, cx);
         Self::set_input_value(&self.trigger_text_input, "", window, cx);
         cx.notify();
@@ -9964,6 +10055,7 @@ impl AppView {
         } else {
             format!("{} {rule_keyword}", self.tr("Disabled trigger:"))
         };
+        self.persist_trigger_settings();
         cx.notify();
     }
 
@@ -9975,6 +10067,7 @@ impl AppView {
             latched.remove(&key);
         }
         self.trigger_message = format!("{} {keyword}", self.tr("Removed trigger:"));
+        self.persist_trigger_settings();
         cx.notify();
     }
 
@@ -10065,6 +10158,38 @@ impl AppView {
                     Tone::Accent,
                     cx,
                 );
+            }
+            TriggerAction::PromptResponse { label } => {
+                if self
+                    .session(session_id)
+                    .is_none_or(|session| session.state != SessionState::Connected)
+                {
+                    return;
+                }
+                if self.auth_prompt.as_ref().is_some_and(|prompt| {
+                    prompt.session_id == session_id
+                        && prompt.trigger_keyword.as_deref() == Some(rule.keyword.as_str())
+                }) || self.pending_trigger_prompts.iter().any(
+                    |(queued_id, queued_keyword, _)| {
+                        *queued_id == session_id && queued_keyword == &rule.keyword
+                    },
+                ) {
+                    return;
+                }
+                if self.pending_trigger_prompts.len() >= MAX_PENDING_TRIGGER_PROMPTS {
+                    self.show_toast(
+                        self.tr("Too many trigger responses are waiting."),
+                        Tone::Warning,
+                        cx,
+                    );
+                    return;
+                }
+                self.pending_trigger_prompts.push_back((
+                    session_id,
+                    rule.keyword.clone(),
+                    label.clone(),
+                ));
+                self.present_next_auth_prompt(cx);
             }
         }
     }
@@ -11162,6 +11287,12 @@ impl AppView {
                         TriggerAction::SendText { .. } => self.tr("Send text"),
                         _ => unreachable!("trigger action kind must match action"),
                     },
+                    TriggerActionKind::PromptResponse => match &rule.action {
+                        TriggerAction::PromptResponse { label } => {
+                            format!("{}: {label}", self.tr("Ask and send"))
+                        }
+                        _ => unreachable!("trigger action kind must match action"),
+                    },
                 };
                 list = list.child(
                     div()
@@ -11262,8 +11393,8 @@ impl AppView {
                     },
                     ButtonSize::Small,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_trigger_action_kind(kind, cx);
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_trigger_action_kind(kind, window, cx);
                 })),
             );
         }
@@ -11328,6 +11459,13 @@ impl AppView {
                     })),
                 );
         }
+        if self.trigger_action_kind == TriggerActionKind::PromptResponse {
+            editor = editor
+                .child(components::label_text(&tokens, self.tr("Response prompt")))
+                .child(
+                    TextInput::new(&self.trigger_text_input).h(px(ui_tokens::CONTROL_HEIGHT_SM)),
+                );
+        }
 
         div()
             .id("triggers-panel")
@@ -11389,7 +11527,11 @@ impl AppView {
             )
             .child(components::help_text(
                 &tokens,
-                self.tr("Rules are disabled by default. Actions are limited to highlighting, a toast, or preset text."),
+                self.tr("Rules are disabled by default. Actions can highlight, notify, send preset text, or ask for a response."),
+            ))
+            .child(components::help_text(
+                &tokens,
+                self.tr("Preset text rules are cleared when the app closes and are never saved."),
             ))
             .child(editor)
             .child(
@@ -13306,7 +13448,7 @@ impl AppView {
         instructions: String,
         prompts: Vec<AuthPromptInfo>,
         respond_to: oneshot::Sender<Vec<Zeroizing<String>>>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         if prompts.len() > MAX_AUTH_PROMPTS {
             let _ = respond_to.send(vec![Zeroizing::new(String::new())]);
@@ -13319,23 +13461,80 @@ impl AppView {
             }
             return;
         }
-        let status = if name.trim().is_empty() {
-            self.tr("Waiting for keyboard-interactive input...")
-        } else {
-            self.tr("Keyboard-interactive authentication: {name}")
-                .replace("{name}", &name)
-        };
-        if let Some(session) = self.session_mut(session_id) {
-            session.status = status;
-        }
-        self.auth_prompt = Some(AuthPromptState {
+        let prompt = AuthPromptState {
             session_id,
             name,
             instructions,
             prompts,
             respond_to: Some(respond_to),
-        });
+            source: AuthPromptSource::SshAuthentication,
+            trigger_keyword: None,
+        };
+        if self.auth_prompt.is_some() {
+            self.pending_auth_prompts.push_back(prompt);
+        } else {
+            self.activate_auth_prompt(prompt, cx);
+        }
+    }
+
+    fn activate_auth_prompt(&mut self, prompt: AuthPromptState, cx: &mut Context<Self>) {
+        let status = match prompt.source {
+            AuthPromptSource::SshAuthentication if prompt.name.trim().is_empty() => {
+                self.tr("Waiting for keyboard-interactive input...")
+            }
+            AuthPromptSource::SshAuthentication => self
+                .tr("Keyboard-interactive authentication: {name}")
+                .replace("{name}", &prompt.name),
+            AuthPromptSource::TriggerResponse => self.tr("Waiting for trigger response..."),
+        };
+        if let Some(session) = self.session_mut(prompt.session_id) {
+            session.status = status;
+        }
+        self.auth_prompt = Some(prompt);
         self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn present_next_auth_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.auth_prompt.is_some() {
+            return;
+        }
+        while let Some(prompt) = self.pending_auth_prompts.pop_front() {
+            if self.session(prompt.session_id).is_some_and(|session| {
+                !matches!(
+                    session.state,
+                    SessionState::Disconnected | SessionState::Disconnecting
+                )
+            }) {
+                self.activate_auth_prompt(prompt, cx);
+                return;
+            }
+        }
+        while let Some((session_id, keyword, label)) = self.pending_trigger_prompts.pop_front() {
+            if self
+                .session(session_id)
+                .is_some_and(|session| session.state == SessionState::Connected)
+            {
+                self.activate_auth_prompt(
+                    AuthPromptState {
+                        session_id,
+                        name: String::new(),
+                        instructions: self
+                            .tr("Triggered by terminal text: {keyword}")
+                            .replace("{keyword}", &keyword),
+                        prompts: vec![AuthPromptInfo {
+                            prompt: label,
+                            echo: false,
+                        }],
+                        respond_to: None,
+                        source: AuthPromptSource::TriggerResponse,
+                        trigger_keyword: Some(keyword),
+                    },
+                    cx,
+                );
+                return;
+            }
+        }
     }
 
     fn submit_auth_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -13351,17 +13550,76 @@ impl AppView {
             };
             responses.push(Zeroizing::new(input.read(cx).value().to_string()));
         }
-        if let Some(respond_to) = prompt.respond_to {
-            let _ = respond_to.send(responses);
+        match prompt.source {
+            AuthPromptSource::SshAuthentication => {
+                if let Some(respond_to) = prompt.respond_to {
+                    let _ = respond_to.send(responses);
+                }
+                let status = self.tr("Submitting authentication response...");
+                if let Some(session) = self.session_mut(prompt.session_id) {
+                    session.status = status;
+                }
+            }
+            AuthPromptSource::TriggerResponse => {
+                let response = responses
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Zeroizing::new(String::new()));
+                if self
+                    .session(prompt.session_id)
+                    .is_some_and(|session| session.state == SessionState::Connected)
+                {
+                    let sent = enqueue_session_request(
+                        &self.sessions,
+                        prompt.session_id,
+                        TerminalRequest::PasteSecret(response),
+                    );
+                    if let Err(error) = sent {
+                        self.show_toast(
+                            format!("{} {error}", self.tr("Trigger could not send:")),
+                            Tone::Danger,
+                            cx,
+                        );
+                    } else {
+                        let enter = TerminalKeyInput {
+                            key: "enter".to_owned(),
+                            text: None,
+                            control: false,
+                            alt: false,
+                            shift: false,
+                            platform: false,
+                            function: false,
+                        };
+                        if let Err(error) = enqueue_session_request(
+                            &self.sessions,
+                            prompt.session_id,
+                            TerminalRequest::Key(enter),
+                        ) {
+                            self.show_toast(
+                                format!("{} {error}", self.tr("Trigger could not send Enter:")),
+                                Tone::Danger,
+                                cx,
+                            );
+                        } else {
+                            let status = self.tr("Trigger response sent.");
+                            if let Some(session) = self.session_mut(prompt.session_id) {
+                                session.status = status;
+                            }
+                            self.show_toast(
+                                self.tr("Trigger response sent to the SSH session."),
+                                Tone::Accent,
+                                cx,
+                            );
+                        }
+                    }
+                }
+            }
         }
         self.clear_auth_prompt_inputs(window, cx);
         self.auth_prompt_needs_clear = false;
-        let status = self.tr("Submitting authentication response...");
-        if let Some(session) = self.session_mut(prompt.session_id) {
-            session.status = status;
-        }
         self.overlay_focus_pending = false;
         window.focus(&self.terminal_focus);
+        self.present_next_auth_prompt(cx);
         cx.notify();
     }
 
@@ -13369,14 +13627,24 @@ impl AppView {
         let Some(prompt) = self.auth_prompt.take() else {
             return;
         };
+        let cancel_ssh_auth = prompt.source == AuthPromptSource::SshAuthentication;
         if let Some(respond_to) = prompt.respond_to {
             let _ = respond_to.send(vec![Zeroizing::new(String::new()); prompt.prompts.len()]);
         }
         self.clear_auth_prompt_inputs(window, cx);
         self.auth_prompt_needs_clear = false;
-        self.disconnect_session(prompt.session_id, cx);
+        if cancel_ssh_auth {
+            self.disconnect_session(prompt.session_id, cx);
+        } else {
+            let status = self.tr("Trigger response cancelled.");
+            if let Some(session) = self.session_mut(prompt.session_id) {
+                session.status = status;
+            }
+        }
         self.overlay_focus_pending = false;
         window.focus(&self.terminal_focus);
+        self.present_next_auth_prompt(cx);
+        cx.notify();
     }
 
     fn clear_auth_prompt_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -13394,11 +13662,16 @@ impl AppView {
         let Some(prompt) = self.auth_prompt.as_ref() else {
             return div().into_any_element();
         };
-        let title = if prompt.name.trim().is_empty() {
-            self.tr("Keyboard-interactive authentication")
-        } else {
-            self.tr("Keyboard-interactive authentication: {name}")
-                .replace("{name}", &prompt.name)
+        let title = match prompt.source {
+            AuthPromptSource::TriggerResponse => self
+                .tr("Trigger response for: {keyword}")
+                .replace("{keyword}", prompt.trigger_keyword.as_deref().unwrap_or("")),
+            AuthPromptSource::SshAuthentication if prompt.name.trim().is_empty() => {
+                self.tr("Keyboard-interactive authentication")
+            }
+            AuthPromptSource::SshAuthentication => self
+                .tr("Keyboard-interactive authentication: {name}")
+                .replace("{name}", &prompt.name),
         };
         let instructions = prompt.instructions.trim().to_owned();
         let prompts = prompt.prompts.clone();
@@ -13430,7 +13703,13 @@ impl AppView {
         }
         body = body.child(components::help_text(
             &tokens,
-            self.tr("Responses are sent only to the SSH server and are not stored."),
+            if prompt.source == AuthPromptSource::TriggerResponse {
+                self.tr(
+                    "Responses are sent to the SSH session and are not saved in trigger settings.",
+                )
+            } else {
+                self.tr("Responses are sent only to the SSH server and are not stored.")
+            },
         ));
 
         components::modal_overlay(&tokens, "auth-prompt-overlay")
@@ -13468,7 +13747,11 @@ impl AppView {
                                 components::button(
                                     &tokens,
                                     "auth-prompt-submit",
-                                    self.tr("Continue"),
+                                    if prompt.source == AuthPromptSource::TriggerResponse {
+                                        self.tr("Send response")
+                                    } else {
+                                        self.tr("Continue")
+                                    },
                                     ButtonKind::Primary,
                                     ButtonSize::Regular,
                                 )

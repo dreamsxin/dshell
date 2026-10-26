@@ -2,7 +2,7 @@
 
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
-runtime. The first public release is `v0.1.0`; the current release is `v0.1.35`.
+runtime. The first public release is `v0.1.0`; the current release is `v0.1.36`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
@@ -153,7 +153,7 @@ skipped. Each entry shows its permission mode and modification timestamp; the
 metadata action edits octal permissions plus Unix access and modification
 seconds through SFTP `SETSTAT`. The panel also shows remote filesystem usage,
 available/free space, block size and maximum filename length when the server
-supports the OpenSSH `statvfs` extension. For each recent host and user,
+supports the OpenSSH `statvfs` extension. For each recent host, port and user,
 dshell remembers the last remote directory and local folder. The remote
 directory is restored on reconnect, and downloads reuse the remembered local
 folder; use the folder icon to change it. Uploads continue to use the native
@@ -352,9 +352,12 @@ credential flow:
 Use the `Keyword highlights` button to keep up to 32 literal keywords in memory.
 Highlighting is disabled by default, case-insensitive, and applies to live
 terminals and log replay. The `Triggers` Bell button adds bounded rules that are
-also disabled by default. Each rule can highlight matching output, show a Toast,
-or send preset text through the existing terminal queue, optionally followed by
-Enter. Trigger rules never execute arbitrary scripts and are kept in memory only.
+disabled by default. Highlight, notification and prompt-response rules are
+saved in versioned configuration. A prompt-response rule opens a masked input
+when its terminal keyword matches, then sends the entered response followed by
+Enter. Responses use zeroizing runtime buffers and are not written to trigger
+settings. Preset-text rules remain in memory for the current run and are never
+saved. Triggers never execute arbitrary scripts.
 
 dshell targets the daily Xshell-style workflow as an open-source, native
 application: session management with groups and recents, tabbed and split

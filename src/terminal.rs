@@ -10,6 +10,7 @@ use alacritty_terminal::{
     vte::ansi::{Color, NamedColor, Processor},
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -166,6 +167,7 @@ pub enum TerminalRequest {
     Resize(TerminalSize),
     Mouse(TerminalMouseEvent),
     Paste(String),
+    PasteSecret(Zeroizing<String>),
     StartLog(PathBuf),
     StopLog,
     SetTheme(TerminalTheme),

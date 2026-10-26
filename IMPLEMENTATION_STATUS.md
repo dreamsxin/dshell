@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+2026-10-26，Windows/MSVC：提示响应式终端触发器完成，版本提升至 `v0.1.36`。版本化 `triggers.json` 保存引擎开关及非预设文本规则；预设文本触发器只在当前运行保留，永不写入配置。新增“询问并发送”动作：关键词匹配后显示掩码响应框，确认后通过零化文本/字节缓冲发送到对应 SSH 会话并回车；取消不会断开会话。认证和触发器提示共用排队弹窗，避免覆盖，断开/关闭会话清除对应排队项。增加响应标签校验、存储排除秘密文本和简体中文文案。`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked` 与 `scripts\verify-hard-constraints.ps1` 均通过（168 项通过、9 项 Docker 专项忽略）；`scripts\test-docker-ssh.ps1` 通过（9/9）。隔离 Windows 掩码输入、触发/取消交互、DPI/IME/字形与截图仍待人工验收；未在用户活动桌面启动 GUI。SFTP 最近目录已按主机、端口、用户名记忆并在重连恢复，包含本地文件夹复用；该能力已随 `v0.1.33` 发布。下一步为隔离 Windows GUI 手工验收。
+
+## 当前切片
+
 2026-10-26，Windows/MSVC：SFTP 资源管理器拖放上传已随 `v0.1.35` 发布。Windows 资源管理器拖入文件或文件夹即可进入当前会话已有 FIFO 上传队列；文件选择器和文件夹选择器也共用 `symlink_metadata` 校验，只接受普通文件/目录并拒绝符号链接和特殊路径。面板提供英文/简体中文拖放提示和错误反馈。最近目录行为继续按主机、端口和用户记住远端目录与本地文件夹，拖放沿用当前远端目录。新增常规文件、目录和缺失路径分类测试，符号链接拒绝测试仅在 Unix 平台编译。`cargo fmt --all`、`scripts\verify-hard-constraints.ps1` 通过（166 项通过、9 项 Docker 专项忽略），`scripts\test-docker-ssh.ps1` 通过（9/9）。隔离 Windows GUI 拖放实测与截图仍待人工验收；未在用户活动桌面启动 GUI。下一步为隔离桌面验收或继续评估 SFTP 面板布局。
 
 ## 当前切片

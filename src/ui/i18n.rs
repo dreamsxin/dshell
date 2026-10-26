@@ -454,6 +454,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Highlight" => "高亮",
         "Notify" => "通知",
         "Send text" => "发送文本",
+        "Ask and send" => "询问并发送",
+        "Send response" => "发送响应",
         "Send text + Enter" => "发送文本并回车",
         "No triggers" => "没有触发器",
         "Add a disabled rule, then enable it when you are ready." => {
@@ -462,6 +464,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Trigger keyword" => "触发关键词",
         "Action" => "动作",
         "Preset text" => "预设文本",
+        "Response prompt" => "响应提示",
+        "Enter a prompt label" => "输入响应提示",
         "Send + Enter" => "发送并回车",
         "Paste only" => "仅粘贴",
         "Add trigger" => "添加触发器",
@@ -471,8 +475,11 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Enable trigger engine" => "启用触发器引擎",
         "Disable trigger engine" => "停用触发器引擎",
         "Close triggers" => "关闭触发器",
-        "Rules are disabled by default. Actions are limited to highlighting, a toast, or preset text." => {
-            "规则默认禁用，动作仅限于高亮、Toast 提示或发送预设文本。"
+        "Rules are disabled by default. Actions can highlight, notify, send preset text, or ask for a response." => {
+            "规则默认禁用，可执行高亮、通知、发送预设文本或询问并发送响应。"
+        }
+        "Preset text rules are cleared when the app closes and are never saved." => {
+            "预设文本规则只在本次运行期间保留，关闭应用后清除且不会保存。"
         }
         "Enable individual rules to react to new terminal output." => {
             "启用单条规则后，它才会响应新的终端输出。"
@@ -490,10 +497,24 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Trigger could not send:" => "触发器无法发送：",
         "Trigger could not send Enter:" => "触发器无法发送回车：",
         "Trigger sent preset text for:" => "触发器已发送预设文本：",
+        "Waiting for trigger response..." => "等待输入触发器响应……",
+        "Triggered by terminal text: {keyword}" => "匹配终端文本：{keyword}",
+        "Trigger response for: {keyword}" => "触发器响应：{keyword}",
+        "Responses are sent to the SSH session and are not saved in trigger settings." => {
+            "响应会发送到 SSH 会话，不会保存到触发器设置。"
+        }
+        "Trigger response sent." => "触发器响应已发送。",
+        "Trigger response sent to the SSH session." => "触发器响应已发送到 SSH 会话。",
+        "Trigger response cancelled." => "已取消本次触发器响应。",
+        "Too many trigger responses are waiting." => "等待处理的触发器响应过多。",
         "Enter a keyword for the trigger." => "请输入触发器关键词。",
         "Trigger keywords are limited to 128 characters." => "触发器关键词最多 128 个字符。",
         "Enter preset text for the trigger." => "请输入触发器预设文本。",
         "Preset trigger text is limited to 1024 characters." => "触发器预设文本最多 1024 个字符。",
+        "Enter a prompt label for the trigger." => "请输入触发器响应提示。",
+        "Trigger prompt labels are limited to 1024 characters." => {
+            "触发器响应提示最多 1024 个字符。"
+        }
         "preset command, for example: systemctl status ssh" => {
             "预设命令，例如：systemctl status ssh"
         }
@@ -926,6 +947,14 @@ mod tests {
             "使用 Windows OpenSSH agent 命名管道或 Pageant。连接前请先将密钥加载到 agent。"
         );
         assert_eq!(translate(Language::SimplifiedChinese, "Triggers"), "触发器");
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Ask and send"),
+            "询问并发送"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Send response"),
+            "发送响应"
+        );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Change key passphrase"),
             "修改密钥口令"
