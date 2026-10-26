@@ -9024,6 +9024,131 @@ impl AppView {
         cx.notify();
     }
 
+    fn begin_snippet_export(&mut self, cx: &mut Context<Self>) {
+        if self.snippets.is_empty() {
+            self.snippet_message = self.tr("No quick commands to export.");
+            self.show_toast(self.snippet_message.clone(), Tone::Warning, cx);
+            return;
+        }
+        if self.snippet_store.is_none() {
+            self.snippet_message = self.tr("Command snippet storage is unavailable.");
+            self.show_toast(self.snippet_message.clone(), Tone::Danger, cx);
+            return;
+        }
+        let directory = home_directory();
+        let receiver = cx.prompt_for_new_path(&directory, Some("dshell-commands.json"));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                let _ = this.update(cx, |view, cx| view.export_snippet_bundle(&path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn export_snippet_bundle(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if snippets::export_bundle(path, &self.snippets).is_err() {
+            self.snippet_message = self.tr("Could not export quick commands.");
+            self.show_toast(
+                self.tr("Could not export quick commands."),
+                Tone::Danger,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        self.snippet_message = self
+            .tr("Exported {count} quick command(s) to {path}.")
+            .replace("{count}", &self.snippets.len().to_string())
+            .replace("{path}", &path.display().to_string());
+        self.show_toast(self.snippet_message.clone(), Tone::Success, cx);
+        cx.notify();
+    }
+
+    fn begin_snippet_import(&mut self, cx: &mut Context<Self>) {
+        if self.snippet_store.is_none() {
+            self.snippet_message = self.tr("Command snippet storage is unavailable.");
+            self.show_toast(self.snippet_message.clone(), Tone::Danger, cx);
+            return;
+        }
+        let prompt: SharedString = self.tr("Import quick commands").into();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(prompt),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = receiver.await
+                && let Some(path) = paths.pop()
+            {
+                let _ = this.update(cx, |view, cx| view.import_snippet_bundle(&path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn import_snippet_bundle(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let imported = match snippets::import_bundle(path) {
+            Ok(imported) => imported,
+            Err(_) => {
+                self.snippet_message = self.tr("Could not import quick commands.");
+                self.show_toast(
+                    self.tr("Could not import quick commands."),
+                    Tone::Danger,
+                    cx,
+                );
+                cx.notify();
+                return;
+            }
+        };
+        let (merged, skipped) = match snippets::merge_unique(&self.snippets, imported) {
+            Ok(result) => result,
+            Err(error) => {
+                let message = if error.starts_with("Importing this bundle would exceed") {
+                    self.tr("Importing this bundle would exceed the {count} command limit.")
+                        .replace("{count}", &MAX_SNIPPETS.to_string())
+                } else {
+                    self.tr("Could not import quick commands.")
+                };
+                self.snippet_message = message.clone();
+                self.show_toast(message, Tone::Danger, cx);
+                cx.notify();
+                return;
+            }
+        };
+        let added = merged.len() - self.snippets.len();
+        if added > 0 {
+            let Some(store) = self.snippet_store.as_ref() else {
+                self.snippet_message = self.tr("Command snippet storage is unavailable.");
+                self.show_toast(self.snippet_message.clone(), Tone::Danger, cx);
+                cx.notify();
+                return;
+            };
+            if store.save(&merged).is_err() {
+                self.snippet_message = self.tr("Could not import quick commands.");
+                self.show_toast(
+                    self.tr("Could not import quick commands."),
+                    Tone::Danger,
+                    cx,
+                );
+                cx.notify();
+                return;
+            }
+            self.snippets = merged;
+        }
+        self.snippet_message = self
+            .tr("Imported {added} quick command(s); skipped {skipped} duplicate(s).")
+            .replace("{added}", &added.to_string())
+            .replace("{skipped}", &skipped.to_string());
+        let tone = if skipped > 0 {
+            Tone::Warning
+        } else {
+            Tone::Success
+        };
+        self.show_toast(self.snippet_message.clone(), tone, cx);
+        cx.notify();
+    }
+
     fn toggle_snippets(&mut self, cx: &mut Context<Self>) {
         self.snippets_visible = !self.snippets_visible;
         if self.snippets_visible {
@@ -10642,6 +10767,8 @@ impl AppView {
         let snippets = self.snippets.clone();
         let message = self.snippet_message.clone();
         let targets = self.snippet_targets.clone();
+        let can_import = self.snippet_store.is_some();
+        let can_export = can_import && !snippets.is_empty();
         let active_session = self.active_session().map(|session| session.title.clone());
         let mut quick_grid = div()
             .id("quick-command-grid")
@@ -10812,6 +10939,34 @@ impl AppView {
                         .flex()
                         .items_center()
                         .gap(px(ui_tokens::SPACE_1))
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "quick-command-import",
+                                IconName::ArrowDown,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Import quick commands"),
+                            )
+                            .disabled(!can_import)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_snippet_import(cx);
+                            })),
+                        )
+                        .child(
+                            components::icon_button(
+                                &tokens,
+                                "quick-command-export",
+                                IconName::ArrowUp,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Export quick commands"),
+                            )
+                            .disabled(!can_export)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_snippet_export(cx);
+                            })),
+                        )
                         .child(
                             components::icon_button(
                                 &tokens,

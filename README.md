@@ -190,7 +190,10 @@ stored in `%APPDATA%\dshell\snippets.json` on Windows and shown as a flat
 button grid with icon actions for run, edit and delete. A command can be sent
 to the active session or broadcast to explicitly selected connected sessions.
 The `Send + Enter` / `Paste only` toggle controls whether the command is
-submitted immediately.
+submitted immediately. Use the import and export icon buttons to exchange a
+versioned JSON command bundle with teammates. Import merges by case-insensitive
+name, skips duplicates, and rejects a merge above 200 commands. Imported
+commands are stored locally and only run when you select a command tile.
 
 Use the `Keys` button to manage local OpenSSH identities. The 560 px modal
 discovers likely private keys in `~/.ssh` without reading private-key contents,

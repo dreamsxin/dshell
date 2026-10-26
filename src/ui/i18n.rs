@@ -745,6 +745,18 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Editing {name}." => "正在编辑{name}。",
         "Snippet name and command are required." => "片段名称和命令不能为空。",
         "Command snippet storage is unavailable." => "快捷命令存储不可用。",
+        "Import quick commands" => "导入快捷命令",
+        "Export quick commands" => "导出快捷命令",
+        "Could not import quick commands." => "无法导入快捷命令。",
+        "Could not export quick commands." => "无法导出快捷命令。",
+        "No quick commands to export." => "没有可导出的快捷命令。",
+        "Exported {count} quick command(s) to {path}." => "已将 {count} 条快捷命令导出到 {path}。",
+        "Imported {added} quick command(s); skipped {skipped} duplicate(s)." => {
+            "已导入 {added} 条快捷命令；跳过 {skipped} 条重名命令。"
+        }
+        "Importing this bundle would exceed the {count} command limit." => {
+            "导入后将超过 {count} 条命令的上限。"
+        }
         "A snippet named {name} already exists." => "已存在名为{name}的片段。",
         "Cannot have more than {count} snippets." => "片段数量不能超过 {count} 个。",
         "History" => "历史",
@@ -986,6 +998,14 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Quick commands"),
             "快捷命令"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Import quick commands"),
+            "导入快捷命令"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Export quick commands"),
+            "导出快捷命令"
         );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Synchronized input"),

@@ -1,9 +1,16 @@
-use std::{collections::HashSet, env, fs, io::ErrorKind, path::PathBuf};
+use std::{
+    collections::HashSet,
+    env,
+    fs::{self, File},
+    io::{ErrorKind, Read},
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
 const DOCUMENT_VERSION: u8 = 1;
 pub const MAX_SNIPPETS: usize = 200;
+const MAX_SNIPPET_BUNDLE_BYTES: u64 = 1_048_576;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +115,95 @@ impl SnippetStore {
     }
 }
 
+pub fn export_bundle(path: &Path, snippets: &[CommandSnippet]) -> Result<(), String> {
+    validate_snippets(snippets)?;
+    let contents = serde_json::to_vec_pretty(&SnippetDocument {
+        version: DOCUMENT_VERSION,
+        snippets: snippets.to_vec(),
+    })
+    .map_err(|error| format!("Could not serialize command snippets: {error}"))?;
+    if contents.len() as u64 > MAX_SNIPPET_BUNDLE_BYTES {
+        return Err("The command snippet bundle exceeds the 1 MiB size limit.".to_owned());
+    }
+    fs::write(path, contents).map_err(|error| {
+        format!(
+            "Could not export command snippets to {}: {error}",
+            path.display()
+        )
+    })
+}
+
+pub fn import_bundle(path: &Path) -> Result<Vec<CommandSnippet>, String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "Could not inspect command snippet bundle {}: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err("The selected command snippet bundle is not a regular file.".to_owned());
+    }
+    if metadata.len() > MAX_SNIPPET_BUNDLE_BYTES {
+        return Err("The command snippet bundle exceeds the 1 MiB size limit.".to_owned());
+    }
+
+    let mut bytes = Vec::new();
+    File::open(path)
+        .map_err(|error| {
+            format!(
+                "Could not open command snippet bundle {}: {error}",
+                path.display()
+            )
+        })?
+        .take(MAX_SNIPPET_BUNDLE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read command snippet bundle: {error}"))?;
+    if bytes.len() as u64 > MAX_SNIPPET_BUNDLE_BYTES {
+        return Err("The command snippet bundle exceeds the 1 MiB size limit.".to_owned());
+    }
+    let contents = String::from_utf8(bytes)
+        .map_err(|error| format!("The command snippet bundle is not valid UTF-8: {error}"))?;
+    let document: SnippetDocument = serde_json::from_str(&contents)
+        .map_err(|error| format!("Could not parse command snippet bundle: {error}"))?;
+    if document.version != DOCUMENT_VERSION {
+        return Err(format!(
+            "Command snippet bundle version {} is not supported.",
+            document.version
+        ));
+    }
+    validate_snippets(&document.snippets)?;
+    Ok(document.snippets)
+}
+
+pub fn merge_unique(
+    existing: &[CommandSnippet],
+    imported: Vec<CommandSnippet>,
+) -> Result<(Vec<CommandSnippet>, usize), String> {
+    validate_snippets(existing)?;
+    validate_snippets(&imported)?;
+
+    let mut merged = existing.to_vec();
+    let mut names = existing
+        .iter()
+        .map(|snippet| snippet.name.to_lowercase())
+        .collect::<HashSet<_>>();
+    let mut skipped = 0;
+    for snippet in imported {
+        if names.insert(snippet.name.to_lowercase()) {
+            merged.push(snippet);
+        } else {
+            skipped += 1;
+        }
+    }
+    if merged.len() > MAX_SNIPPETS {
+        return Err(format!(
+            "Importing this bundle would exceed the {MAX_SNIPPETS} command limit."
+        ));
+    }
+    merged.sort_by_key(|snippet| snippet.name.to_lowercase());
+    Ok((merged, skipped))
+}
+
 fn default_send_enter() -> bool {
     true
 }
@@ -179,5 +275,77 @@ mod tests {
             ..snippet.clone()
         };
         assert!(validate_snippets(&[snippet, duplicate]).is_err());
+    }
+
+    #[test]
+    fn command_bundle_round_trips_and_defaults_send_enter() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("team-commands.json");
+        let snippets = vec![CommandSnippet {
+            name: "uptime".to_owned(),
+            command: "uptime".to_owned(),
+            send_enter: false,
+        }];
+
+        export_bundle(&path, &snippets).unwrap();
+        assert_eq!(import_bundle(&path).unwrap(), snippets);
+
+        fs::write(
+            &path,
+            r#"{"version":1,"snippets":[{"name":"disk","command":"df -h"}]}"#,
+        )
+        .unwrap();
+        assert!(import_bundle(&path).unwrap()[0].send_enter);
+    }
+
+    #[test]
+    fn command_bundle_rejects_unsupported_or_oversized_documents() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("commands.json");
+        fs::write(&path, r#"{"version":2,"snippets":[]}"#).unwrap();
+        assert!(import_bundle(&path).unwrap_err().contains("version 2"));
+
+        fs::write(&path, vec![b' '; MAX_SNIPPET_BUNDLE_BYTES as usize + 1]).unwrap();
+        assert!(import_bundle(&path).unwrap_err().contains("1 MiB"));
+    }
+
+    #[test]
+    fn merge_skips_existing_names_and_rejects_overflow_without_mutating_existing() {
+        let existing = vec![CommandSnippet {
+            name: "uptime".to_owned(),
+            command: "uptime".to_owned(),
+            send_enter: true,
+        }];
+        let imported = vec![
+            CommandSnippet {
+                name: "UPTIME".to_owned(),
+                command: "uptime -p".to_owned(),
+                send_enter: true,
+            },
+            CommandSnippet {
+                name: "disk".to_owned(),
+                command: "df -h".to_owned(),
+                send_enter: false,
+            },
+        ];
+        let (merged, skipped) = merge_unique(&existing, imported).unwrap();
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[1].name, "uptime");
+        assert_eq!(skipped, 1);
+
+        let full = (0..MAX_SNIPPETS)
+            .map(|index| CommandSnippet {
+                name: format!("command-{index}"),
+                command: "true".to_owned(),
+                send_enter: true,
+            })
+            .collect::<Vec<_>>();
+        let incoming = vec![CommandSnippet {
+            name: "overflow".to_owned(),
+            command: "true".to_owned(),
+            send_enter: true,
+        }];
+        assert!(merge_unique(&full, incoming).is_err());
+        assert_eq!(full.len(), MAX_SNIPPETS);
     }
 }

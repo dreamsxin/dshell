@@ -2,6 +2,32 @@
 
 All notable changes to dshell are documented here.
 
+## [0.1.32] - 2026-10-26
+
+Adds portable Quick Commands bundles for team sharing.
+
+### Added
+
+- Add native file-dialog actions to import and export versioned JSON command
+  bundles from the Quick Commands panel.
+- Merge imported commands by case-insensitive name, report skipped duplicates,
+  and reject additions that would exceed the 200-command limit.
+- Bound bundle files to 1 MiB and validate version, UTF-8, command fields and
+  duplicate names before changing local snippets.
+- Add Simplified Chinese labels and bundle round-trip, validation, merge and
+  limit tests. Importing a bundle stores commands locally without executing
+  them.
+
+### Verification
+
+- Verification date: 2026-10-26 (Windows/MSVC).
+- `cargo fmt --all`, hard-constraint verification and locked build passed.
+- `cargo test --locked`: 155 passed, 9 Docker-only tests ignored.
+- Docker SSH integration was not run because this change does not modify SSH
+  or other Docker-covered paths.
+- Isolated Windows GUI screenshots and manual DPI, IME and glyph checks remain
+  outstanding.
+
 ## [0.1.31] - 2026-10-26
 
 Adds independent duplicate sessions and keeps reusable credentials in memory only.
