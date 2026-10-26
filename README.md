@@ -35,9 +35,10 @@ remaining queue. Staged secrets stay in zeroizing memory and enter the reusable
 in-memory cache only after successful authentication.
 
 Saved sessions can use a custom tab title and one of eight theme-aware colors;
-an empty title keeps the session name. SFTP remembers the latest local folder
-and remote directory per host, port, and user. New connections restore the
-remote directory, and downloads reuse the remembered local folder.
+an empty title keeps the session name. Their terminal color scheme can follow
+the application setting or use a per-session palette. SFTP remembers the latest
+local folder and remote directory per host, port, and user. New connections
+restore the remote directory, and downloads reuse the remembered local folder.
 
 In a saved session's `Connection` properties, enable `Run commands after login`
 and enter up to 16 single-line commands. After the first successful interactive

@@ -13,6 +13,8 @@ All notable changes to dshell are documented here.
   saved host group and its subgroups.
 - Add a read-only comparison of visible terminal screens from two sessions,
   with aligned changes and refresh support.
+- Let saved host profiles choose a terminal color scheme independently, while
+  older profiles continue to follow the application theme by default.
 
 ## [0.1.42] - 2026-10-27
 

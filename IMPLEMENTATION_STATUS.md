@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+2026-10-27，Windows/MSVC：保存的 SSH 会话可在属性中选择 Default dark、Solarized dark、Solarized light，或跟随应用主题；临时会话可在属性中调整并保存为主机资料，保存后立即应用到当前连接。全局主题变化只更新跟随全局主题的会话，复制会话继承原配色。主机资料格式升至版本 9、导出格式升至版本 5，旧版本迁移为跟随全局主题；OpenSSH 导入也默认跟随全局主题。新增主题继承/覆盖、重复连接资料转换、运行中资料更新、迁移、导出往返和简体中文测试。`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked` 和 `scripts\verify-hard-constraints.ps1` 全部通过（207 项通过、9 项 Docker 专项忽略）；本轮没有改动 SSH transport、SFTP、认证、转发、日志或 PTY 路径，因此未运行 Docker SSH 集成测试。未在用户活动桌面启动 GUI；配色选择交互、终端渲染、截图及 DPI/IME/字形检查仍需隔离 Windows 桌面人工验收。下一步：完成隔离 GUI 验收，再继续按公开评价筛选高频工作流。
+
+## 当前切片
+
 2026-10-27，Windows/MSVC：会话标签菜单新增“与活动会话比较”，可并排查看两个 SSH 会话当前可见的终端文本，按行对齐并标示新增、删除和替换；支持刷新快照，不包含滚动历史，也不向远端发送命令。新增简体中文文案及 5 项比较逻辑测试。`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked` 和 `scripts\verify-hard-constraints.ps1` 全部通过（205 项通过、9 项 Docker 专项忽略）。本轮未修改 SSH/SFTP/认证/转发/日志/PTY 路径，因此未运行 Docker SSH 集成测试。现有 SFTP 最近目录记忆已于 `v0.1.33` 交付，按主机、端口和用户名恢复本地与远端目录。未在用户活动桌面启动 GUI；比较弹层交互、截图、DPI/IME 和字形检查仍需隔离 Windows 桌面人工验收。下一步：完成隔离 GUI 验收，并继续按公开 Xshell 评价筛选高频工作流。
 
 ## 当前切片

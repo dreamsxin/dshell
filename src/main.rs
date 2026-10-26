@@ -1092,6 +1092,7 @@ struct SessionLaunchSettings {
     auth_method: AuthMethod,
     identity_file: String,
     proxy_jump: String,
+    terminal_theme: Option<TerminalTheme>,
     keepalive_seconds: u16,
     reconnect: ReconnectSettings,
     forwards: Vec<ForwardRuleSpec>,
@@ -1107,6 +1108,7 @@ impl SessionLaunchSettings {
             username: username.to_owned(),
             tab_label: String::new(),
             tab_color: TabColor::Default,
+            terminal_theme: self.terminal_theme,
             group: String::new(),
             favorite: false,
             auth_method: self.auth_method,
@@ -1778,7 +1780,15 @@ fn update_sessions_for_profile(
             session.title.clone_from(&updated_title);
         }
         session.profile_name = Some(updated.name.clone());
+        session.launch_settings.terminal_theme = updated.terminal_theme;
     }
+}
+
+fn effective_terminal_theme(
+    session_theme: Option<TerminalTheme>,
+    application_theme: TerminalTheme,
+) -> TerminalTheme {
+    session_theme.unwrap_or(application_theme)
 }
 
 fn unique_duplicate_session_title(base: &str, existing_titles: &[String]) -> String {
@@ -1835,15 +1845,15 @@ mod session_tests {
         SessionEditorKey, SessionLaunchSettings, SessionSplit, SessionState, SftpViewState,
         SplitOrientation, SshSession, TabColor, TerminalFrame, TerminalRequest, TerminalSize,
         UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
-        enqueue_session_request, filesystem_usage_percent, forget_stopped_forward,
-        format_alert_time, format_log_time, format_rate, format_storage_kib,
-        group_launch_candidates, is_authentication_failure, is_sftp_transfer_command,
-        keyword_matches, local_upload_kind, mark_sftp_ready, matching_saved_profile_for_session,
-        memory_usage_percent, merge_unique_profiles, move_profile_to_group, mpsc,
-        next_session_switcher_index, parse_alert_percent, recall_compose_history,
-        recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
-        remove_profile_group, remove_session, rename_profile_group, reorder_group_order,
-        reorder_session_ids, saved_profile_for_session, search_result_message,
+        effective_terminal_theme, enqueue_session_request, filesystem_usage_percent,
+        forget_stopped_forward, format_alert_time, format_log_time, format_rate,
+        format_storage_kib, group_launch_candidates, is_authentication_failure,
+        is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
+        matching_saved_profile_for_session, memory_usage_percent, merge_unique_profiles,
+        move_profile_to_group, mpsc, next_session_switcher_index, parse_alert_percent,
+        recall_compose_history, recent_sftp_directories_for_target, remember_compose_history,
+        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
+        reorder_group_order, reorder_session_ids, saved_profile_for_session, search_result_message,
         server_alert_observations, session_accepts_requests, session_editor_escape,
         session_editor_key, session_matches_target, session_switcher_matches_ids,
         session_terminal_size_for_split, split_panel_terminal_size, synchronized_group_target_ids,
@@ -1860,7 +1870,7 @@ mod session_tests {
     use crate::sftp::SftpCommand;
     use crate::shortcuts::{ShortcutAction, ShortcutSettings};
     use crate::ssh::{ServerMetrics, ServerProcess};
-    use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX};
+    use crate::terminal::{CELL_HEIGHT_PX, CELL_WIDTH_PX, TerminalTheme};
     use crate::ui::tokens as ui_tokens;
     use std::collections::{HashSet, VecDeque};
     use zeroize::Zeroizing;
@@ -2046,6 +2056,7 @@ mod session_tests {
                 username: "test".to_owned(),
                 tab_label: String::new(),
                 tab_color: TabColor::Default,
+                terminal_theme: None,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Agent,
@@ -2122,6 +2133,7 @@ mod session_tests {
             username: "deploy".to_owned(),
             tab_label: String::new(),
             tab_color: TabColor::Default,
+            terminal_theme: None,
             group: "Production".to_owned(),
             favorite: false,
             auth_method: AuthMethod::Password,
@@ -2251,6 +2263,7 @@ mod session_tests {
             auth_method: AuthMethod::PublicKey,
             identity_file: "~/.ssh/id_ed25519".to_owned(),
             proxy_jump: "bastion".to_owned(),
+            terminal_theme: Some(TerminalTheme::SolarizedDark),
             keepalive_seconds: 30,
             reconnect: ReconnectSettings {
                 enabled: true,
@@ -2277,6 +2290,7 @@ mod session_tests {
         assert_eq!(profile.auth_method, AuthMethod::PublicKey);
         assert_eq!(profile.identity_file, "~/.ssh/id_ed25519");
         assert_eq!(profile.proxy_jump, "bastion");
+        assert_eq!(profile.terminal_theme, Some(TerminalTheme::SolarizedDark));
         assert_eq!(profile.keepalive_seconds, 30);
         assert_eq!(profile.reconnect, settings.reconnect);
         assert_eq!(profile.forwards, settings.forwards);
@@ -2296,6 +2310,7 @@ mod session_tests {
             username: "deploy".to_owned(),
             tab_label: "API west".to_owned(),
             tab_color: TabColor::Teal,
+            terminal_theme: None,
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Agent,
@@ -2313,6 +2328,7 @@ mod session_tests {
         let updated = HostProfile {
             name: "production-west".to_owned(),
             tab_label: "API west 2".to_owned(),
+            terminal_theme: Some(TerminalTheme::SolarizedLight),
             ..previous.clone()
         };
         let (mut regular, _, _) = test_session(1);
@@ -2327,8 +2343,31 @@ mod session_tests {
 
         assert_eq!(sessions[0].title, "API west 2");
         assert_eq!(sessions[0].profile_name.as_deref(), Some("production-west"));
+        assert_eq!(
+            sessions[0].launch_settings.terminal_theme,
+            Some(TerminalTheme::SolarizedLight)
+        );
         assert_eq!(sessions[1].title, "API west (2)");
         assert_eq!(sessions[1].profile_name.as_deref(), Some("production-west"));
+        assert_eq!(
+            sessions[1].launch_settings.terminal_theme,
+            Some(TerminalTheme::SolarizedLight)
+        );
+    }
+
+    #[test]
+    fn session_terminal_theme_override_takes_precedence_over_application_theme() {
+        assert_eq!(
+            effective_terminal_theme(None, TerminalTheme::SolarizedDark),
+            TerminalTheme::SolarizedDark
+        );
+        assert_eq!(
+            effective_terminal_theme(
+                Some(TerminalTheme::SolarizedLight),
+                TerminalTheme::SolarizedDark
+            ),
+            TerminalTheme::SolarizedLight
+        );
     }
 
     #[test]
@@ -2340,6 +2379,7 @@ mod session_tests {
             username: "test".to_owned(),
             tab_label: String::new(),
             tab_color: TabColor::Default,
+            terminal_theme: None,
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Password,
@@ -3017,6 +3057,7 @@ mod session_tests {
                 username: "ops".to_owned(),
                 tab_label: String::new(),
                 tab_color: TabColor::Default,
+                terminal_theme: None,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -3074,6 +3115,7 @@ mod session_tests {
                 username: "ops".to_owned(),
                 tab_label: String::new(),
                 tab_color: TabColor::Default,
+                terminal_theme: None,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -3130,6 +3172,7 @@ mod session_tests {
                 username: "ops".to_owned(),
                 tab_label: String::new(),
                 tab_color: TabColor::Default,
+                terminal_theme: None,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -3171,6 +3214,7 @@ mod session_tests {
                 username: "ops".to_owned(),
                 tab_label: String::new(),
                 tab_color: TabColor::Default,
+                terminal_theme: None,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -3255,6 +3299,7 @@ mod session_tests {
                 username: "test".to_owned(),
                 tab_label: String::new(),
                 tab_color: TabColor::Default,
+                terminal_theme: None,
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Agent,
@@ -3486,6 +3531,7 @@ struct AppView {
     profile_name: Entity<InputState>,
     profile_tab_label: Entity<InputState>,
     profile_tab_color: TabColor,
+    profile_terminal_theme: Option<TerminalTheme>,
     profile_search: Entity<InputState>,
     profile_group: Entity<InputState>,
     profile_favorite: bool,
@@ -3547,6 +3593,7 @@ struct AppView {
     profile_store: Option<ProfileStore>,
     profiles_ready: bool,
     selected_profile: Option<String>,
+    profile_edit_session_id: Option<u64>,
     session_editor_open: bool,
     credential_prompt_open: bool,
     credential_prompt_session_id: Option<u64>,
@@ -3843,6 +3890,7 @@ impl AppView {
             profile_name,
             profile_tab_label,
             profile_tab_color: TabColor::Default,
+            profile_terminal_theme: None,
             profile_search,
             profile_group,
             profile_favorite: false,
@@ -3904,6 +3952,7 @@ impl AppView {
             profile_store,
             profiles_ready,
             selected_profile: None,
+            profile_edit_session_id: None,
             session_editor_open: false,
             credential_prompt_open: false,
             credential_prompt_session_id: None,
@@ -5226,6 +5275,7 @@ impl AppView {
         Self::set_input_value(&self.profile_name, "", window, cx);
         Self::set_input_value(&self.profile_tab_label, "", window, cx);
         self.profile_tab_color = TabColor::Default;
+        self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.profile_login_commands, "", window, cx);
         Self::set_input_value(&self.host, "", window, cx);
@@ -5246,6 +5296,7 @@ impl AppView {
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
         self.selected_profile = None;
+        self.profile_edit_session_id = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
         self.credential_prompt_open = false;
@@ -5260,6 +5311,7 @@ impl AppView {
         Self::set_input_value(&self.profile_name, &profile.name, window, cx);
         Self::set_input_value(&self.profile_tab_label, &profile.tab_label, window, cx);
         self.profile_tab_color = profile.tab_color;
+        self.profile_terminal_theme = profile.terminal_theme;
         Self::set_input_value(&self.profile_group, &profile.group, window, cx);
         Self::set_input_value(&self.host, &profile.host, window, cx);
         Self::set_input_value(&self.port, &profile.port.to_string(), window, cx);
@@ -5311,6 +5363,7 @@ impl AppView {
         self.auth_method = profile.auth_method;
         self.applied_auth_profile = None;
         self.selected_profile = Some(profile.name.clone());
+        self.profile_edit_session_id = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
         self.credential_prompt_open = false;
@@ -5321,6 +5374,37 @@ impl AppView {
             .tr("Loaded {name}. Authentication is needed only when no credentials are cached.")
             .replace("{name}", &profile.name);
         cx.notify();
+    }
+
+    fn open_session_properties(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((saved_profile, draft_profile)) = self.session(session_id).map(|session| {
+            (
+                saved_profile_for_session(session, &self.profiles).cloned(),
+                session.launch_settings.to_profile(
+                    &session.title,
+                    &session.host,
+                    session.port,
+                    &session.username,
+                ),
+            )
+        }) else {
+            return;
+        };
+        if let Some(profile) = saved_profile {
+            self.load_profile(&profile, window, cx);
+        } else {
+            self.load_profile(&draft_profile, window, cx);
+            self.selected_profile = None;
+            self.profile_message =
+                self.tr("Save this temporary connection as a host profile to reuse its settings.");
+            cx.notify();
+        }
+        self.profile_edit_session_id = Some(session_id);
     }
 
     fn load_recent(
@@ -5346,6 +5430,7 @@ impl AppView {
         Self::set_input_value(&self.profile_name, &entry.name, window, cx);
         Self::set_input_value(&self.profile_tab_label, "", window, cx);
         self.profile_tab_color = TabColor::Default;
+        self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.profile_login_commands, "", window, cx);
         Self::set_input_value(&self.host, &entry.host, window, cx);
@@ -5366,6 +5451,7 @@ impl AppView {
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
         self.selected_profile = None;
+        self.profile_edit_session_id = None;
         self.session_editor_section = SessionEditorSection::Connection;
         self.session_editor_open = true;
         self.credential_prompt_open = false;
@@ -5689,6 +5775,7 @@ impl AppView {
 
         let total = profiles.len();
         self.pending_session_title_override = None;
+        self.profile_edit_session_id = None;
         self.group_launch = Some(GroupLaunchState {
             group: group.to_owned(),
             total,
@@ -6622,6 +6709,7 @@ impl AppView {
             username,
             tab_label,
             tab_color: self.profile_tab_color,
+            terminal_theme: self.profile_terminal_theme,
             group,
             favorite: self.profile_favorite,
             auth_method: self.auth_method,
@@ -6654,6 +6742,29 @@ impl AppView {
 
         if let Some(previous) = previous_profile.as_ref() {
             update_sessions_for_profile(&mut self.sessions, previous, &profile);
+        } else if let Some(session_id) = self.profile_edit_session_id.take()
+            && let Some(session) = self.session_mut(session_id)
+            && session_matches_target(session, &profile.host, profile.port, &profile.username)
+        {
+            session.profile_name = Some(profile.name.clone());
+            session.launch_settings.terminal_theme = profile.terminal_theme;
+        }
+        self.profile_edit_session_id = None;
+        for session in self.sessions.iter().filter(|session| {
+            session
+                .profile_name
+                .as_deref()
+                .is_some_and(|session_name| session_name.eq_ignore_ascii_case(&profile.name))
+                && session.command_tx.is_some()
+        }) {
+            let _ = enqueue_session_request(
+                &self.sessions,
+                session.id,
+                TerminalRequest::SetTheme(effective_terminal_theme(
+                    session.launch_settings.terminal_theme,
+                    self.settings.theme,
+                )),
+            );
         }
 
         self.selected_profile = Some(name.clone());
@@ -6857,6 +6968,7 @@ impl AppView {
             auth_method: self.auth_method,
             identity_file: identity_file.clone(),
             proxy_jump: jump_name.clone(),
+            terminal_theme: self.profile_terminal_theme,
             keepalive_seconds,
             reconnect: reconnect.clone(),
             forwards: saved_forwards.clone(),
@@ -6978,7 +7090,7 @@ impl AppView {
             jump,
             keepalive_seconds,
             reconnect,
-            theme: self.settings.theme,
+            theme: effective_terminal_theme(launch_settings.terminal_theme, self.settings.theme),
             cursor_style: self.settings.cursor_style,
         };
         let (event_tx, mut event_rx) = mpsc::channel(16);
@@ -8222,7 +8334,15 @@ impl AppView {
 
     fn terminal_surface(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
         let terminal_bounds = Rc::clone(&self.terminal_bounds);
-        let palette = self.settings.theme.palette();
+        let theme = self
+            .session(session_id)
+            .map_or(self.settings.theme, |session| {
+                effective_terminal_theme(
+                    session.launch_settings.terminal_theme,
+                    self.settings.theme,
+                )
+            });
+        let palette = theme.palette();
         let mut keyword_highlights = if self.keyword_highlighting_enabled {
             self.keyword_highlights.clone()
         } else {
@@ -8580,6 +8700,41 @@ impl AppView {
             }));
             tab_color_swatches = tab_color_swatches.child(swatch);
         }
+        let mut terminal_theme_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
+        let follow_theme_kind = if self.profile_terminal_theme.is_none() {
+            ButtonKind::Primary
+        } else {
+            ButtonKind::Secondary
+        };
+        terminal_theme_selector = terminal_theme_selector.child(
+            components::button(
+                &tokens,
+                "profile-theme-follow-app",
+                self.tr("Follow app theme"),
+                follow_theme_kind,
+                ButtonSize::Small,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.profile_terminal_theme = None;
+                cx.notify();
+            })),
+        );
+        for (index, theme) in TerminalTheme::ALL.into_iter().enumerate() {
+            let selected = self.profile_terminal_theme == Some(theme);
+            terminal_theme_selector = terminal_theme_selector.child(
+                components::color_swatch(
+                    &tokens,
+                    ("profile-terminal-theme", index),
+                    self.tr(theme.label()),
+                    rgb(theme.palette().background).into(),
+                    selected,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.profile_terminal_theme = Some(theme);
+                    cx.notify();
+                })),
+            );
+        }
 
         let section_content = match self.session_editor_section {
             SessionEditorSection::Connection => div()
@@ -8604,6 +8759,11 @@ impl AppView {
                 ))
                 .child(components::label_text(&tokens, self.tr("Tab color")))
                 .child(tab_color_swatches)
+                .child(components::label_text(
+                    &tokens,
+                    self.tr("Terminal color scheme"),
+                ))
+                .child(terminal_theme_selector)
                 .child(
                     div()
                         .flex()
@@ -15165,7 +15325,10 @@ impl AppView {
                 let _ = enqueue_session_request(
                     &self.sessions,
                     session.id,
-                    TerminalRequest::SetTheme(self.settings.theme),
+                    TerminalRequest::SetTheme(effective_terminal_theme(
+                        session.launch_settings.terminal_theme,
+                        self.settings.theme,
+                    )),
                 );
                 let _ = enqueue_session_request(
                     &self.sessions,
@@ -15240,7 +15403,10 @@ impl AppView {
                 let _ = enqueue_session_request(
                     &self.sessions,
                     session.id,
-                    TerminalRequest::SetTheme(self.settings.theme),
+                    TerminalRequest::SetTheme(effective_terminal_theme(
+                        session.launch_settings.terminal_theme,
+                        self.settings.theme,
+                    )),
                 );
                 let _ = enqueue_session_request(
                     &self.sessions,
@@ -17669,7 +17835,6 @@ impl AppView {
                 self.session(active_id)
                     .is_some_and(|active_session| active_session.frame.is_some())
             });
-        let saved_profile = saved_profile_for_session(session, &self.profiles).cloned();
         let menu = div()
             .id("session-tab-menu")
             .occlude()
@@ -17716,14 +17881,7 @@ impl AppView {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.tab_menu_session = None;
                     this.select_session(session_id, window, cx);
-                    if let Some(profile) = saved_profile.clone() {
-                        this.load_profile(&profile, window, cx);
-                    } else {
-                        this.session_editor_section = SessionEditorSection::Connection;
-                        this.session_editor_open = true;
-                        this.request_overlay_focus();
-                        cx.notify();
-                    }
+                    this.open_session_properties(session_id, window, cx);
                 })),
             )
             .child(
@@ -18257,12 +18415,11 @@ impl AppView {
                     false,
                     active_id.is_some(),
                 )
-                .on_click(cx.listener(|this, _, _window, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.menu_visible = false;
-                    this.session_editor_section = SessionEditorSection::Connection;
-                    this.session_editor_open = true;
-                    this.request_overlay_focus();
-                    cx.notify();
+                    if let Some(session_id) = active_id {
+                        this.open_session_properties(session_id, window, cx);
+                    }
                 })),
             )
             .child(

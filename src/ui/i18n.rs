@@ -281,6 +281,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
             "留空则使用会话名称。标题和颜色应用于此已保存会话。"
         }
         "Tab color" => "标签颜色",
+        "Terminal color scheme" => "终端配色方案",
+        "Follow app theme" => "跟随应用主题",
         "Tab title must be at most {count} characters and contain no control characters." => {
             "标签标题最多 {count} 个字符，且不能包含控制字符。"
         }
@@ -1189,6 +1191,8 @@ mod tests {
             ("Tab title", "标签标题"),
             ("Optional tab title", "可选标签标题"),
             ("Tab color", "标签颜色"),
+            ("Terminal color scheme", "终端配色方案"),
+            ("Follow app theme", "跟随应用主题"),
             ("Default", "默认"),
             ("Blue", "蓝色"),
             ("Green", "绿色"),

@@ -9,11 +9,12 @@ use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
 use crate::forward::ForwardRuleSpec;
 use crate::groups::normalize_group_path;
+use crate::terminal::TerminalTheme;
 
-const DOCUMENT_VERSION: u8 = 8;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
-const EXPORT_DOCUMENT_VERSION: u8 = 4;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 4] = [1, 2, 3, EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 9;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const EXPORT_DOCUMENT_VERSION: u8 = 5;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 5] = [1, 2, 3, 4, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 pub const MAX_TAB_LABEL_CHARS: usize = 80;
@@ -233,6 +234,8 @@ pub struct HostProfile {
     pub tab_label: String,
     #[serde(default, skip_serializing_if = "TabColor::is_default")]
     pub tab_color: TabColor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_theme: Option<TerminalTheme>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub group: String,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -621,6 +624,7 @@ mod tests {
             username: "operator".to_owned(),
             tab_label: String::new(),
             tab_color: TabColor::Default,
+            terminal_theme: None,
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Password,
@@ -712,6 +716,7 @@ mod tests {
         let profiles = vec![HostProfile {
             tab_label: "API west".to_owned(),
             tab_color: TabColor::Teal,
+            terminal_theme: Some(TerminalTheme::SolarizedDark),
             group: "Production".to_owned(),
             favorite: true,
             proxy_jump: "bastion".to_owned(),
@@ -810,6 +815,7 @@ mod tests {
                 username: "deploy".to_owned(),
                 tab_label: String::new(),
                 tab_color: TabColor::Default,
+                terminal_theme: None,
                 group: String::new(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
@@ -939,6 +945,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = ProfileStore::at(directory.path().join("hosts.json"));
         let profile = HostProfile {
+            terminal_theme: Some(TerminalTheme::SolarizedLight),
             login_commands: LoginCommandSettings {
                 enabled: true,
                 commands: vec!["cd /srv/app".to_owned(), "uname -a".to_owned()],
@@ -952,6 +959,34 @@ mod tests {
 
         store.save(&data).unwrap();
         assert_eq!(store.load().unwrap().profiles, vec![profile]);
+    }
+
+    #[test]
+    fn version_eight_profiles_migrate_with_global_terminal_theme() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 8,
+                "profiles": [{
+                    "name": "prod",
+                    "host": "prod.example.com",
+                    "port": 22,
+                    "username": "deploy"
+                }],
+                "recent": []
+            }"#,
+        )
+        .unwrap();
+        let store = ProfileStore::at(path);
+
+        let data = store.load().unwrap();
+        assert_eq!(data.profiles[0].terminal_theme, None);
+        assert!(data.recent.is_empty());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(saved["version"].as_u64(), Some(u64::from(DOCUMENT_VERSION)));
     }
 
     #[test]
