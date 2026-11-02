@@ -50,9 +50,9 @@ use profiles::{
 };
 use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
 use sftp::{
-    RemoteEntry, RemoteFilesystemInfo, SftpCommand, SftpEvent, TransferKind,
-    format_permission_mode, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
-    remote_join,
+    LocalEntry, RemoteEntry, RemoteFilesystemInfo, SftpCommand, SftpEvent, TransferKind,
+    format_permission_mode, list_local_directory, parent_remote_path, parse_permission_mode,
+    parse_unix_timestamp, remote_join,
 };
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
@@ -1262,6 +1262,9 @@ struct SftpViewState {
     visible: bool,
     path: String,
     local_directory: String,
+    local_entries: Vec<LocalEntry>,
+    local_loading: bool,
+    local_error: String,
     home_directory: String,
     restoring_remote_directory: Option<String>,
     entries: Vec<RemoteEntry>,
@@ -10298,7 +10301,7 @@ impl AppView {
     }
 
     fn toggle_sftp(&mut self, session_id: u64, cx: &mut Context<Self>) {
-        let (list_request, opening) = {
+        let (list_request, local_directory, opening) = {
             let Some(session) = self.session_mut(session_id) else {
                 return;
             };
@@ -10311,7 +10314,12 @@ impl AppView {
             } else {
                 None
             };
-            (list_request, session.sftp.visible)
+            let local_directory = if session.sftp.visible {
+                Some(session.sftp.local_directory.clone())
+            } else {
+                None
+            };
+            (list_request, local_directory, session.sftp.visible)
         };
         if opening {
             self.snippets_visible = false;
@@ -10323,7 +10331,75 @@ impl AppView {
         if let Some((Some(sftp_tx), path)) = list_request {
             let _ = sftp_tx.try_send(SftpCommand::List(path));
         }
+        if let Some(directory) = local_directory
+            && !directory.is_empty()
+        {
+            self.refresh_sftp_local_directory(session_id, directory, cx);
+        }
         cx.notify();
+    }
+
+    fn refresh_sftp_local_directory(
+        &mut self,
+        session_id: u64,
+        directory: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        session.sftp.local_loading = true;
+        session.sftp.local_error.clear();
+        session.sftp.local_directory = directory.clone();
+        let path = PathBuf::from(&directory);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { list_local_directory(&path) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if let Some(session) = view.session_mut(session_id)
+                    && session.sftp.local_directory == directory
+                {
+                    session.sftp.local_loading = false;
+                    match result {
+                        Ok(entries) => {
+                            session.sftp.local_entries = entries;
+                            session.sftp.local_error.clear();
+                        }
+                        Err(error) => {
+                            session.sftp.local_entries.clear();
+                            session.sftp.local_error = error.to_string();
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_sftp_local_directory(
+        &mut self,
+        session_id: u64,
+        directory: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if directory.is_dir() {
+            let directory = directory.to_string_lossy().into_owned();
+            self.refresh_sftp_local_directory(session_id, directory.clone(), cx);
+            self.remember_sftp_directories(session_id, Some(directory), None, cx);
+        }
+    }
+
+    fn sftp_local_go_up(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let directory = self.session(session_id).map(|session| {
+            let path = PathBuf::from(&session.sftp.local_directory);
+            path.parent().map(Path::to_path_buf).unwrap_or(path)
+        });
+        if let Some(directory) = directory {
+            self.open_sftp_local_directory(session_id, directory, cx);
+        }
     }
 
     fn open_sftp_directory(&mut self, session_id: u64, path: String, cx: &mut Context<Self>) {
@@ -10351,6 +10427,12 @@ impl AppView {
             session.sftp.local_directory = directory.clone();
         }
         self.remember_sftp_directories(session_id, Some(directory), None, cx);
+        if let Some(directory) = self
+            .session(session_id)
+            .map(|session| session.sftp.local_directory.clone())
+        {
+            self.refresh_sftp_local_directory(session_id, directory, cx);
+        }
     }
 
     fn remember_sftp_directories(
@@ -10790,6 +10872,9 @@ impl AppView {
         };
         let path = session.sftp.path.clone();
         let local_directory = session.sftp.local_directory.clone();
+        let local_entries = session.sftp.local_entries.clone();
+        let local_loading = session.sftp.local_loading;
+        let local_error = session.sftp.local_error.clone();
         let entries = session.sftp.entries.clone();
         let message = session.sftp.message.clone();
         let transfer = session.sftp.transfer.clone();
@@ -10800,6 +10885,111 @@ impl AppView {
         let metadata_edit = session.sftp.metadata_edit.clone();
         let filesystem = session.sftp.filesystem.clone();
         let filesystem_supported = session.sftp.filesystem_supported;
+
+        let mut local_list = div()
+            .id("sftp-local-entries")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .gap(px(ui_tokens::SPACE_1))
+            .overflow_y_scroll();
+        if local_directory.is_empty() {
+            local_list = local_list.child(
+                div()
+                    .p(px(ui_tokens::SPACE_3))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_secondary)
+                    .child(self.tr("Choose a local folder to browse files.")),
+            );
+        } else if local_loading {
+            local_list = local_list.child(
+                div()
+                    .p(px(ui_tokens::SPACE_3))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_secondary)
+                    .child(self.tr("Loading local folder...")),
+            );
+        } else if !local_error.is_empty() {
+            local_list = local_list.child(
+                div()
+                    .p(px(ui_tokens::SPACE_3))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.danger_text)
+                    .child(local_error),
+            );
+        } else if local_entries.is_empty() {
+            local_list = local_list.child(
+                div()
+                    .p(px(ui_tokens::SPACE_3))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_disabled)
+                    .child(self.tr("No entries")),
+            );
+        }
+        for (index, entry) in local_entries.into_iter().enumerate() {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(ui_tokens::SPACE_1))
+                .min_w_0()
+                .px(px(ui_tokens::SPACE_2))
+                .py(px(ui_tokens::SPACE_1))
+                .rounded(px(ui_tokens::RADIUS_CONTROL))
+                .hover(|style| style.bg(tokens.surface));
+            let label = if entry.is_dir {
+                format!("{}/", entry.name)
+            } else {
+                entry.name.clone()
+            };
+            if entry.is_dir {
+                let directory_path = entry.path.clone();
+                let upload_path = entry.path.clone();
+                row = row
+                    .child(
+                        Button::new(("sftp-local-entry", index))
+                            .label(label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_sftp_local_directory(
+                                    session_id,
+                                    directory_path.clone(),
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(("sftp-local-upload-directory", index))
+                            .label(self.tr("Upload"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.queue_upload_path(session_id, upload_path.clone(), cx);
+                            })),
+                    );
+            } else {
+                row = row
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_size(px(ui_tokens::FONT_BODY))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .text_color(tokens.text_disabled)
+                            .child(format_size(entry.size)),
+                    )
+                    .child(
+                        Button::new(("sftp-local-upload", index))
+                            .label(self.tr("Upload"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.queue_upload_path(session_id, entry.path.clone(), cx);
+                            })),
+                    );
+            }
+            local_list = local_list.child(row);
+        }
 
         let mut list = div()
             .id("sftp-entries")
@@ -10997,10 +11187,9 @@ impl AppView {
             .id("sftp-panel")
             .flex()
             .flex_col()
-            .w(px(360.))
-            .flex_shrink_0()
+            .flex_1()
+            .min_w_0()
             .min_h_0()
-            .ml(px(6.))
             .border_1()
             .border_color(tokens.border_strong)
             .bg(tokens.surface_raised)
@@ -11034,51 +11223,7 @@ impl AppView {
                     } else {
                         path
                     }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(ui_tokens::SPACE_2))
-                    .px(px(ui_tokens::SPACE_2))
-                    .py(px(ui_tokens::SPACE_1))
-                    .border_b_1()
-                    .border_color(tokens.border_subtle)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_size(px(ui_tokens::FONT_CAPTION))
-                            .text_color(tokens.text_secondary)
-                            .child(if local_directory.is_empty() {
-                                self.tr("No local folder remembered.")
-                            } else {
-                                format!("{}: {local_directory}", self.tr("Local folder"))
-                            }),
-                    )
-                    .child(
-                        components::icon_button(
-                            &tokens,
-                            "sftp-choose-local-directory",
-                            IconName::FolderOpen,
-                            ButtonKind::Ghost,
-                            ButtonSize::Small,
-                            self.tr("Change local folder"),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.choose_sftp_local_directory(session_id, cx);
-                        })),
-                    ),
             );
-        panel = panel.child(
-            div()
-                .px(px(ui_tokens::SPACE_2))
-                .py(px(ui_tokens::SPACE_1))
-                .text_size(px(ui_tokens::FONT_CAPTION))
-                .text_color(tokens.text_disabled)
-                .child(self.tr("Drop files or folders here to upload")),
-        );
         if let Some(info) = filesystem {
             let used_bytes = info.total_bytes.saturating_sub(info.available_bytes);
             let usage = filesystem_usage_percent(info.total_bytes, info.available_bytes);
@@ -11238,7 +11383,112 @@ impl AppView {
                     ),
             );
         }
-        panel = panel.child(list);
+        let local_header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(ui_tokens::SPACE_1))
+            .px(px(ui_tokens::SPACE_2))
+            .py(px(ui_tokens::SPACE_1))
+            .border_b_1()
+            .border_color(tokens.border_subtle)
+            .child(div().font_semibold().child(self.tr("Local files")))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .child(
+                        Button::new("sftp-local-up")
+                            .label(self.tr("Up"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.sftp_local_go_up(session_id, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("sftp-local-refresh")
+                            .label(self.tr("Refresh"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let directory = this
+                                    .session(session_id)
+                                    .map(|session| session.sftp.local_directory.clone())
+                                    .unwrap_or_default();
+                                if !directory.is_empty() {
+                                    this.refresh_sftp_local_directory(session_id, directory, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        components::icon_button(
+                            &tokens,
+                            "sftp-choose-local-directory",
+                            IconName::FolderOpen,
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                            self.tr("Change local folder"),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.choose_sftp_local_directory(session_id, cx);
+                        })),
+                    ),
+            );
+        let local_pane = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .border_1()
+            .border_color(tokens.border_subtle)
+            .rounded(px(ui_tokens::RADIUS_CARD))
+            .overflow_hidden()
+            .bg(tokens.surface)
+            .child(local_header)
+            .child(
+                div()
+                    .px(px(ui_tokens::SPACE_2))
+                    .py(px(ui_tokens::SPACE_1))
+                    .text_size(px(ui_tokens::FONT_CAPTION))
+                    .text_color(tokens.text_secondary)
+                    .overflow_hidden()
+                    .child(if local_directory.is_empty() {
+                        self.tr("No local folder remembered.")
+                    } else {
+                        local_directory
+                    }),
+            )
+            .child(local_list);
+        let remote_pane = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .border_1()
+            .border_color(tokens.border_subtle)
+            .rounded(px(ui_tokens::RADIUS_CARD))
+            .overflow_hidden()
+            .bg(tokens.surface)
+            .child(
+                div()
+                    .px(px(ui_tokens::SPACE_2))
+                    .py(px(ui_tokens::SPACE_1))
+                    .border_b_1()
+                    .border_color(tokens.border_subtle)
+                    .font_semibold()
+                    .child(self.tr("Remote files")),
+            )
+            .child(list);
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .gap(px(ui_tokens::SPACE_2))
+                .px(px(ui_tokens::SPACE_2))
+                .child(local_pane)
+                .child(remote_pane),
+        );
 
         if let Some((delete_path, is_dir)) = pending_delete {
             panel = panel.child(
@@ -21200,6 +21450,10 @@ impl Render for AppView {
         let sidebar = self.sidebar(&tokens, cx);
         let tab_bar = self.session_tabs(&tokens, cx);
         let status_bar = self.status_bar(&tokens);
+        let active_sftp = self.active_session_id.filter(|session_id| {
+            self.session(*session_id)
+                .is_some_and(|session| session.sftp.visible)
+        });
 
         let mut terminal_workspace = div()
             .flex()
@@ -21208,7 +21462,9 @@ impl Render for AppView {
             .min_h_0()
             .bg(tokens.bg_canvas)
             .p(px(ui_tokens::SPACE_2));
-        if let Some(split) = self.split {
+        if let Some(session_id) = active_sftp {
+            terminal_workspace = terminal_workspace.child(self.sftp_panel(session_id, cx));
+        } else if let Some(split) = self.split {
             let first_panel = self.terminal_panel(split.first_session_id, cx);
             let second_panel = self.terminal_panel(split.second_session_id, cx);
             let panel_minimum = px(240.)..Pixels::MAX;
@@ -21262,7 +21518,8 @@ impl Render for AppView {
                     )),
             );
         }
-        if self.inspector_visible
+        if active_sftp.is_none()
+            && self.inspector_visible
             && let Some(session_id) = self.active_session_id
         {
             terminal_workspace = terminal_workspace
@@ -21274,14 +21531,16 @@ impl Render for AppView {
                 ))
                 .child(self.inspector(session_id, &tokens, cx));
         }
-        if let Some(session_id) = self.active_session_id
+        if active_sftp.is_none()
+            && let Some(session_id) = self.active_session_id
             && self
                 .session(session_id)
                 .is_some_and(|session| session.sftp.visible)
         {
             terminal_workspace = terminal_workspace.child(self.sftp_panel(session_id, cx));
         }
-        if let Some(session_id) = self.active_session_id
+        if active_sftp.is_none()
+            && let Some(session_id) = self.active_session_id
             && self
                 .session(session_id)
                 .is_some_and(|session| session.forwards.visible)
@@ -21316,6 +21575,7 @@ impl Render for AppView {
             .child(tab_bar)
             .child(terminal_workspace);
         if self.compose_visible
+            && active_sftp.is_none()
             && let Some(session_id) = self.active_session_id
         {
             content_column = content_column.child(self.compose_bar(session_id, &tokens, cx));

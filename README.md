@@ -184,11 +184,13 @@ interval. Passwords, passphrases and key material are never stored. Applying a
 template fills those fields and clears any secret inputs; it does not start a
 connection. Templates are edited explicitly with Save template and Delete.
 
-Use the `Files` button in the session toolbar to open the SFTP panel. It lists
-the remote working directory, supports entering directories and going up, and
-can upload or download single files and entire nested directories with the
-native file picker. Existing remote or local targets offer Overwrite, Resume or
-Keep existing; Resume continues from the current target size when it is smaller
+Use the `Files` button in the session toolbar to open the full SFTP workspace.
+It shows the remembered local folder and remote working directory side by side.
+Choose a local folder, navigate either side independently, and queue uploads or
+downloads from the corresponding file row. Directories can be queued for
+recursive upload or download. Native file pickers remain available. Existing
+remote or local targets offer Overwrite, Resume or Keep existing; Resume
+continues from the current target size when it is smaller
 than the source and restarts from zero when it is larger. Transfers show
 progress and can be cancelled. Multiple selected uploads and repeated file or
 directory actions are serialized in a per-session FIFO queue; the panel shows
@@ -203,9 +205,10 @@ available/free space, block size and maximum filename length when the server
 supports the OpenSSH `statvfs` extension. For each recent host, port and user,
 dshell remembers the last remote directory and local folder. The remote
 directory is restored on reconnect, and downloads reuse the remembered local
-folder; use the folder icon to change it. Uploads continue to use the native
-file picker, or drag files and folders from Windows Explorer onto the SFTP
-panel. Dragged items use the same per-session transfer queue; only regular
+folder; use the folder icon to change it. Local navigation is remembered per
+host, port and user. Files and folders can also be dragged from Windows Explorer
+onto the SFTP workspace. Dragged items use the same per-session transfer queue;
+only regular
 files and directories are accepted, while symbolic links and special files are
 rejected.
 

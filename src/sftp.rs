@@ -23,6 +23,54 @@ const TRANSFER_CHUNK_BYTES: usize = 32 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_RECURSIVE_ENTRIES: usize = 10_000;
 const MAX_RECURSIVE_DEPTH: usize = 32;
+const MAX_LOCAL_LIST_ENTRIES: usize = 10_000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+pub fn list_local_directory(path: &Path) -> Result<Vec<LocalEntry>> {
+    let root = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Could not inspect local folder {}", path.display()))?;
+    if root.file_type().is_symlink() || !root.is_dir() {
+        anyhow::bail!("Local folder {} is not a regular directory", path.display());
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path)
+        .with_context(|| format!("Could not list local folder {}", path.display()))?
+        .take(MAX_LOCAL_LIST_ENTRIES)
+    {
+        let entry =
+            entry.with_context(|| format!("Could not read an entry in {}", path.display()))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("Could not inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+            continue;
+        }
+        entries.push(LocalEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            path,
+            is_dir: metadata.is_dir(),
+            size: if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            },
+        });
+    }
+    entries.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(entries)
+}
 
 fn resume_offset(existing: u64, total: u64) -> u64 {
     if existing <= total { existing } else { 0 }
@@ -1637,8 +1685,8 @@ pub fn parse_unix_timestamp(input: &str) -> Result<Option<u32>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_permission_mode, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
-        remote_join, resume_offset,
+        format_permission_mode, list_local_directory, parent_remote_path, parse_permission_mode,
+        parse_unix_timestamp, remote_join, resume_offset,
     };
 
     #[test]
@@ -1685,5 +1733,43 @@ mod tests {
         assert_eq!(parse_unix_timestamp("4294967295"), Ok(Some(u32::MAX)));
         assert!(parse_unix_timestamp("-1").is_err());
         assert!(parse_unix_timestamp("4294967296").is_err());
+    }
+
+    #[test]
+    fn local_directory_listing_sorts_directories_first_and_reports_failures() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        std::fs::write(directory.path().join("z-file.txt"), b"data").expect("file");
+        std::fs::create_dir(directory.path().join("a-folder")).expect("folder");
+        let entries = list_local_directory(directory.path()).expect("listing");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "a-folder");
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[1].name, "z-file.txt");
+        assert!(!entries[1].is_dir);
+        assert_eq!(entries[1].size, 4);
+        assert!(list_local_directory(&directory.path().join("missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_directory_listing_skips_symlinks() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("target.txt");
+        std::fs::write(&target, b"data").expect("file");
+        std::os::unix::fs::symlink(&target, directory.path().join("link.txt")).expect("symlink");
+        let entries = list_local_directory(directory.path()).expect("listing");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "target.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_directory_listing_rejects_a_symlink_as_the_root() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("target");
+        std::fs::create_dir(&target).expect("target directory");
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(list_local_directory(&link).is_err());
     }
 }
