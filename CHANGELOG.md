@@ -19,6 +19,9 @@ All notable changes to dshell are documented here.
   versioned profile/export support and Simplified Chinese UI text.
 - Filter active session tabs by saved host group, including nested groups and
   ungrouped sessions, with visible counts and selection-safe split behavior.
+- Add a built-in SFTP file editor: edit a remote file in a modal multi-line
+  text area and save back to the host with Ctrl+S, with a 1 MiB size limit,
+  unsaved-change confirmation, and Simplified Chinese translations.
 
 ## [0.1.42] - 2026-10-27
 

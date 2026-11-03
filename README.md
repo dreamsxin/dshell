@@ -44,6 +44,11 @@ that group; a split is cleared when filtering would hide one of its sessions.
 SFTP remembers the latest local folder and remote directory per host, port, and
 user. New connections
 restore the remote directory, and downloads reuse the remembered local folder.
+The SFTP panel includes a built-in file editor: click **Edit** on a remote file
+row to load its content (up to 1 MiB) into a modal editor, modify it, and save
+back to the remote host with Ctrl+S or the Save button. Files larger than the
+limit show a clear error. The editor prompts to save or discard unsaved changes
+before closing.
 
 In a saved session's `Connection` properties, enable `Run commands after login`
 and enter up to 16 single-line commands. After the first successful interactive

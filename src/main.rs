@@ -1290,6 +1290,24 @@ struct ForwardViewState {
     message: String,
 }
 
+struct FileEditorState {
+    session_id: u64,
+    path: String,
+    name: String,
+    input: Entity<InputState>,
+    loading: bool,
+    saving: bool,
+    error: String,
+    dirty: bool,
+    original_content: String,
+    loaded_content: String,
+    needs_apply: bool,
+}
+
+struct FileEditorConfirmClose {
+    message: String,
+}
+
 fn remember_stopped_forward(state: &mut ForwardViewState, spec: ForwardRuleSpec) {
     if !state.stopped.contains(&spec) {
         state.stopped.push(spec);
@@ -3802,6 +3820,9 @@ struct AppView {
     session_switcher_search: Entity<InputState>,
     session_switcher_visible: bool,
     terminal_comparison: Option<TerminalComparison>,
+    file_editor: Option<FileEditorState>,
+    file_editor_confirm_close: Option<FileEditorConfirmClose>,
+    pending_identity_file: Option<String>,
     session_switcher_selected: usize,
     session_switcher_scroll: ScrollHandle,
     compose_input: Entity<InputState>,
@@ -4165,6 +4186,9 @@ impl AppView {
             session_switcher_search,
             session_switcher_visible: false,
             terminal_comparison: None,
+            file_editor: None,
+            file_editor_confirm_close: None,
+            pending_identity_file: None,
             session_switcher_selected: 0,
             session_switcher_scroll: ScrollHandle::new(),
             compose_input,
@@ -5664,6 +5688,33 @@ impl AppView {
             .tr("Loaded {name}. Authentication is needed only when no credentials are cached.")
             .replace("{name}", &profile.name);
         cx.notify();
+    }
+
+    fn browse_identity_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(self.tr("Choose identity file").into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(mut paths))) => {
+                if let Some(file) = paths.pop() {
+                    let _ = this.update(cx, |view, cx| {
+                        view.pending_identity_file = Some(file.to_string_lossy().into_owned());
+                        cx.notify();
+                    });
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |view, cx| {
+                    view.profile_message = format!("Could not open a file picker: {error}");
+                    cx.notify();
+                });
+            }
+            _ => {}
+        })
+        .detach();
     }
 
     fn open_session_properties(
@@ -9094,6 +9145,35 @@ impl AppView {
                     &self.profile_name,
                     false,
                 ))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(ui_tokens::SPACE_3))
+                        .child(
+                            div().flex_1().child(components::field(
+                                &tokens,
+                                self.tr("Host"),
+                                &self.host,
+                                false,
+                            )),
+                        )
+                        .child(
+                            div()
+                                .w(px(ui_tokens::PORT_FIELD_WIDTH))
+                                .child(components::field(
+                                    &tokens,
+                                    self.tr("Port"),
+                                    &self.port,
+                                    false,
+                                )),
+                        ),
+                )
+                .child(components::field(
+                    &tokens,
+                    self.tr("Username"),
+                    &self.username,
+                    false,
+                ))
                 .child(components::field(
                     &tokens,
                     self.tr("Tab title"),
@@ -9121,29 +9201,6 @@ impl AppView {
                     self.tr("Terminal color scheme"),
                 ))
                 .child(terminal_theme_selector)
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(ui_tokens::SPACE_3))
-                        .child(
-                            div().flex_1().child(components::field(
-                                &tokens,
-                                self.tr("Host"),
-                                &self.host,
-                                false,
-                            )),
-                        )
-                        .child(
-                            div()
-                                .w(px(ui_tokens::PORT_FIELD_WIDTH))
-                                .child(components::field(
-                                    &tokens,
-                                    self.tr("Port"),
-                                    &self.port,
-                                    false,
-                                )),
-                        ),
-                )
                 .child(
                     div()
                         .flex()
@@ -9393,12 +9450,6 @@ impl AppView {
                     .flex_col()
                     .gap(px(ui_tokens::SPACE_3))
                     .child(templates)
-                    .child(components::field(
-                        &tokens,
-                        self.tr("Username"),
-                        &self.username,
-                        false,
-                    ))
                     .child(
                         div()
                             .flex()
@@ -9429,12 +9480,34 @@ impl AppView {
                     })
                     .when(self.auth_method == AuthMethod::PublicKey, |panel| {
                         panel
-                            .child(components::field(
-                                &tokens,
-                                self.tr("Identity file"),
-                                &self.identity_file,
-                                false,
-                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_end()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div().flex_1().child(components::field(
+                                            &tokens,
+                                            self.tr("Identity file"),
+                                            &self.identity_file,
+                                            false,
+                                        )),
+                                    )
+                                    .child(
+                                        components::button(
+                                            &tokens,
+                                            "identity-file-browse",
+                                            self.tr("Browse"),
+                                            ButtonKind::Secondary,
+                                            ButtonSize::Small,
+                                        )
+                                        .on_click(cx.listener(
+                                            |this, _, window, cx| {
+                                                this.browse_identity_file(window, cx);
+                                            },
+                                        )),
+                                    ),
+                            )
                             .child(components::field(
                                 &tokens,
                                 self.tr("Key passphrase"),
@@ -10038,6 +10111,48 @@ impl AppView {
     fn apply_sftp_event(&mut self, id: u64, event: SftpEvent, cx: &mut Context<Self>) -> bool {
         let mut dispatch_next = false;
         let mut remembered_remote_path = None;
+        if let SftpEvent::FileContent { path, content } = &event {
+            if let Some(editor) = self.file_editor.as_mut()
+                && editor.session_id == id
+                && editor.path == *path
+                && editor.loading
+            {
+                editor.loading = false;
+                editor.loaded_content = content.clone();
+                editor.needs_apply = true;
+                editor.dirty = false;
+                cx.notify();
+            }
+        }
+        if let SftpEvent::FileSaved { path } = &event {
+            if let Some(editor) = self.file_editor.as_mut()
+                && editor.session_id == id
+                && editor.path == *path
+            {
+                editor.saving = false;
+                editor.dirty = false;
+                editor.original_content = editor.input.read(cx).text().to_string();
+                cx.notify();
+            }
+        }
+        if let SftpEvent::Error(error) = &event {
+            if let Some(editor) = self.file_editor.as_mut()
+                && editor.session_id == id
+            {
+                if editor.loading
+                    && (error.starts_with("Could not read ")
+                        || error.starts_with("File ") && error.contains("too large"))
+                {
+                    editor.loading = false;
+                    editor.error = error.clone();
+                    cx.notify();
+                } else if editor.saving && error.starts_with("Could not write ") {
+                    editor.saving = false;
+                    editor.error = error.clone();
+                    cx.notify();
+                }
+            }
+        }
         {
             let Some(session) = self.session_mut(id) else {
                 return false;
@@ -10194,6 +10309,7 @@ impl AppView {
                         let _ = sftp_tx.try_send(SftpCommand::List(path));
                     }
                 }
+                SftpEvent::FileContent { .. } | SftpEvent::FileSaved { .. } => {}
             }
         }
         if let Some(path) = remembered_remote_path {
@@ -10693,6 +10809,82 @@ impl AppView {
         .detach();
     }
 
+    fn open_file_editor(
+        &mut self,
+        session_id: u64,
+        path: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line()
+                .rows(20)
+                .placeholder("Loading remote file...")
+        });
+        self.file_editor = Some(FileEditorState {
+            session_id,
+            path: path.clone(),
+            name,
+            input,
+            loading: true,
+            saving: false,
+            error: String::new(),
+            dirty: false,
+            original_content: String::new(),
+            loaded_content: String::new(),
+            needs_apply: false,
+        });
+        self.send_sftp_command(session_id, SftpCommand::ReadFile(path), cx);
+        cx.notify();
+    }
+
+    fn save_file_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.file_editor.as_mut() else {
+            return;
+        };
+        if editor.loading || editor.saving {
+            return;
+        }
+        let content = editor.input.read(cx).text().to_string();
+        if content == editor.original_content {
+            editor.dirty = false;
+            cx.notify();
+            return;
+        }
+        editor.saving = true;
+        editor.error.clear();
+        let session_id = editor.session_id;
+        let path = editor.path.clone();
+        self.send_sftp_command(session_id, SftpCommand::WriteFile { path, content }, cx);
+        cx.notify();
+    }
+
+    fn request_close_file_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.file_editor.as_ref() else {
+            return;
+        };
+        if editor.loading || editor.saving {
+            return;
+        }
+        let dirty = editor.dirty;
+        if dirty {
+            let message = self.tr("Save changes before closing?");
+            let confirm = message.clone();
+            self.file_editor_confirm_close = Some(FileEditorConfirmClose { message: confirm });
+            cx.notify();
+            return;
+        }
+        self.close_file_editor(cx);
+    }
+
+    fn close_file_editor(&mut self, cx: &mut Context<Self>) {
+        self.file_editor = None;
+        self.file_editor_confirm_close = None;
+        cx.notify();
+    }
+
     fn begin_upload_directory(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -11057,6 +11249,10 @@ impl AppView {
                             })),
                     );
             } else {
+                let download_path = entry_path.clone();
+                let download_name = name.clone();
+                let edit_path = entry_path.clone();
+                let edit_name = name.clone();
                 row = row
                     .child(
                         div()
@@ -11080,8 +11276,21 @@ impl AppView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.begin_download(
                                     session_id,
-                                    entry_path.clone(),
-                                    name.clone(),
+                                    download_path.clone(),
+                                    download_name.clone(),
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(("sftp-edit", index))
+                            .label(self.tr("Edit"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_file_editor(
+                                    session_id,
+                                    edit_path.clone(),
+                                    edit_name.clone(),
+                                    window,
                                     cx,
                                 );
                             })),
@@ -18312,6 +18521,268 @@ impl AppView {
             .into_any_element()
     }
 
+    fn file_editor_overlay(
+        &mut self,
+        window: &mut Window,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some(editor) = self.file_editor.as_mut()
+            && editor.needs_apply
+        {
+            editor.needs_apply = false;
+            editor.original_content = editor.loaded_content.clone();
+            let input = editor.input.clone();
+            let content = editor.loaded_content.clone();
+            Self::set_input_value(&input, &content, window, cx);
+        }
+        let Some(editor) = self.file_editor.as_ref() else {
+            return div().into_any_element();
+        };
+        let path = editor.path.clone();
+        let name = editor.name.clone();
+        let input = editor.input.clone();
+        let loading = editor.loading;
+        let saving = editor.saving;
+        let error = editor.error.clone();
+        let current_text = input.read(cx).text().to_string();
+        let dirty = current_text != editor.original_content;
+
+        let mut body = div().flex().flex_1().min_h_0();
+        if loading {
+            body = body.child(
+                div().flex().flex_1().items_center().justify_center().child(
+                    div()
+                        .text_size(px(ui_tokens::FONT_BODY))
+                        .text_color(tokens.text_secondary)
+                        .child(self.tr("Loading remote file...")),
+                ),
+            );
+        } else if !error.is_empty() {
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .p(px(ui_tokens::SPACE_4))
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_BODY))
+                            .text_color(tokens.danger_text)
+                            .child(error),
+                    ),
+            );
+        } else {
+            body = body.child(
+                div().flex().flex_col().flex_1().min_h_0().child(
+                    TextInput::new(&input)
+                        .h_full()
+                        .disabled(saving)
+                        .appearance(false)
+                        .bordered(false),
+                ),
+            );
+        }
+
+        let status_text = if saving {
+            self.tr("Saving...")
+        } else if dirty {
+            self.tr("Modified")
+        } else {
+            self.tr("Saved")
+        };
+        let status_color = if saving {
+            tokens.text_secondary
+        } else if dirty {
+            tokens.warning_text
+        } else {
+            tokens.success_text
+        };
+
+        let overlay = components::modal_overlay(tokens, "file-editor-overlay")
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.to_ascii_lowercase();
+                let modifiers = event.keystroke.modifiers;
+                if key == "escape" {
+                    cx.stop_propagation();
+                    this.request_close_file_editor(cx);
+                } else if key == "s" && (modifiers.control || modifiers.platform) {
+                    cx.stop_propagation();
+                    this.save_file_editor(cx);
+                }
+            }))
+            .child(
+                components::modal_panel(tokens, "file-editor-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_SESSION))
+                    .h_full()
+                    .max_h(px(ui_tokens::MODAL_HEIGHT_SESSION))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(ui_tokens::MODAL_HEADER_HEIGHT))
+                            .flex_shrink_0()
+                            .px(px(ui_tokens::SPACE_4))
+                            .border_b_1()
+                            .border_color(tokens.border_subtle)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(px(ui_tokens::FONT_TITLE))
+                                            .font_semibold()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(ui_tokens::FONT_CAPTION))
+                                            .text_color(tokens.text_secondary)
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(path.clone()),
+                                    ),
+                            )
+                            .child(
+                                components::icon_button(
+                                    tokens,
+                                    "file-editor-close",
+                                    IconName::Close,
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                    self.tr("Close"),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.request_close_file_editor(cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(body)
+                    .child(
+                        components::modal_footer(tokens)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(status_color)
+                                    .child(status_text),
+                            )
+                            .child(
+                                components::button(
+                                    tokens,
+                                    "file-editor-save",
+                                    self.tr("Save (Ctrl+S)"),
+                                    ButtonKind::Primary,
+                                    ButtonSize::Small,
+                                )
+                                .disabled(loading || saving || !dirty)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.save_file_editor(cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                components::button(
+                                    tokens,
+                                    "file-editor-discard",
+                                    self.tr("Discard"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .disabled(loading || saving || !dirty)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.close_file_editor(cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .into_any_element();
+
+        if let Some(confirm) = self.file_editor_confirm_close.as_ref() {
+            let confirm_message = confirm.message.clone();
+            return components::modal_overlay(tokens, "file-editor-confirm-overlay")
+                .child(
+                    components::modal_panel(tokens, "file-editor-confirm-panel")
+                        .w_full()
+                        .max_w(px(ui_tokens::MODAL_WIDTH_CONFIRM))
+                        .child(
+                            components::modal_header(tokens, self.tr("Unsaved changes")).child(
+                                components::icon_button(
+                                    tokens,
+                                    "file-editor-confirm-close",
+                                    IconName::Close,
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                    self.tr("Close"),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.file_editor_confirm_close = None;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .p(px(ui_tokens::SPACE_4))
+                                .text_size(px(ui_tokens::FONT_BODY))
+                                .child(confirm_message),
+                        )
+                        .child(
+                            components::modal_footer(tokens)
+                                .child(
+                                    components::button(
+                                        tokens,
+                                        "file-editor-confirm-save",
+                                        self.tr("Save"),
+                                        ButtonKind::Primary,
+                                        ButtonSize::Small,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.file_editor_confirm_close = None;
+                                            this.save_file_editor(cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    components::button(
+                                        tokens,
+                                        "file-editor-confirm-discard",
+                                        self.tr("Discard changes"),
+                                        ButtonKind::Ghost,
+                                        ButtonSize::Small,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.file_editor_confirm_close = None;
+                                            this.close_file_editor(cx);
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        overlay
+    }
+
     fn session_switcher_overlay(
         &mut self,
         tokens: &ThemeTokens,
@@ -21432,6 +21903,10 @@ impl Render for AppView {
             self.clear_auth_prompt_inputs(window, cx);
             self.auth_prompt_needs_clear = false;
         }
+        if let Some(path) = self.pending_identity_file.take() {
+            Self::set_input_value(&self.identity_file, &path, window, cx);
+            self.show_toast(self.tr("Identity file selected."), Tone::Success, cx);
+        }
         if std::mem::take(&mut self.overlay_focus_pending) {
             window.focus(&self.overlay_focus);
         }
@@ -21630,6 +22105,9 @@ impl Render for AppView {
         }
         if self.terminal_comparison.is_some() {
             root = root.child(self.terminal_comparison_overlay(&tokens, cx));
+        }
+        if self.file_editor.is_some() {
+            root = root.child(self.file_editor_overlay(window, &tokens, cx));
         }
         if self.sync_visible {
             root = root.child(self.sync_overlay(&tokens, cx));

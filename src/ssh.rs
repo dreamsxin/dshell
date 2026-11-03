@@ -14,7 +14,7 @@ use russh::{
     client::{self, AuthResult, Handler, KeyboardInteractiveAuthResponse, Prompt},
     keys::{
         HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, check_known_hosts_path,
-        load_secret_key,
+        decode_secret_key,
     },
 };
 use tokio::{
@@ -2382,17 +2382,27 @@ async fn authenticate(
             passphrase,
         } => {
             let identity_file = expand_user_path(&identity_file);
-            let key = {
-                let passphrase = (!passphrase.is_empty()).then_some(passphrase.as_str());
-                load_secret_key(&identity_file, passphrase).with_context(|| {
-                    format!(
-                        "Could not load SSH identity file {}",
-                        identity_file.display()
-                    )
-                })?
-            };
+            let key_content = std::fs::read_to_string(&identity_file).with_context(|| {
+                format!(
+                    "Could not read SSH identity file {}",
+                    identity_file.display()
+                )
+            })?;
+            // Strip UTF-8 BOM that Windows editors may add, which would
+            // prevent the key format parser from recognizing the header.
+            let key_content = key_content.strip_prefix('\u{FEFF}').unwrap_or(&key_content);
+            let passphrase_ref = (!passphrase.is_empty()).then_some(passphrase.as_str());
+            let key = decode_secret_key(key_content, passphrase_ref).with_context(|| {
+                format!(
+                    "Could not load SSH identity file {}",
+                    identity_file.display()
+                )
+            })?;
             drop(passphrase);
-            let hash_alg = session.best_supported_rsa_hash().await?.flatten();
+            let hash_alg = match session.best_supported_rsa_hash().await {
+                Ok(inner) => inner.flatten(),
+                Err(_) => None,
+            };
             let auth = session
                 .authenticate_publickey(
                     username.to_owned(),
@@ -4848,6 +4858,198 @@ mod tests {
 
     #[test]
     #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_sftp_file_edit_round_trip() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let upload_path = directory.path().join("edit-upload.txt");
+        let original_content = b"line one\nline two\nline three\n";
+        std::fs::write(&upload_path, original_content).unwrap();
+        let remote = "dshell-sftp-edit-test.txt".to_owned();
+        let modified_content = "line one\nline TWO modified\nline three\nline four\n";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (_command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (sftp_command_tx, sftp_command_rx) = mpsc::channel(16);
+                let (sftp_event_tx, mut sftp_event_rx) = mpsc::channel(32);
+                let sftp_cancel = Arc::new(AtomicBool::new(false));
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
+                let spec = ConnectionSpec {
+                    host,
+                    port,
+                    username,
+                    authentication: Authentication::Password(Zeroizing::new(password)),
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: None,
+                    keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_command_rx,
+                    sftp_event_tx,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the SSH session")?
+                            .context("SSH event stream closed during connection")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
+                        }
+                    }
+
+                    let home = match next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::Ready { .. })
+                    })
+                    .await?
+                    {
+                        SftpEvent::Ready { path } => path,
+                        _ => unreachable!(),
+                    };
+                    assert!(!home.is_empty());
+
+                    sftp_command_tx
+                        .send(SftpCommand::Upload {
+                            local: upload_path.clone(),
+                            remote: remote.clone(),
+                            overwrite: false,
+                            resume: false,
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(
+                            event,
+                            SftpEvent::TransferFinished {
+                                kind: crate::sftp::TransferKind::Upload,
+                                ..
+                            }
+                        )
+                    })
+                    .await?;
+
+                    sftp_command_tx
+                        .send(SftpCommand::ReadFile(remote.clone()))
+                        .await?;
+                    let read_event = next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::FileContent { .. })
+                    })
+                    .await?;
+                    let SftpEvent::FileContent { content, .. } = read_event else {
+                        unreachable!()
+                    };
+                    assert_eq!(content, String::from_utf8_lossy(original_content));
+
+                    sftp_command_tx
+                        .send(SftpCommand::WriteFile {
+                            path: remote.clone(),
+                            content: modified_content.to_owned(),
+                        })
+                        .await?;
+                    next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::FileSaved { .. })
+                    })
+                    .await?;
+
+                    sftp_command_tx
+                        .send(SftpCommand::ReadFile(remote.clone()))
+                        .await?;
+                    let reread_event = next_sftp_event(&mut sftp_event_rx, |event| {
+                        matches!(event, SftpEvent::FileContent { .. })
+                    })
+                    .await?;
+                    let SftpEvent::FileContent { content, .. } = reread_event else {
+                        unreachable!()
+                    };
+                    assert_eq!(content, modified_content);
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for SFTP session cleanup")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
+                        }
+                    }
+
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(60), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker SFTP file edit test exceeded 60 seconds")?;
+                result?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
     fn docker_ssh_port_forwarding() {
         let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
         let port = env::var("DSHELL_DOCKER_SSH_PORT")
@@ -5232,5 +5434,27 @@ mod tests {
                 column: column as u16,
             })
         })
+    }
+
+    #[test]
+    fn decode_secret_key_handles_utf8_bom_prefix() {
+        use crate::keygen::{KeyAlgorithm, generate};
+        let directory = tempfile::tempdir().unwrap();
+        let key_path = directory.path().join("bom-test-key");
+        let generated = generate(&key_path, "", "bom test", KeyAlgorithm::Ed25519).unwrap();
+        let content = std::fs::read_to_string(&key_path).unwrap();
+
+        // Without BOM, decode_secret_key succeeds.
+        assert!(russh::keys::decode_secret_key(&content, None).is_ok());
+
+        // With a UTF-8 BOM prefix, the format parser cannot recognize the
+        // header and fails. This simulates what Windows editors do.
+        let with_bom = format!("\u{FEFF}{content}");
+        assert!(russh::keys::decode_secret_key(&with_bom, None).is_err());
+
+        // After stripping the BOM (as the authenticate function does),
+        // decoding succeeds again.
+        let stripped = with_bom.strip_prefix('\u{FEFF}').unwrap();
+        assert!(russh::keys::decode_secret_key(stripped, None).is_ok());
     }
 }

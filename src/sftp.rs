@@ -24,6 +24,7 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_RECURSIVE_ENTRIES: usize = 10_000;
 const MAX_RECURSIVE_DEPTH: usize = 32;
 const MAX_LOCAL_LIST_ENTRIES: usize = 10_000;
+const MAX_EDIT_FILE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalEntry {
@@ -153,6 +154,11 @@ pub enum SftpCommand {
         mtime: Option<u32>,
     },
     FilesystemInfo(String),
+    ReadFile(String),
+    WriteFile {
+        path: String,
+        content: String,
+    },
 }
 
 #[derive(Debug)]
@@ -201,6 +207,13 @@ pub enum SftpEvent {
     },
     OperationFinished {
         action: String,
+    },
+    FileContent {
+        path: String,
+        content: String,
+    },
+    FileSaved {
+        path: String,
     },
 }
 
@@ -427,6 +440,37 @@ pub async fn run<S>(
                         .await;
                 }
             },
+            SftpCommand::ReadFile(path) => match session.read(path.clone()).await {
+                Ok(bytes) if bytes.len() > MAX_EDIT_FILE_BYTES => {
+                    let _ = events
+                        .send(SftpEvent::Error(format!(
+                            "File {path} is too large to edit (limit is {} KiB).",
+                            MAX_EDIT_FILE_BYTES / 1024
+                        )))
+                        .await;
+                }
+                Ok(bytes) => {
+                    let content = String::from_utf8_lossy(&bytes).into_owned();
+                    let _ = events.send(SftpEvent::FileContent { path, content }).await;
+                }
+                Err(error) => {
+                    let _ = events
+                        .send(SftpEvent::Error(format!("Could not read {path}: {error}")))
+                        .await;
+                }
+            },
+            SftpCommand::WriteFile { path, content } => {
+                match session.write(path.clone(), content.as_bytes()).await {
+                    Ok(()) => {
+                        let _ = events.send(SftpEvent::FileSaved { path }).await;
+                    }
+                    Err(error) => {
+                        let _ = events
+                            .send(SftpEvent::Error(format!("Could not write {path}: {error}")))
+                            .await;
+                    }
+                }
+            }
         }
     }
     let _ = session.close().await;
@@ -1685,8 +1729,9 @@ pub fn parse_unix_timestamp(input: &str) -> Result<Option<u32>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_permission_mode, list_local_directory, parent_remote_path, parse_permission_mode,
-        parse_unix_timestamp, remote_join, resume_offset,
+        MAX_EDIT_FILE_BYTES, SftpCommand, TRANSFER_CHUNK_BYTES, format_permission_mode,
+        list_local_directory, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
+        remote_join, resume_offset,
     };
 
     #[test]
@@ -1771,5 +1816,31 @@ mod tests {
         let link = directory.path().join("link");
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         assert!(list_local_directory(&link).is_err());
+    }
+
+    #[test]
+    fn edit_file_size_limit_is_one_mebibyte() {
+        assert_eq!(MAX_EDIT_FILE_BYTES, 1024 * 1024);
+        assert!(MAX_EDIT_FILE_BYTES > TRANSFER_CHUNK_BYTES);
+    }
+
+    #[test]
+    fn edit_commands_carry_path_and_content() {
+        let read = SftpCommand::ReadFile("/etc/hosts".to_owned());
+        let write = SftpCommand::WriteFile {
+            path: "/etc/hosts".to_owned(),
+            content: "127.0.0.1 localhost\n".to_owned(),
+        };
+        match read {
+            SftpCommand::ReadFile(path) => assert_eq!(path, "/etc/hosts"),
+            _ => panic!("expected ReadFile"),
+        }
+        match write {
+            SftpCommand::WriteFile { path, content } => {
+                assert_eq!(path, "/etc/hosts");
+                assert_eq!(content, "127.0.0.1 localhost\n");
+            }
+            _ => panic!("expected WriteFile"),
+        }
     }
 }
