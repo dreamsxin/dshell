@@ -13,10 +13,11 @@ pub enum ShortcutAction {
     ReplayLog,
     Find,
     ToggleSessionSwitcher,
+    FocusAddressBar,
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::NewSession,
         Self::CloseSession,
         Self::ToggleFiles,
@@ -28,6 +29,7 @@ impl ShortcutAction {
         Self::ReplayLog,
         Self::Find,
         Self::ToggleSessionSwitcher,
+        Self::FocusAddressBar,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -43,6 +45,7 @@ impl ShortcutAction {
             Self::ReplayLog => "Replay log",
             Self::Find => "Find",
             Self::ToggleSessionSwitcher => "Switch session",
+            Self::FocusAddressBar => "Focus address bar",
         }
     }
 
@@ -59,6 +62,7 @@ impl ShortcutAction {
             Self::ReplayLog => "ctrl+shift+r",
             Self::Find => "ctrl+f",
             Self::ToggleSessionSwitcher => "ctrl+shift+p",
+            Self::FocusAddressBar => "alt+d",
         }
     }
 }
@@ -77,6 +81,7 @@ pub struct ShortcutSettings {
     pub replay_log: String,
     pub find: String,
     pub toggle_session_switcher: String,
+    pub focus_address_bar: String,
 }
 
 impl Default for ShortcutSettings {
@@ -93,6 +98,7 @@ impl Default for ShortcutSettings {
             replay_log: String::new(),
             find: String::new(),
             toggle_session_switcher: String::new(),
+            focus_address_bar: String::new(),
         };
         for action in ShortcutAction::ALL {
             settings.set(action, action.default_shortcut());
@@ -115,6 +121,7 @@ impl ShortcutSettings {
             ShortcutAction::ReplayLog => &self.replay_log,
             ShortcutAction::Find => &self.find,
             ShortcutAction::ToggleSessionSwitcher => &self.toggle_session_switcher,
+            ShortcutAction::FocusAddressBar => &self.focus_address_bar,
         }
     }
 
@@ -132,6 +139,7 @@ impl ShortcutSettings {
             ShortcutAction::ReplayLog => self.replay_log = value,
             ShortcutAction::Find => self.find = value,
             ShortcutAction::ToggleSessionSwitcher => self.toggle_session_switcher = value,
+            ShortcutAction::FocusAddressBar => self.focus_address_bar = value,
         }
     }
 

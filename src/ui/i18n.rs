@@ -654,6 +654,37 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Edit" => "编辑",
         "Browse" => "浏览",
         "Choose identity file" => "选择身份文件",
+        "Focus address bar" => "聚焦地址栏",
+        "Save visible screen" => "保存可见屏幕",
+        "Save screen" => "保存屏幕",
+        "Screen saved." => "屏幕已保存。",
+        "Broadcast mode" => "广播模式",
+        "Broadcast mode (on)" => "广播模式（开）",
+        "Broadcast mode enabled for {count} sessions." => "已为 {count} 个会话启用广播模式。",
+        "Paste confirmation" => "粘贴确认",
+        "The clipboard contains {lines} lines ({chars} characters)." => {
+            "剪贴板包含 {lines} 行（{chars} 个字符）。"
+        }
+        "Pasting multiple lines can confuse interactive CLI prompts. Review the content before pasting." => {
+            "粘贴多行内容可能干扰交互式 CLI 提示。请在粘贴前检查内容。"
+        }
+        "Showing first 10 lines of {total}." => "显示前 10 行（共 {total} 行）。",
+        "Press Enter to paste, or Esc to cancel." => "按 Enter 粘贴，按 Esc 取消。",
+        "Paste lines" => "粘贴行",
+        "Server Key Verification" => "服务器密钥验证",
+        "The server key for {target} is not in known_hosts." => {
+            "服务器 {target} 的密钥不在 known_hosts 中。"
+        }
+        "Verify the fingerprint matches the server's published key before trusting it." => {
+            "信任前请确认指纹与服务器公布的密钥一致。"
+        }
+        "SHA256 fingerprint" => "SHA256 指纹",
+        "The key will be saved to ~/.ssh/known_hosts so future connections do not prompt." => {
+            "密钥将保存到 ~/.ssh/known_hosts，后续连接不再提示。"
+        }
+        "Trust and Connect" => "信任并连接",
+        "Reject" => "拒绝",
+        "Host key verification was cancelled." => "主机密钥验证已取消。",
         "File editor" => "文件编辑器",
         "Loading remote file..." => "正在加载远端文件...",
         "Saving..." => "正在保存...",

@@ -685,6 +685,75 @@ fn expand_local_path(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn sanitize_filename(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('_').to_owned();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn frame_visible_text(frame: &crate::terminal::TerminalFrame) -> String {
+    let terminal_width = frame.rows.iter().map(|row| row.len()).max().unwrap_or(0);
+    let mut lines = Vec::with_capacity(frame.rows.len());
+    for row in &frame.rows {
+        let mut line = String::new();
+        let mut current_col = 0;
+        for run in row {
+            while current_col < run.width_cells {
+                line.push(' ');
+                current_col += 1;
+            }
+            line.push_str(&run.text);
+            current_col += run.text.chars().count();
+        }
+        while current_col < terminal_width {
+            line.push(' ');
+            current_col += 1;
+        }
+        lines.push(line.trim_end().to_owned());
+    }
+    lines.join("\n") + "\n"
+}
+
+fn parse_address(address: &str) -> Result<(String, String, u16), &'static str> {
+    let address = address.trim();
+    if address.is_empty() {
+        return Err("Enter an address such as user@host:port");
+    }
+    let (user, host_port) = match address.split_once('@') {
+        Some((user, rest)) => (user.to_owned(), rest),
+        None => (String::new(), address),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|_| "The port must be a number")?;
+            if port == 0 || port > 65535 {
+                return Err("The port must be between 1 and 65535");
+            }
+            (host.to_owned(), port)
+        }
+        None => (host_port.to_owned(), 22),
+    };
+    if host.is_empty() {
+        return Err("The host is required");
+    }
+    Ok((user, host, port))
+}
+
 fn valid_remote_entry_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
@@ -1308,6 +1377,19 @@ struct FileEditorConfirmClose {
     message: String,
 }
 
+struct HostKeyVerificationState {
+    host: String,
+    port: u16,
+    key_algorithm: String,
+    key_fingerprint: String,
+    respond_to: tokio::sync::oneshot::Sender<bool>,
+}
+
+struct PendingPaste {
+    session_id: u64,
+    text: String,
+}
+
 fn remember_stopped_forward(state: &mut ForwardViewState, spec: ForwardRuleSpec) {
     if !state.stopped.contains(&spec) {
         state.stopped.push(spec);
@@ -1551,7 +1633,7 @@ impl SshSession {
                 self.sftp.refresh_after_reconnect = false;
                 self.state = SessionState::Disconnected;
             }
-            UiEvent::AuthPrompt { .. } => {}
+            UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } => {}
             UiEvent::SearchResult(_) => {}
         }
         true
@@ -1639,6 +1721,20 @@ fn mark_sftp_ready(session: &mut SshSession, home: String) {
     } else if session.state == SessionState::Reconnecting {
         session.sftp.refresh_after_reconnect = true;
     }
+}
+
+fn builtin_highlight_keywords() -> &'static [&'static str] {
+    &[
+        "error",
+        "failed",
+        "fatal",
+        "denied",
+        "not found",
+        "warning",
+        "warn",
+        "deprecated",
+        "caution",
+    ]
 }
 
 fn keyword_matches(text: &str, keywords: &[String]) -> bool {
@@ -3818,11 +3914,16 @@ struct AppView {
     log_replay: Option<LogReplayState>,
     search_input: Entity<InputState>,
     session_switcher_search: Entity<InputState>,
+    address_bar: Entity<InputState>,
     session_switcher_visible: bool,
     terminal_comparison: Option<TerminalComparison>,
     file_editor: Option<FileEditorState>,
     file_editor_confirm_close: Option<FileEditorConfirmClose>,
     pending_identity_file: Option<String>,
+    host_key_verification: Option<HostKeyVerificationState>,
+    pending_paste: Option<PendingPaste>,
+    paste_confirm_lines: usize,
+    paste_confirm_chars: usize,
     session_switcher_selected: usize,
     session_switcher_scroll: ScrollHandle,
     compose_input: Entity<InputState>,
@@ -3833,6 +3934,7 @@ struct AppView {
     sync_targets: HashSet<u64>,
     sync_group_picker_open: bool,
     sync_visible: bool,
+    broadcast_mode: bool,
     menu_visible: bool,
     layout_menu_visible: bool,
     session_tab_group_menu_visible: bool,
@@ -3948,6 +4050,7 @@ impl AppView {
         let session_switcher_search = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search sessions by name, user, host or port")
         });
+        let address_bar = cx.new(|cx| InputState::new(window, cx).placeholder("user@host:port"));
         let compose_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line()
@@ -4184,11 +4287,16 @@ impl AppView {
             log_replay: None,
             search_input,
             session_switcher_search,
+            address_bar,
             session_switcher_visible: false,
             terminal_comparison: None,
             file_editor: None,
             file_editor_confirm_close: None,
             pending_identity_file: None,
+            host_key_verification: None,
+            pending_paste: None,
+            paste_confirm_lines: 0,
+            paste_confirm_chars: 0,
             session_switcher_selected: 0,
             session_switcher_scroll: ScrollHandle::new(),
             compose_input,
@@ -4199,6 +4307,7 @@ impl AppView {
             sync_targets: HashSet::new(),
             sync_group_picker_open: false,
             sync_visible: false,
+            broadcast_mode: false,
             menu_visible: false,
             layout_menu_visible: false,
             session_tab_group_menu_visible: false,
@@ -5229,6 +5338,14 @@ impl AppView {
                 .any(|existing| existing.eq_ignore_ascii_case(&keyword))
             {
                 keyword_highlights.push(keyword);
+            }
+        }
+        for keyword in builtin_highlight_keywords() {
+            if !keyword_highlights
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&keyword))
+            {
+                keyword_highlights.push(keyword.to_string());
             }
         }
         let has_timeline = !replay.timeline.is_empty();
@@ -7597,6 +7714,27 @@ impl AppView {
                             break;
                         }
                     }
+                    UiEvent::HostKeyVerificationRequest {
+                        host,
+                        port,
+                        key_algorithm,
+                        key_fingerprint,
+                        respond_to,
+                    } => {
+                        let result = this.update(cx, |view, cx| {
+                            view.host_key_verification = Some(HostKeyVerificationState {
+                                host,
+                                port,
+                                key_algorithm,
+                                key_fingerprint,
+                                respond_to,
+                            });
+                            cx.notify();
+                        });
+                        if result.is_err() {
+                            break;
+                        }
+                    }
                     UiEvent::SearchResult(result) => {
                         let result = this.update(cx, |view, cx| {
                             view.search_message = search_result_message(&result);
@@ -7971,6 +8109,7 @@ impl AppView {
                 AppShortcut::ReplayLog => self.begin_log_replay(cx),
                 AppShortcut::Find => self.open_search(session_id, window, cx),
                 AppShortcut::ToggleSessionSwitcher => self.toggle_session_switcher(window, cx),
+                AppShortcut::FocusAddressBar => self.focus_address_bar(window, cx),
                 AppShortcut::SelectSession(index) => {
                     if let Some(target) = self.sessions.get(index).map(|session| session.id) {
                         self.select_session(target, window, cx);
@@ -8282,6 +8421,32 @@ impl AppView {
         cx.notify();
     }
 
+    fn toggle_broadcast(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.broadcast_mode = !self.broadcast_mode;
+        if self.broadcast_mode {
+            self.sync_targets.clear();
+            for session in &self.sessions {
+                if session_accepts_requests(session.state) {
+                    self.sync_targets.insert(session.id);
+                }
+            }
+            self.sync_visible = true;
+            self.request_overlay_focus();
+            self.show_toast(
+                self.tr("Broadcast mode enabled for {count} sessions.")
+                    .replace("{count}", &self.sync_targets.len().to_string()),
+                Tone::Success,
+                cx,
+            );
+        } else {
+            self.sync_visible = false;
+            self.sync_targets.clear();
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+        }
+        cx.notify();
+    }
+
     fn toggle_sync_target(&mut self, session_id: u64, cx: &mut Context<Self>) {
         if self
             .session(session_id)
@@ -8551,6 +8716,112 @@ impl AppView {
         }
     }
 
+    fn focus_address_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.address_bar.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn connect_from_address_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.address_bar.read(cx).value().trim().to_owned();
+        Self::set_input_value(&self.address_bar, "", window, cx);
+        if value.is_empty() {
+            cx.notify();
+            return;
+        }
+        self.connect_from_address(value, window, cx);
+    }
+
+    fn connect_from_address(
+        &mut self,
+        address: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match parse_address(&address) {
+            Ok((user, host, port)) => {
+                let port_str = if port == 22 {
+                    "22".to_owned()
+                } else {
+                    port.to_string()
+                };
+                let user_str = if user.is_empty() {
+                    "root".to_owned()
+                } else {
+                    user.clone()
+                };
+                Self::set_input_value(&self.host, &host, window, cx);
+                Self::set_input_value(&self.port, &port_str, window, cx);
+                Self::set_input_value(&self.username, &user_str, window, cx);
+                self.connect(window, cx);
+            }
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn save_visible_screen(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let Some(frame) = session.frame.as_ref() else {
+            self.profile_message = self.tr("No terminal output to save.");
+            cx.notify();
+            return;
+        };
+        let host = self
+            .session(session_id)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+        let text = frame_visible_text(frame);
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(self.tr("Save screen").into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(mut paths))) => {
+                if let Some(directory) = paths.pop() {
+                    let filename = sanitize_filename(&host).unwrap_or_else(|| "screen".to_owned());
+                    let path = directory.join(format!("{filename}.txt"));
+                    if let Err(error) = tokio::fs::write(&path, text).await {
+                        let _ = this.update(cx, |view, cx| {
+                            view.profile_message = format!("Could not save screen: {error}");
+                            cx.notify();
+                        });
+                    } else {
+                        let _ = this.update(cx, |view, cx| {
+                            view.show_toast(
+                                view.tr("Screen saved.")
+                                    .replace("{path}", &path.to_string_lossy()),
+                                Tone::Success,
+                                cx,
+                            );
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |view, cx| {
+                    view.profile_message = format!("Could not open a folder picker: {error}");
+                    cx.notify();
+                });
+            }
+            _ => {}
+        })
+        .detach();
+        let _ = window;
+    }
+
     fn close_other_sessions(
         &mut self,
         keep_session_id: u64,
@@ -8690,6 +8961,15 @@ impl AppView {
 
     fn paste_into_terminal(&mut self, session_id: u64, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            if text.contains('\n') {
+                let line_count = text.lines().count();
+                let char_count = text.chars().count();
+                self.pending_paste = Some(PendingPaste { session_id, text });
+                self.paste_confirm_lines = line_count;
+                self.paste_confirm_chars = char_count;
+                cx.notify();
+                return;
+            }
             let delivered = self.send_input_to_targets(
                 session_id,
                 || TerminalRequest::Paste(text.clone()),
@@ -8703,6 +8983,29 @@ impl AppView {
             };
             self.show_toast(message, Tone::Success, cx);
         }
+    }
+
+    fn confirm_paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(paste) = self.pending_paste.take() {
+            let delivered = self.send_input_to_targets(
+                paste.session_id,
+                || TerminalRequest::Paste(paste.text.clone()),
+                "Terminal paste",
+                cx,
+            );
+            let message = if delivered > 1 {
+                format!("Pasted into {delivered} sessions.")
+            } else {
+                "Pasted from clipboard.".to_owned()
+            };
+            self.show_toast(message, Tone::Success, cx);
+        }
+        cx.notify();
+    }
+
+    fn cancel_paste(&mut self, cx: &mut Context<Self>) {
+        self.pending_paste = None;
+        cx.notify();
     }
 
     fn terminal_surface(&mut self, session_id: u64, cx: &mut Context<Self>) -> AnyElement {
@@ -8727,6 +9030,14 @@ impl AppView {
                 .any(|existing| existing.eq_ignore_ascii_case(&keyword))
             {
                 keyword_highlights.push(keyword);
+            }
+        }
+        for keyword in builtin_highlight_keywords() {
+            if !keyword_highlights
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(keyword))
+            {
+                keyword_highlights.push(keyword.to_string());
             }
         }
         let mut terminal_view = div()
@@ -9965,6 +10276,243 @@ impl AppView {
                     .child(footer),
             )
             .into_any_element()
+    }
+
+    fn host_key_verification_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(verification) = self.host_key_verification.as_ref() else {
+            return div().into_any_element();
+        };
+        let host = verification.host.clone();
+        let port = verification.port;
+        let key_algorithm = verification.key_algorithm.clone();
+        let key_fingerprint = verification.key_fingerprint.clone();
+
+        let target = if port == 22 {
+            host.clone()
+        } else {
+            format!("[{host}]:{port}")
+        };
+
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_3))
+            .p(px(ui_tokens::SPACE_4))
+            .child(components::warning_text(
+                tokens,
+                self.tr("The server key for {target} is not in known_hosts.").replace("{target}", &target),
+            ))
+            .child(components::help_text(
+                tokens,
+                self.tr("Verify the fingerprint matches the server's published key before trusting it."),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui_tokens::SPACE_1))
+                    .p(px(ui_tokens::SPACE_3))
+                    .border_1()
+                    .border_color(tokens.border_subtle)
+                    .rounded(px(ui_tokens::RADIUS_CONTROL))
+                    .bg(tokens.surface)
+                    .child(components::label_text(tokens, self.tr("Host")))
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_BODY))
+                            .font_medium()
+                            .child(target.clone()),
+                    )
+                    .child(components::label_text(tokens, self.tr("Key algorithm")))
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_BODY))
+                            .font_medium()
+                            .child(key_algorithm),
+                    )
+                    .child(components::label_text(tokens, self.tr("SHA256 fingerprint")))
+                    .child(
+                        div()
+                            .text_size(px(ui_tokens::FONT_BODY))
+                            .font_family("Consolas, monospace")
+                            .child(key_fingerprint),
+                    ),
+            )
+            .child(components::help_text(
+                tokens,
+                self.tr("The key will be saved to ~/.ssh/known_hosts so future connections do not prompt."),
+            ));
+
+        let footer = components::modal_footer(tokens)
+            .child(
+                components::button(
+                    tokens,
+                    "host-key-reject",
+                    self.tr("Reject"),
+                    ButtonKind::Ghost,
+                    ButtonSize::Regular,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.reject_host_key(cx);
+                })),
+            )
+            .child(
+                components::button(
+                    tokens,
+                    "host-key-trust",
+                    self.tr("Trust and Connect"),
+                    ButtonKind::Primary,
+                    ButtonSize::Regular,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.trust_host_key(cx);
+                })),
+            );
+
+        components::modal_overlay(tokens, "host-key-verification-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.reject_host_key(cx);
+                }
+            }))
+            .child(
+                components::modal_panel(tokens, "host-key-verification-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_AUTH))
+                    .max_h(px(560.))
+                    .child(components::modal_header(
+                        tokens,
+                        self.tr("Server Key Verification"),
+                    ))
+                    .child(body)
+                    .child(footer),
+            )
+            .into_any_element()
+    }
+
+    fn paste_confirm_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(paste) = self.pending_paste.as_ref() else {
+            return div().into_any_element();
+        };
+        let session_id = paste.session_id;
+        let line_count = self.paste_confirm_lines;
+        let char_count = self.paste_confirm_chars;
+        let preview = paste.text.lines().take(10).collect::<Vec<_>>().join("\n");
+        let footer = components::modal_footer(tokens)
+            .child(
+                components::button(
+                    tokens,
+                    "paste-cancel",
+                    self.tr("Cancel"),
+                    ButtonKind::Ghost,
+                    ButtonSize::Regular,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.cancel_paste(cx);
+                })),
+            )
+            .child(
+                components::button(
+                    tokens,
+                    "paste-confirm",
+                    self.tr("Paste lines"),
+                    ButtonKind::Primary,
+                    ButtonSize::Regular,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.confirm_paste(cx);
+                })),
+            );
+        components::modal_overlay(tokens, "paste-confirm-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.cancel_paste(cx);
+                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
+                    cx.stop_propagation();
+                    this.confirm_paste(cx);
+                }
+            }))
+            .child(
+                components::modal_panel(tokens, "paste-confirm-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_CONFIRM))
+                    .child(components::modal_header(tokens, self.tr("Paste confirmation")))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_3))
+                            .p(px(ui_tokens::SPACE_4))
+                            .child(components::help_text(
+                                tokens,
+                                self.tr("The clipboard contains {lines} lines ({chars} characters).").replace("{lines}", &line_count.to_string()).replace("{chars}", &char_count.to_string()),
+                            ))
+                            .child(components::warning_text(
+                                tokens,
+                                self.tr("Pasting multiple lines can confuse interactive CLI prompts. Review the content before pasting."),
+                            ))
+                            .child(
+                                div()
+                                    .id("paste-preview")
+                                    .border_1()
+                                    .border_color(tokens.border_subtle)
+                                    .rounded(px(ui_tokens::RADIUS_CONTROL))
+                                    .bg(tokens.surface)
+                                    .p(px(ui_tokens::SPACE_2))
+                                    .overflow_y_scroll()
+                                    .max_h(px(200.))
+                                    .text_size(px(ui_tokens::FONT_BODY))
+                                    .font_family("Consolas, monospace")
+                                    .child(preview),
+                            )
+                            .child(if line_count > 10 {
+                                components::help_text(
+                                    tokens,
+                                    self.tr("Showing first 10 lines of {total}.").replace("{total}", &line_count.to_string()),
+                                )
+                            } else {
+                                div()
+                            })
+                            .child(components::help_text(
+                                tokens,
+                                self.tr("Press Enter to paste, or Esc to cancel."),
+                            )),
+                    )
+                    .child(footer),
+            )
+            .into_any_element()
+    }
+
+    fn trust_host_key(&mut self, cx: &mut Context<Self>) {
+        if let Some(verification) = self.host_key_verification.take()
+            && let Err(_) = verification.respond_to.send(true)
+        {
+            self.status = self.tr("Host key verification was cancelled.");
+            cx.notify();
+        }
+        cx.notify();
+    }
+
+    fn reject_host_key(&mut self, cx: &mut Context<Self>) {
+        if let Some(verification) = self.host_key_verification.take()
+            && let Err(_) = verification.respond_to.send(false)
+        {
+            self.status = self.tr("Host key verification was cancelled.");
+            cx.notify();
+        }
+        cx.notify();
     }
 
     fn saved_host_row(
@@ -17879,6 +18427,25 @@ impl AppView {
             .child(
                 components::icon_button(
                     tokens,
+                    "toggle-broadcast",
+                    IconName::Bell,
+                    if self.broadcast_mode {
+                        ButtonKind::Secondary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                    if self.broadcast_mode {
+                        self.tr("Broadcast mode (on)")
+                    } else {
+                        self.tr("Broadcast mode")
+                    },
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_broadcast(window, cx))),
+            )
+            .child(
+                components::icon_button(
+                    tokens,
                     "toggle-ui-theme",
                     IconName::Palette,
                     ButtonKind::Ghost,
@@ -17932,6 +18499,18 @@ impl AppView {
             .border_b_1()
             .border_color(tokens.border_subtle)
             .child(left)
+            .child(
+                div()
+                    .w(px(260.))
+                    .h(px(ui_tokens::CONTROL_HEIGHT_SM))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "enter" {
+                            cx.stop_propagation();
+                            this.connect_from_address_bar(window, cx);
+                        }
+                    }))
+                    .child(TextInput::new(&self.address_bar).h_full().w_full()),
+            )
             .child(middle)
             .child(right)
             .into_any_element()
@@ -19820,6 +20399,23 @@ impl AppView {
                 })),
             )
             .child(components::section_label(tokens, self.tr("VIEW")))
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-save-screen",
+                    IconName::File,
+                    self.tr("Save visible screen"),
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(session_id) = active_id {
+                        this.save_visible_screen(session_id, window, cx);
+                    }
+                })),
+            )
             .child(
                 menu_item(
                     tokens,
@@ -21799,6 +22395,7 @@ enum AppShortcut {
     ReplayLog,
     Find,
     ToggleSessionSwitcher,
+    FocusAddressBar,
     SelectSession(usize),
 }
 
@@ -21834,6 +22431,7 @@ fn app_shortcut(
                 ShortcutAction::ReplayLog => AppShortcut::ReplayLog,
                 ShortcutAction::Find => AppShortcut::Find,
                 ShortcutAction::ToggleSessionSwitcher => AppShortcut::ToggleSessionSwitcher,
+                ShortcutAction::FocusAddressBar => AppShortcut::FocusAddressBar,
             });
         }
     }
@@ -22129,6 +22727,12 @@ impl Render for AppView {
         }
         if self.credential_prompt_open {
             root = root.child(self.credential_prompt_overlay(cx));
+        }
+        if self.host_key_verification.is_some() {
+            root = root.child(self.host_key_verification_overlay(&tokens, cx));
+        }
+        if self.pending_paste.is_some() {
+            root = root.child(self.paste_confirm_overlay(&tokens, cx));
         }
         if self.pending_service_action.is_some() {
             root = root.child(self.service_action_overlay(cx));

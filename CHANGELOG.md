@@ -6,6 +6,23 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add an address bar in the command bar (Alt+D to focus) for quick
+  `user@host:port` connections.
+- Add a "Save visible screen" option in the More menu to save the terminal's
+  current visible text to a file.
+- Add built-in keyword highlight rules (error, failed, fatal, denied,
+  warning, deprecated) that highlight common error and warning output in
+  the terminal and log replay without user configuration.
+- Add a broadcast mode toggle (Bell icon) to send input to all connected
+  sessions simultaneously.
+- Add a multi-line paste confirmation dialog that previews clipboard content
+  before pasting into the terminal.
+- Add a host key verification dialog that prompts to trust and save unknown
+  server keys to `~/.ssh/known_hosts` before connecting.
+- Add a file picker button for the PublicKey identity file field.
+- Add a built-in SFTP file editor: edit a remote file in a modal multi-line
+  text area and save back to the host with Ctrl+S, with a 1 MiB size limit,
+  unsaved-change confirmation, and Simplified Chinese translations.
 - Add a searchable active-session switcher to locate sessions by title, user,
   host or port, show connection state, and switch with keyboard navigation.
 - Add the `Ctrl+Shift+P` shortcut and Simplified Chinese translations.
