@@ -1724,6 +1724,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "bytes",
+ "data-encoding",
  "gpui",
  "gpui-component",
  "rand 0.10.3",

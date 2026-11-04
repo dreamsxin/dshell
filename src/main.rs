@@ -1633,7 +1633,11 @@ impl SshSession {
                 self.sftp.refresh_after_reconnect = false;
                 self.state = SessionState::Disconnected;
             }
-            UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } => {}
+            UiEvent::AuthPrompt { .. }
+            | UiEvent::HostKeyVerificationRequest { .. }
+            | UiEvent::TerminalTitle(_)
+            | UiEvent::ClipboardWrite(_)
+            | UiEvent::Notification(_) => {}
             UiEvent::SearchResult(_) => {}
         }
         true
@@ -4516,6 +4520,36 @@ impl AppView {
 
     fn session_mut(&mut self, id: u64) -> Option<&mut SshSession> {
         self.sessions.iter_mut().find(|session| session.id == id)
+    }
+
+    fn update_terminal_title(&mut self, session_id: u64, title: &str, cx: &mut Context<Self>) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        let profile_title = self
+            .selected_profile
+            .as_ref()
+            .and_then(|name| {
+                self.profiles
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(name))
+                    .map(|p| p.tab_label.clone())
+                    .filter(|t| !t.is_empty())
+            })
+            .unwrap_or_default();
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if profile_title.is_empty() || !session.title.contains(&profile_title) {
+            session.title = title.to_owned();
+            cx.notify();
+        }
+    }
+
+    fn write_to_clipboard(&mut self, text: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::from(text.to_owned()));
+        self.show_toast(self.tr("Clipboard updated from remote."), Tone::Success, cx);
     }
 
     fn active_session(&self) -> Option<&SshSession> {
@@ -7744,6 +7778,33 @@ impl AppView {
                             break;
                         }
                     }
+                    UiEvent::TerminalTitle(title) => {
+                        let result = this.update(cx, |view, cx| {
+                            view.update_terminal_title(id, &title, cx);
+                            cx.notify();
+                        });
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    UiEvent::ClipboardWrite(text) => {
+                        let result = this.update(cx, |view, cx| {
+                            view.write_to_clipboard(&text, cx);
+                            cx.notify();
+                        });
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    UiEvent::Notification(message) => {
+                        let result = this.update(cx, |view, cx| {
+                            view.show_toast(message, Tone::Neutral, cx);
+                            cx.notify();
+                        });
+                        if result.is_err() {
+                            break;
+                        }
+                    }
                     event => {
                         let result = cx.update_window(window_handle, |_, window, app| {
                             this.update(app, |view, cx| {
@@ -10375,7 +10436,7 @@ impl AppView {
 
         components::modal_overlay(tokens, "host-key-verification-overlay")
             .track_focus(&self.overlay_focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key.eq_ignore_ascii_case("escape") {
                     cx.stop_propagation();
                     this.reject_host_key(cx);
@@ -10404,7 +10465,7 @@ impl AppView {
         let Some(paste) = self.pending_paste.as_ref() else {
             return div().into_any_element();
         };
-        let session_id = paste.session_id;
+        let _session_id = paste.session_id;
         let line_count = self.paste_confirm_lines;
         let char_count = self.paste_confirm_chars;
         let preview = paste.text.lines().take(10).collect::<Vec<_>>().join("\n");

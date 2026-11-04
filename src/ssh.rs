@@ -289,6 +289,9 @@ pub enum UiEvent {
         key_fingerprint: String,
         respond_to: tokio::sync::oneshot::Sender<bool>,
     },
+    TerminalTitle(String),
+    ClipboardWrite(String),
+    Notification(String),
     SearchResult(TerminalSearchResult),
 }
 
@@ -429,6 +432,74 @@ fn default_known_hosts_path() -> Result<PathBuf> {
         .or_else(|| env::var_os("HOME"))
         .context("could not determine the current user's home directory")?;
     Ok(PathBuf::from(home).join(".ssh").join("known_hosts"))
+}
+
+fn scan_osc_sequences(data: &[u8], events: &mpsc::Sender<UiEvent>) {
+    let text = String::from_utf8_lossy(data);
+    let bytes = text.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        if bytes[pos] != 0x1b || pos + 1 >= bytes.len() || bytes[pos + 1] != 0x5d {
+            pos += 1;
+            continue;
+        }
+        let body_start = pos + 2;
+        let mut end = body_start;
+        while end < bytes.len() {
+            if bytes[end] == 0x07 {
+                end += 1;
+                break;
+            }
+            if bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == 0x5c {
+                end += 2;
+                break;
+            }
+            end += 1;
+        }
+        if end <= body_start {
+            pos = body_start;
+            continue;
+        }
+        let body = &text[body_start..end.min(body_start + 65536)];
+        let body = body.trim_end_matches('\x07').trim_end_matches("\x1b\\");
+        if let Some(payload) = body.split_once(';') {
+            let code = payload.0.trim();
+            let value = payload.1.trim();
+            match code {
+                "0" | "2" => {
+                    if !value.is_empty()
+                        && let Ok(title) = decode_osc_title(value)
+                    {
+                        let _ = events.try_send(UiEvent::TerminalTitle(title));
+                    }
+                }
+                "52" => {
+                    if let Some(clipboard_text) = decode_osc_52(value) {
+                        let _ = events.try_send(UiEvent::ClipboardWrite(clipboard_text));
+                    }
+                }
+                "9" => {
+                    if !value.is_empty() {
+                        let _ = events.try_send(UiEvent::Notification(value.to_owned()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        pos = end;
+    }
+}
+
+fn decode_osc_title(value: &str) -> Result<String> {
+    Ok(value.to_owned())
+}
+
+fn decode_osc_52(value: &str) -> Option<String> {
+    let mut parts = value.splitn(2, ';');
+    let _encoding = parts.next()?;
+    let data = parts.next()?.trim();
+    let decoded = data_encoding::BASE64_MIME.decode(data.as_bytes()).ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 fn is_known_host_key(host: &str, port: u16, key: &PublicKey, path: &Path) -> Result<bool> {
@@ -1179,6 +1250,7 @@ async fn run_connection_attempt_with_known_hosts(
             message = reader.wait() => {
                 match message {
                     Some(ChannelMsg::Data { data }) => {
+                        scan_osc_sequences(&data, &events);
                         terminal.feed(&data);
                         if log_file.is_some() {
                             log_buffer.extend_from_slice(&data);
@@ -1186,6 +1258,7 @@ async fn run_connection_attempt_with_known_hosts(
                         screen_dirty = true;
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        scan_osc_sequences(&data, &events);
                         terminal.feed(&data);
                         if log_file.is_some() {
                             log_buffer.extend_from_slice(&data);
@@ -3278,7 +3351,7 @@ mod tests {
                             UiEvent::ConnectionInfo(info) => connection_info = Some(info),
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::SearchResult(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::TerminalTitle(_) | UiEvent::ClipboardWrite(_) | UiEvent::Notification(_) | UiEvent::SearchResult(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     let info = connection_info
@@ -3386,7 +3459,7 @@ mod tests {
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
                             | UiEvent::ServerMetricsError(_)
-                            | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } => {}
+                            | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::TerminalTitle(_) | UiEvent::ClipboardWrite(_) | UiEvent::Notification(_) => {}
                         }
                     }
                     next_screen(&mut events, |frame| {
@@ -3570,7 +3643,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::TerminalTitle(_) | UiEvent::ClipboardWrite(_) | UiEvent::Notification(_) | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -3666,6 +3739,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -3688,6 +3764,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -3789,6 +3868,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -3814,6 +3896,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -3849,6 +3934,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -3890,6 +3978,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -3994,6 +4085,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -4028,6 +4122,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -4130,6 +4227,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -4152,6 +4252,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -4336,6 +4439,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -4358,6 +4464,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -4475,7 +4584,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::TerminalTitle(_) | UiEvent::ClipboardWrite(_) | UiEvent::Notification(_) | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -4892,7 +5001,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::TerminalTitle(_) | UiEvent::ClipboardWrite(_) | UiEvent::Notification(_) | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -4996,6 +5105,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -5082,6 +5194,9 @@ mod tests {
                             | UiEvent::Screen(_)
                             | UiEvent::AuthPrompt { .. }
                             | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
                             | UiEvent::SearchResult(_)
                             | UiEvent::ConnectionInfo(_)
                             | UiEvent::ServerMetrics(_)
@@ -5180,7 +5295,7 @@ mod tests {
                             UiEvent::Status(status) if status.starts_with("Connected to ") => break,
                             UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
                             UiEvent::Disconnected => bail!("SSH disconnected during connection"),
-                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::TerminalTitle(_) | UiEvent::ClipboardWrite(_) | UiEvent::Notification(_) | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
 
@@ -5295,7 +5410,7 @@ mod tests {
                         {
                             UiEvent::Disconnected => break,
                             UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
-                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
+                            UiEvent::Status(_) | UiEvent::Reconnecting { .. } | UiEvent::LogState(_) | UiEvent::Screen(_) | UiEvent::AuthPrompt { .. } | UiEvent::HostKeyVerificationRequest { .. } | UiEvent::TerminalTitle(_) | UiEvent::ClipboardWrite(_) | UiEvent::Notification(_) | UiEvent::SearchResult(_) | UiEvent::ConnectionInfo(_) | UiEvent::ServerMetrics(_) | UiEvent::ServerMetricsError(_) => {}
                         }
                     }
                     Ok::<(), anyhow::Error>(())
@@ -5437,6 +5552,9 @@ mod tests {
                 | UiEvent::LogState(_)
                 | UiEvent::AuthPrompt { .. }
                 | UiEvent::HostKeyVerificationRequest { .. }
+                | UiEvent::TerminalTitle(_)
+                | UiEvent::ClipboardWrite(_)
+                | UiEvent::Notification(_)
                 | UiEvent::SearchResult(_)
                 | UiEvent::ConnectionInfo(_)
                 | UiEvent::ServerMetrics(_)

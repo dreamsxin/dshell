@@ -6,6 +6,8 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add OSC sequence parsing for dynamic tab titles (OSC 0/2), remote
+  clipboard writes (OSC 52), and remote desktop notifications (OSC 9).
 - Add an address bar in the command bar (Alt+D to focus) for quick
   `user@host:port` connections.
 - Add a "Save visible screen" option in the More menu to save the terminal's
