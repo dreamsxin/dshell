@@ -170,6 +170,7 @@ mod tests {
                     italic: false,
                     underline: false,
                     selected: false,
+                    search_highlight: false,
                 }],
                 vec![TerminalRun {
                     text: "   ".to_owned(),
@@ -180,6 +181,7 @@ mod tests {
                     italic: false,
                     underline: false,
                     selected: false,
+                    search_highlight: false,
                 }],
                 Vec::new(),
             ],

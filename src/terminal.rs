@@ -40,6 +40,7 @@ impl TerminalTheme {
                 background: 0x0b0f13,
                 selection_background: 0x315b80,
                 selection_foreground: 0xf4f6f8,
+                search_background: 0x2a4a68,
                 ansi: [
                     0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
                     0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
@@ -51,6 +52,7 @@ impl TerminalTheme {
                 background: 0x002b36,
                 selection_background: 0x0f4b6e,
                 selection_foreground: 0xfdf6e3,
+                search_background: 0x073642,
                 ansi: [
                     0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
                     0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
@@ -62,6 +64,7 @@ impl TerminalTheme {
                 background: 0xfdf6e3,
                 selection_background: 0x93a1a1,
                 selection_foreground: 0x002b36,
+                search_background: 0xeee8d5,
                 ansi: [
                     0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
                     0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
@@ -120,6 +123,7 @@ pub struct TerminalPalette {
     pub background: u32,
     pub selection_background: u32,
     pub selection_foreground: u32,
+    pub search_background: u32,
     pub ansi: [u32; 16],
 }
 
@@ -393,6 +397,7 @@ pub struct TerminalRun {
     pub italic: bool,
     pub underline: bool,
     pub selected: bool,
+    pub search_highlight: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -803,6 +808,12 @@ impl TerminalEmulator {
                     if flags.contains(Flags::INVERSE) ^ (is_cursor && block_cursor) {
                         std::mem::swap(&mut foreground, &mut background);
                     }
+                    let search_highlight = self.search.as_ref().is_some_and(|search| {
+                        search.matches.iter().any(|(start, end)| {
+                            let cell_point = Point::new(Line(line), Column(column));
+                            cell_point >= *start && cell_point <= *end
+                        })
+                    });
                     let style = (
                         foreground,
                         background,
@@ -810,6 +821,7 @@ impl TerminalEmulator {
                         flags.contains(Flags::ITALIC),
                         flags.intersects(Flags::ALL_UNDERLINES),
                         selected,
+                        search_highlight,
                     );
                     let width_cells = if flags.contains(Flags::WIDE_CHAR) {
                         2
@@ -830,6 +842,7 @@ impl TerminalEmulator {
                             run.italic,
                             run.underline,
                             run.selected,
+                            run.search_highlight,
                         ) == style
                     }) {
                         run.text.push(character);
@@ -852,6 +865,7 @@ impl TerminalEmulator {
                             italic: style.3,
                             underline: style.4,
                             selected: style.5,
+                            search_highlight: style.6,
                         });
                     }
                 }

@@ -301,6 +301,7 @@ pub struct SidebarRow {
     subtitle: SharedString,
     selected: bool,
     actions: Option<AnyElement>,
+    icon: Option<IconName>,
 }
 
 impl SidebarRow {
@@ -317,6 +318,7 @@ impl SidebarRow {
             subtitle: subtitle.into(),
             selected: false,
             actions: None,
+            icon: None,
         }
     }
 
@@ -330,9 +332,14 @@ impl SidebarRow {
         self
     }
 
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
     pub fn into_row(self) -> Stateful<Div> {
         let tokens = &self.tokens;
-        div()
+        let mut row = div()
             .id(self.id)
             .flex()
             .items_center()
@@ -351,30 +358,44 @@ impl SidebarRow {
             } else {
                 tokens.surface
             })
-            .hover(|style| style.bg(tokens.surface_overlay))
-            .child(
+            .hover(|style| style.bg(tokens.surface_overlay));
+
+        if let Some(icon) = self.icon {
+            row = row.child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .overflow_hidden()
-                            .text_size(px(tokens::FONT_BODY))
-                            .text_color(tokens.text_primary)
-                            .child(self.title),
-                    )
-                    .child(
-                        div()
-                            .overflow_hidden()
-                            .text_size(px(tokens::FONT_CAPTION))
-                            .text_color(tokens.text_secondary)
-                            .child(self.subtitle),
-                    ),
-            )
-            .when_some(self.actions, |row, actions| row.child(actions))
+                    .flex_shrink_0()
+                    .text_color(tokens.text_secondary)
+                    .child(Icon::new(icon).with_size(Size::Small)),
+            );
+        }
+
+        row = row.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .text_size(px(tokens::FONT_BODY))
+                        .text_color(tokens.text_primary)
+                        .child(self.title),
+                )
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .text_size(px(tokens::FONT_CAPTION))
+                        .text_color(tokens.text_secondary)
+                        .child(self.subtitle),
+                ),
+        );
+
+        if let Some(actions) = self.actions {
+            row = row.child(actions);
+        }
+        row
     }
 }
 

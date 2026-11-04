@@ -6,6 +6,14 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add search match highlighting in the terminal: matched text gets a distinct
+  background color from the palette, visible in both live sessions and log
+  replay.
+- Add distribution icons in the sidebar host list, auto-detected from the
+  hostname (Ubuntu, Debian, CentOS, Alpine, Arch, Fedora, Kali, openSUSE,
+  Amazon).
+- Add a Notes field to host profiles, editable in the session editor and
+  saved with the profile.
 - Add OSC sequence parsing for dynamic tab titles (OSC 0/2), remote
   clipboard writes (OSC 52), and remote desktop notifications (OSC 9).
 - Add an address bar in the command bar (Alt+D to focus) for quick

@@ -268,6 +268,8 @@ pub struct HostProfile {
     pub reconnect: ReconnectSettings,
     #[serde(default, skip_serializing_if = "LoginCommandSettings::is_default")]
     pub login_commands: LoginCommandSettings,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
     #[serde(
         default,
         skip_serializing,
@@ -656,6 +658,7 @@ mod tests {
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
             login_commands: LoginCommandSettings::default(),
+            notes: String::new(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -852,6 +855,7 @@ mod tests {
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
                 login_commands: LoginCommandSettings::default(),
+                notes: String::new(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),

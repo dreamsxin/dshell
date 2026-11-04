@@ -216,6 +216,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 25. SFTP 内置文件编辑器已交付：远端文件行新增 Edit 按钮，通过 SFTP `read` 拉取文件内容（上限 1 MiB）并在模态编辑器中以多行文本框展示；Ctrl+S 或 Save 按钮通过 SFTP `write` 写回远端。支持未保存更改确认、加载/保存/错误状态、修改指示和中英文文案。SFTP 层新增 `ReadFile`/`WriteFile` 命令和 `FileContent`/`FileSaved` 事件；russh-sftp 2.4.0 提供底层读写。新增 2 项 SFTP 单元测试和 1 项 Docker 集成测试（上传→读取→写入→重读验证内容一致）。GPUI 的 `on_drop` 仅支持拖入上传，不支持拖出到操作系统文件系统，拖放下载不可行；现有下载按钮+目录选择器已覆盖该工作流。
 26. 第一批 P0 高频功能已交付：命令栏新增地址栏（Alt+D 聚焦，输入 `user@host:port` 后 Enter 快速连接）；More 菜单新增"保存可见屏幕"，将终端可见文本保存为文件；终端渲染新增内置关键词高亮规则（error/failed/fatal/denied/warning/deprecated 等），无需配置即可自动高亮常见错误和警告；命令栏新增广播模式切换按钮（Bell 图标），一键将所有已连接会话加入同步输入目标；终端粘贴多行内容时弹出确认对话框，显示预览并支持 Enter 确认/Esc 取消；新增主机密钥验证对话框（未知主机密钥提示信任并保存到 known_hosts）；PublicKey 身份文件字段新增 Browse 文件选择器；修复 PublicKey 认证 BOM 处理和 `best_supported_rsa_hash` 容错。`cargo fmt --all`、验证脚本通过（218 项），Docker SSH 测试通过（10/10）。参考 `docs/FEATURE_GAP_ANALYSIS.md` 了解与 Netcatty/Xshell 的完整功能对比和后续实施计划。
 27. 第二批 P1 功能已交付：终端输出新增 OSC 序列解析——OSC 0/2 动态更新标签标题（shell 报告标题时自动同步到标签栏，已有标签组的会话保留原标签避免覆盖）；OSC 52 远程写入系统剪贴板（带 toast 确认）；OSC 9 远程桌面通知（通过 toast 显示）。SSH 数据循环中 `scan_osc_sequences` 在送入终端处理器前扫描 OSC 序列并发送对应 `UiEvent`。确认已有终端自动重连、工作区布局预设和标签组过滤功能。新增 `data-encoding` 依赖用于 OSC 52 base64 解码。`cargo fmt --all`、验证脚本通过（218 项），Docker SSH 测试通过（10/10）。
+28. 第三批 P2 功能已交付：终端搜索新增匹配高亮（`search_highlight` 字段 + `search_background` 调色板色，三套主题各一色）；侧栏主机行新增发行版图标自动检测（Ubuntu/Debian/CentOS/Alpine/Arch/Fedora/Kali/openSUSE/Amazon，`SidebarRow` 新增可选 `icon` 字段）；主机资料新增 `notes` 字段（版本化 JSON，会话编辑器可编辑，随资料保存到 `hosts.json`）。`cargo fmt --all`、验证脚本通过（218 项），Docker SSH 测试通过（10/10）。
 
 ## SSH 参考资料
 

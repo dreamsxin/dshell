@@ -754,6 +754,31 @@ fn parse_address(address: &str) -> Result<(String, String, u16), &'static str> {
     Ok((user, host, port))
 }
 
+fn host_icon(name: &str) -> IconName {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("ubuntu") {
+        IconName::CircleUser
+    } else if lower.contains("debian") {
+        IconName::BookOpen
+    } else if lower.contains("centos") || lower.contains("redhat") || lower.contains("rocky") {
+        IconName::SquareTerminal
+    } else if lower.contains("alpine") {
+        IconName::Star
+    } else if lower.contains("arch") {
+        IconName::Globe
+    } else if lower.contains("fedora") {
+        IconName::Heart
+    } else if lower.contains("kali") {
+        IconName::TriangleAlert
+    } else if lower.contains("opensuse") || lower.contains("suse") {
+        IconName::Palette
+    } else if lower.contains("amazon") || lower.contains("aws") {
+        IconName::Folder
+    } else {
+        IconName::CircleUser
+    }
+}
+
 fn valid_remote_entry_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
@@ -1187,6 +1212,7 @@ impl SessionLaunchSettings {
             keepalive_seconds: self.keepalive_seconds,
             reconnect: self.reconnect.clone(),
             login_commands: self.login_commands.clone(),
+            notes: String::new(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2261,6 +2287,7 @@ mod session_tests {
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
                 login_commands: crate::profiles::LoginCommandSettings::default(),
+                notes: String::new(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -2338,6 +2365,7 @@ mod session_tests {
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
             login_commands: crate::profiles::LoginCommandSettings::default(),
+            notes: String::new(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2515,6 +2543,7 @@ mod session_tests {
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
             login_commands: crate::profiles::LoginCommandSettings::default(),
+            notes: String::new(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -2584,6 +2613,7 @@ mod session_tests {
             keepalive_seconds: 0,
             reconnect: crate::profiles::ReconnectSettings::default(),
             login_commands: crate::profiles::LoginCommandSettings::default(),
+            notes: String::new(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -3316,6 +3346,7 @@ mod session_tests {
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
                 login_commands: crate::profiles::LoginCommandSettings::default(),
+                notes: String::new(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -3374,6 +3405,7 @@ mod session_tests {
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
                 login_commands: crate::profiles::LoginCommandSettings::default(),
+                notes: String::new(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -3431,6 +3463,7 @@ mod session_tests {
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
                 login_commands: crate::profiles::LoginCommandSettings::default(),
+                notes: String::new(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -3473,6 +3506,7 @@ mod session_tests {
                 keepalive_seconds: 0,
                 reconnect: crate::profiles::ReconnectSettings::default(),
                 login_commands: crate::profiles::LoginCommandSettings::default(),
+                notes: String::new(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -3558,6 +3592,7 @@ mod session_tests {
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
                 login_commands: LoginCommandSettings::default(),
+                notes: String::new(),
                 password: String::new(),
                 passphrase: String::new(),
                 jump_password: String::new(),
@@ -3788,6 +3823,7 @@ struct AppView {
     profile_auto_reconnect: bool,
     profile_login_commands_enabled: bool,
     profile_login_commands: Entity<InputState>,
+    profile_notes: Entity<InputState>,
     auth_method: AuthMethod,
     auth_profiles: Vec<AuthProfile>,
     auth_profile_store: Option<AuthProfileStore>,
@@ -3965,6 +4001,7 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search saved hosts"));
         let profile_group = cx.new(|cx| InputState::new(window, cx).placeholder("Ungrouped"));
         let profile_login_commands = cx.new(|cx| InputState::new(window, cx).multi_line());
+        let profile_notes = cx.new(|cx| InputState::new(window, cx).multi_line().rows(4));
         let group_editor_name = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let identity_file =
             cx.new(|cx| InputState::new(window, cx).placeholder("~/.ssh/id_ed25519"));
@@ -4161,6 +4198,7 @@ impl AppView {
             profile_auto_reconnect: false,
             profile_login_commands_enabled: false,
             profile_login_commands,
+            profile_notes,
             auth_method: AuthMethod::Password,
             auth_profiles,
             auth_profile_store,
@@ -5730,6 +5768,7 @@ impl AppView {
         self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.profile_login_commands, "", window, cx);
+        Self::set_input_value(&self.profile_notes, "", window, cx);
         Self::set_input_value(&self.host, "", window, cx);
         Self::set_input_value(&self.port, "22", window, cx);
         Self::set_input_value(&self.username, "", window, cx);
@@ -5812,6 +5851,7 @@ impl AppView {
             window,
             cx,
         );
+        Self::set_input_value(&self.profile_notes, &profile.notes, window, cx);
         Self::set_input_value(
             &self.reconnect_interval_seconds,
             &profile.reconnect.interval_seconds.to_string(),
@@ -5926,6 +5966,7 @@ impl AppView {
         self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.profile_login_commands, "", window, cx);
+        Self::set_input_value(&self.profile_notes, "", window, cx);
         Self::set_input_value(&self.host, &entry.host, window, cx);
         Self::set_input_value(&self.port, &entry.port.to_string(), window, cx);
         Self::set_input_value(&self.username, &entry.username, window, cx);
@@ -7235,6 +7276,7 @@ impl AppView {
             keepalive_seconds,
             reconnect,
             login_commands,
+            notes: self.profile_notes.read(cx).text().to_string(),
             password: String::new(),
             passphrase: String::new(),
             jump_password: String::new(),
@@ -9686,6 +9728,16 @@ impl AppView {
                     &tokens,
                     self.tr("Enter one command per line. Enabled commands run once in the visible terminal after the first successful login; reconnects do not replay them. Do not include passwords or other secrets."),
                 ))
+                .child(components::label_text(&tokens, self.tr("Notes")))
+                .child(
+                    TextInput::new(&self.profile_notes)
+                        .h(px(80.))
+                        .w_full(),
+                )
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("Optional notes for this host profile. Saved with the profile and not sent to the remote host."),
+                ))
                 .child(
                     div()
                         .flex()
@@ -10657,6 +10709,7 @@ impl AppView {
             format!("{}@{}:{}", profile.username, profile.host, profile.port),
         )
         .selected(is_selected)
+        .icon(host_icon(&profile.host))
         .actions(actions)
         .into_row()
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -10709,6 +10762,7 @@ impl AppView {
             entry.name.clone(),
             format!("{}@{}:{}", entry.username, entry.host, entry.port),
         )
+        .icon(host_icon(&entry.host))
         .actions(actions)
         .into_row()
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -22397,6 +22451,9 @@ fn render_terminal_run(
         .bg(rgb(run.background));
     if keyword_highlighted && !run.selected {
         cell_run = cell_run.bg(rgb(palette.selection_background));
+    }
+    if run.search_highlight && !run.selected {
+        cell_run = cell_run.bg(rgb(palette.search_background));
     }
     if run.selected {
         cell_run = cell_run

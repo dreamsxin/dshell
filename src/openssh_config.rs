@@ -368,6 +368,7 @@ fn build_profile(
         keepalive_seconds,
         reconnect: crate::profiles::ReconnectSettings::default(),
         login_commands: crate::profiles::LoginCommandSettings::default(),
+        notes: String::new(),
         password: String::new(),
         passphrase: String::new(),
         jump_password: String::new(),
