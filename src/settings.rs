@@ -63,6 +63,11 @@ pub struct AppSettings {
     pub alert_memory_percent: u8,
     #[serde(default = "default_alert_disk_percent")]
     pub alert_disk_percent: u8,
+    /// Directory watched for host profile sync (e.g. a Dropbox folder).
+    /// Empty disables sync. Profiles auto-export on save and auto-merge
+    /// on startup; the file never contains credentials.
+    #[serde(default)]
+    pub sync_directory: String,
 }
 
 impl Default for AppSettings {
@@ -84,6 +89,7 @@ impl Default for AppSettings {
             alert_cpu_percent: DEFAULT_ALERT_CPU_PERCENT,
             alert_memory_percent: DEFAULT_ALERT_MEMORY_PERCENT,
             alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
+            sync_directory: String::new(),
         }
     }
 }
@@ -131,6 +137,7 @@ impl AppSettings {
                 self.alert_disk_percent,
                 DEFAULT_ALERT_DISK_PERCENT,
             ),
+            sync_directory: self.sync_directory,
         }
     }
 
@@ -179,6 +186,8 @@ struct SettingsDocument {
     alert_memory_percent: u8,
     #[serde(default = "default_alert_disk_percent")]
     alert_disk_percent: u8,
+    #[serde(default)]
+    sync_directory: String,
 }
 
 pub struct SettingsStore {
@@ -257,6 +266,7 @@ impl SettingsStore {
             alert_cpu_percent: document.alert_cpu_percent,
             alert_memory_percent: document.alert_memory_percent,
             alert_disk_percent: document.alert_disk_percent,
+            sync_directory: document.sync_directory,
         }
         .normalized())
     }
@@ -291,6 +301,7 @@ impl SettingsStore {
             alert_cpu_percent: settings.alert_cpu_percent,
             alert_memory_percent: settings.alert_memory_percent,
             alert_disk_percent: settings.alert_disk_percent,
+            sync_directory: settings.sync_directory,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -470,6 +481,7 @@ mod tests {
             alert_cpu_percent: 75,
             alert_memory_percent: 82,
             alert_disk_percent: 91,
+            sync_directory: String::new(),
         };
         store.save(&settings).unwrap();
         assert_eq!(
@@ -507,6 +519,7 @@ mod tests {
                 alert_cpu_percent: 0,
                 alert_memory_percent: 101,
                 alert_disk_percent: 0,
+                sync_directory: String::new(),
             })
             .unwrap();
         let loaded = store.load().unwrap();
@@ -607,6 +620,7 @@ mod tests {
             alert_cpu_percent: DEFAULT_ALERT_CPU_PERCENT,
             alert_memory_percent: DEFAULT_ALERT_MEMORY_PERCENT,
             alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
+            sync_directory: String::new(),
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);

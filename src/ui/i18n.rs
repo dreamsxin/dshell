@@ -658,6 +658,12 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Export session trace" => "导出会话跟踪",
         "Session trace exported ({entries} entries)." => "会话跟踪已导出（{entries} 条）。",
         "No trace entries collected for this session." => "该会话无跟踪记录。",
+        "Profile sync" => "资料同步",
+        "Sync directory" => "同步目录",
+        "Choose profile sync directory" => "选择资料同步目录",
+        "Point this at a cloud storage folder (e.g. Dropbox). Host profiles auto-export there on every save and merge on startup; the synced file never contains credentials." => {
+            "指向云存储文件夹（如 Dropbox）。主机资料在每次保存时自动导出到该目录，并在启动时自动合并；同步文件绝不包含凭据。"
+        }
         "Receive ZMODEM file" => "接收 ZMODEM 文件",
         "Start script recording" => "开始脚本录制",
         "Stop script recording" => "停止脚本录制",

@@ -747,6 +747,13 @@ const ARCHIVE_EXTENSIONS: [&str; 9] = [
 /// (`/...`) are recognised, because relative paths require OSC 7 directory
 /// tracking which dshell does not yet implement. Duplicate paths are
 /// deduplicated. Returns an empty vec when no archives are visible.
+const SYNC_PROFILE_FILE_NAME: &str = "dshell-profiles.json";
+
+/// Compute the profile export path inside a user-configured sync directory.
+fn sync_profile_path(directory: &str) -> PathBuf {
+    Path::new(directory).join(SYNC_PROFILE_FILE_NAME)
+}
+
 fn find_archives_in_text(text: &str) -> Vec<(String, String)> {
     let mut found: Vec<(String, String)> = Vec::new();
     for word in text.split_whitespace() {
@@ -2367,31 +2374,33 @@ fn remove_session(
 
 #[cfg(test)]
 mod session_tests {
+    use std::path::Path;
+
     use super::{
         AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, GroupLaunchState,
-        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, PaletteCommand, ScriptRecording,
-        SessionEditorEscape, SessionEditorKey, SessionLaunchSettings, SessionSplit, SessionState,
-        SftpViewState, SplitOrientation, SshSession, TabColor, TerminalFrame, TerminalRequest,
-        TerminalSize, UiEvent, app_shortcut, apply_session_event, collapsed_group_key,
-        dragged_panel_width, effective_terminal_theme, enqueue_session_request,
-        filesystem_usage_percent, find_archives_in_text, forget_stopped_forward, format_alert_time,
-        format_log_time, format_rate, format_storage_kib, group_launch_candidates, hex_dump,
-        is_authentication_failure, is_sftp_transfer_command, keyword_matches, local_upload_kind,
-        mark_sftp_ready, matching_saved_profile_for_session, memory_usage_percent,
-        merge_unique_profiles, move_profile_to_group, mpsc, next_monitor_interval,
-        next_session_switcher_index, palette_matching_commands, parse_alert_percent,
-        recall_compose_history, recent_sftp_directories_for_target, remember_compose_history,
-        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
-        render_script_recording, render_session_trace, reorder_group_order, reorder_session_ids,
-        saved_profile_for_session, search_result_message, server_alert_observations,
-        session_accepts_requests, session_editor_escape, session_editor_key,
-        session_matches_tab_group, session_matches_tab_group_selection, session_matches_target,
-        session_switcher_matches_ids, session_tab_group_choices,
-        session_tab_group_filter_after_selection, session_terminal_size_for_split,
-        session_trace_push, split_panel_terminal_size, synchronized_group_target_ids,
-        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
-        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
-        watch,
+        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, PaletteCommand,
+        SYNC_PROFILE_FILE_NAME, ScriptRecording, SessionEditorEscape, SessionEditorKey,
+        SessionLaunchSettings, SessionSplit, SessionState, SftpViewState, SplitOrientation,
+        SshSession, TabColor, TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut,
+        apply_session_event, collapsed_group_key, dragged_panel_width, effective_terminal_theme,
+        enqueue_session_request, filesystem_usage_percent, find_archives_in_text,
+        forget_stopped_forward, format_alert_time, format_log_time, format_rate,
+        format_storage_kib, group_launch_candidates, hex_dump, is_authentication_failure,
+        is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
+        matching_saved_profile_for_session, memory_usage_percent, merge_unique_profiles,
+        move_profile_to_group, mpsc, next_monitor_interval, next_session_switcher_index,
+        palette_matching_commands, parse_alert_percent, recall_compose_history,
+        recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
+        remove_profile_group, remove_session, rename_profile_group, render_script_recording,
+        render_session_trace, reorder_group_order, reorder_session_ids, saved_profile_for_session,
+        search_result_message, server_alert_observations, session_accepts_requests,
+        session_editor_escape, session_editor_key, session_matches_tab_group,
+        session_matches_tab_group_selection, session_matches_target, session_switcher_matches_ids,
+        session_tab_group_choices, session_tab_group_filter_after_selection,
+        session_terminal_size_for_split, session_trace_push, split_panel_terminal_size,
+        sync_profile_path, synchronized_group_target_ids, synchronized_input_targets,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
+        unique_duplicate_session_title, update_sessions_for_profile, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -3412,6 +3421,16 @@ echo"
     }
 
     #[test]
+    fn sync_profile_path_joins_the_expected_file_name() {
+        let path = sync_profile_path("C:/Users/me/Dropbox");
+        assert!(path.ends_with("dshell-profiles.json"));
+        assert_eq!(
+            sync_profile_path(""),
+            Path::new("").join(SYNC_PROFILE_FILE_NAME)
+        );
+    }
+
+    #[test]
     fn hex_dump_formats_offsets_hex_and_ascii_columns() {
         let dump = hex_dump("AB");
         let lines = dump.lines().collect::<Vec<_>>();
@@ -4404,6 +4423,8 @@ struct AppView {
     lock_message: String,
     lock_password_configured: String,
     setting_lock_password: Entity<InputState>,
+    setting_sync_directory: Entity<InputState>,
+    pending_sync_directory: Option<String>,
     session_switcher_selected: usize,
     session_switcher_scroll: ScrollHandle,
     compose_input: Entity<InputState>,
@@ -4567,6 +4588,7 @@ impl AppView {
         password.update(cx, |state, cx| state.set_masked(true, window, cx));
         let terminal_size =
             Self::size_for_window(window, &settings, settings.sidebar_collapsed, false);
+        let sync_directory_init = settings.sync_directory.clone();
         let (profile_store, data, profiles_ready, profile_message) = match ProfileStore::discover()
         {
             Ok(store) => match store.load() {
@@ -4779,6 +4801,7 @@ impl AppView {
             file_editor: None,
             file_editor_confirm_close: None,
             pending_identity_file: None,
+            pending_sync_directory: None,
             host_key_verification: None,
             pending_paste: None,
             paste_confirm_lines: 0,
@@ -4795,6 +4818,8 @@ impl AppView {
             compose_input,
             lock_password,
             setting_lock_password: cx.new(|cx| InputState::new(window, cx).placeholder("Optional")),
+            setting_sync_directory: cx
+                .new(|cx| InputState::new(window, cx).default_value(sync_directory_init)),
             compose_visible: false,
             compose_history: Vec::new(),
             compose_recall: 0,
@@ -4816,6 +4841,7 @@ impl AppView {
         };
         view.set_language_placeholders(window, cx);
         view.refresh_existing_keys();
+        view.sync_import_profiles();
         view
     }
 
@@ -7488,7 +7514,48 @@ impl AppView {
         })?;
         self.profiles = profiles;
         self.recent = recent;
+        self.sync_export_profiles();
         Ok(())
+    }
+
+    /// Auto-export host profiles to the configured sync directory (e.g. a
+    /// Dropbox folder). Failures surface as a status message but never block
+    /// the local save; the exported file never contains credentials.
+    fn sync_export_profiles(&mut self) {
+        let directory = self.settings.sync_directory.trim().to_owned();
+        if directory.is_empty() {
+            return;
+        }
+        let path = sync_profile_path(&directory);
+        if let Err(error) = profiles::export_profiles(&path, &self.profiles) {
+            self.status = format!("Profile sync export failed: {error}");
+        }
+    }
+
+    /// Merge profiles found in the sync directory into the local store,
+    /// skipping names that already exist locally. Returns the number of
+    /// imported profiles.
+    fn sync_import_profiles(&mut self) -> usize {
+        let directory = self.settings.sync_directory.trim().to_owned();
+        if directory.is_empty() {
+            return 0;
+        }
+        let path = sync_profile_path(&directory);
+        let Ok(imported) = profiles::import_profiles(&path) else {
+            return 0;
+        };
+        let (merged, added, _skipped) = {
+            let mut working = self.profiles.clone();
+            let (added, skipped) = merge_unique_profiles(&mut working, imported);
+            (working, added, skipped)
+        };
+        if added > 0
+            && let Err(error) = self.save_workspace(merged, self.recent.clone())
+        {
+            self.status = format!("Profile sync import failed: {error}");
+            return 0;
+        }
+        added
     }
 
     fn persist_forward_rule(
@@ -16900,6 +16967,28 @@ impl AppView {
         cx.notify();
     }
 
+    fn browse_sync_directory(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(self.tr("Choose profile sync directory").into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(mut paths))) => {
+                if let Some(directory) = paths.pop() {
+                    let _ = this.update(cx, |view, cx| {
+                        view.pending_sync_directory =
+                            Some(directory.to_string_lossy().into_owned());
+                        cx.notify();
+                    });
+                }
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
     fn store_lock_password_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entered = self.setting_lock_password.read(cx).text().to_string();
         self.lock_password_configured = entered;
@@ -17885,6 +17974,12 @@ impl AppView {
             alert_cpu_percent,
             alert_memory_percent,
             alert_disk_percent,
+            sync_directory: self
+                .setting_sync_directory
+                .read(cx)
+                .value()
+                .trim()
+                .to_owned(),
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -18568,6 +18663,45 @@ impl AppView {
                             .child(components::help_text(
                                 &tokens,
                                 self.tr("Required when locking the screen. The password is kept only in this running session and is not written to settings or logs."),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(components::section_label(&tokens, self.tr("Profile sync")))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_end()
+                                    .gap(px(ui_tokens::SPACE_2))
+                                    .child(
+                                        div().flex_1().child(components::field(
+                                            &tokens,
+                                            self.tr("Sync directory"),
+                                            &self.setting_sync_directory,
+                                            false,
+                                        )),
+                                    )
+                                    .child(
+                                        components::button(
+                                            &tokens,
+                                            "sync-directory-browse",
+                                            self.tr("Browse"),
+                                            ButtonKind::Secondary,
+                                            ButtonSize::Small,
+                                        )
+                                        .on_click(cx.listener(
+                                            |this, _, window, cx| {
+                                                this.browse_sync_directory(window, cx);
+                                            },
+                                        )),
+                                    ),
+                            )
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("Point this at a cloud storage folder (e.g. Dropbox). Host profiles auto-export there on every save and merge on startup; the synced file never contains credentials."),
                             )),
                     )
                     .child(components::help_text(
@@ -24011,6 +24145,9 @@ impl Render for AppView {
         if let Some(path) = self.pending_identity_file.take() {
             Self::set_input_value(&self.identity_file, &path, window, cx);
             self.show_toast(self.tr("Identity file selected."), Tone::Success, cx);
+        }
+        if let Some(directory) = self.pending_sync_directory.take() {
+            Self::set_input_value(&self.setting_sync_directory, &directory, window, cx);
         }
         if std::mem::take(&mut self.overlay_focus_pending) {
             window.focus(&self.overlay_focus);

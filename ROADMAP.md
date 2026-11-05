@@ -227,6 +227,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 33. ZMODEM 接收已交付：`src/zmodem.rs` 纯协议模块（CRC-16/KERMIT 手写实现 + 逐字节解析器 + 响应帧构建器，6 项测试）；More 菜单显式启用接收，传输期间原始字节旁路 VT 解析器；文件落入 Downloads 目录，路径逃逸防护 + 1 MiB 上限。Docker SSH 10/10。
 
+34. 云同步（同步文件夹）已交付：Settings 配置同步目录，保存时自动导出、启动时自动合并（按名称去重），同步文件无凭据。`sync_profile_path` 测试覆盖。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。
