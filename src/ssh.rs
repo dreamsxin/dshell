@@ -125,6 +125,15 @@ pub struct ServerProcess {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ServerDockerContainer {
+    pub id: String,
+    pub image: String,
+    pub names: String,
+    pub status: String,
+    pub ports: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerNetworkInterface {
     pub name: String,
     pub state: String,
@@ -235,6 +244,7 @@ pub struct ServerPowerActionResult {
 
 pub enum ServerData {
     Metrics(ServerMetrics),
+    Containers(Vec<ServerDockerContainer>),
     Processes(Vec<ServerProcess>),
     Network(Vec<ServerNetworkInterface>),
     Storage(Vec<ServerMount>),
@@ -248,6 +258,7 @@ pub enum ServerData {
 }
 
 pub enum ServerDataError {
+    Containers(String),
     Metrics(String),
     Processes(String),
     Network(String),
@@ -1145,6 +1156,9 @@ async fn run_connection_attempt_with_known_hosts(
                     Some(TerminalRequest::RefreshServerMetrics) => {
                         refresh_server_metrics(&mut session, &events).await;
                     }
+                    Some(TerminalRequest::RefreshDockerContainers) => {
+                        refresh_server_docker_containers(&mut session, &events).await;
+                    }
                     Some(TerminalRequest::RefreshServerProcesses) => {
                         refresh_server_processes(&mut session, &events).await;
                     }
@@ -1609,6 +1623,9 @@ const SERVER_METRICS_COMMAND: &str = r##"printf '%s\n' 'DSHELL_METRICS_V1'; prin
 const SERVER_PROCESSES_COMMAND: &str = r##"printf 'DSHELL_PROCESSES_V1\n'; ps -eo pid=,user=,pcpu=,pmem=,stat=,args= --sort=-pcpu 2>/dev/null | head -n 50 | awk '{pid=$1; user=$2; cpu=$3; mem=$4; state=$5; $1=$2=$3=$4=$5=""; sub(/^[ \t]+/, ""); print "PROC\t" pid "\t" user "\t" cpu "\t" mem "\t" state "\t" $0}'"##;
 const MAX_SERVER_PROCESSES: usize = 50;
 
+const SERVER_DOCKER_COMMAND: &str = r##"printf 'DSHELL_DOCKER_V1\n'; if command -v docker >/dev/null 2>&1; then docker ps --format '{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | head -n 50; fi"##;
+const MAX_SERVER_DOCKER_CONTAINERS: usize = 50;
+
 const SERVER_NETWORK_COMMAND: &str = r##"printf 'DSHELL_NETWORK_V1\n'; if command -v ip >/dev/null 2>&1; then ip -o -brief addr show 2>/dev/null | head -n 32 | awk '{name=$1; state=$2; $1=$2=""; sub(/^[ \t]+/, ""); print "IFACE\t" name "\t" state "\t" $0}'; else for path in /sys/class/net/*; do [ -e "$path" ] || continue; name=${path##*/}; state=$(cat "$path/operstate" 2>/dev/null || printf unknown); printf 'IFACE\t%s\t%s\t%s\n' "$name" "$state" 'addresses unavailable'; done | head -n 32; fi"##;
 const MAX_SERVER_NETWORK_INTERFACES: usize = 32;
 
@@ -2021,6 +2038,36 @@ fn parse_service_logs(output: &str, name: &str) -> Result<ServerServiceLogs> {
     })
 }
 
+fn parse_server_docker_containers(output: &str) -> Result<Vec<ServerDockerContainer>> {
+    if !output.lines().any(|line| line.trim() == "DSHELL_DOCKER_V1") {
+        bail!("The remote host did not return a supported Docker response.");
+    }
+    let mut containers = Vec::new();
+    for line in output.lines() {
+        if line.trim() == "DSHELL_DOCKER_V1" || line.trim().is_empty() {
+            continue;
+        }
+        let fields = line.splitn(5, '\t').collect::<Vec<_>>();
+        if fields.len() != 5 {
+            bail!("The remote host returned a malformed Docker row.");
+        }
+        if fields.iter().any(|field| field.trim().is_empty()) {
+            bail!("The remote host returned an incomplete Docker row.");
+        }
+        containers.push(ServerDockerContainer {
+            id: fields[0].trim().to_owned(),
+            image: fields[1].trim().to_owned(),
+            names: fields[2].trim().to_owned(),
+            status: fields[3].trim().to_owned(),
+            ports: fields[4].trim().to_owned(),
+        });
+        if containers.len() >= MAX_SERVER_DOCKER_CONTAINERS {
+            break;
+        }
+    }
+    Ok(containers)
+}
+
 async fn refresh_server_processes(
     session: &mut client::Handle<KnownHostsHandler>,
     events: &mpsc::Sender<UiEvent>,
@@ -2065,6 +2112,56 @@ async fn refresh_server_processes(
             let _ = events
                 .send(UiEvent::ServerMetricsError(ServerDataError::Processes(
                     "Timed out waiting for server processes.".to_owned(),
+                )))
+                .await;
+        }
+    }
+}
+
+async fn refresh_server_docker_containers(
+    session: &mut client::Handle<KnownHostsHandler>,
+    events: &mpsc::Sender<UiEvent>,
+) {
+    let result = timeout(Duration::from_secs(3), async {
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("could not open a Docker channel")?;
+        channel
+            .exec(true, SERVER_DOCKER_COMMAND)
+            .await
+            .context("could not start the Docker command")?;
+        let mut output = Vec::new();
+        let mut stream = channel.into_stream();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .context("could not read the Docker response")?;
+        if output.len() > 64 * 1024 {
+            bail!("The Docker response was too large.");
+        }
+        let output = String::from_utf8_lossy(&output);
+        parse_server_docker_containers(&output)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(containers)) => {
+            let _ = events
+                .send(UiEvent::ServerMetrics(ServerData::Containers(containers)))
+                .await;
+        }
+        Ok(Err(error)) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Containers(
+                    format!("{error:#}"),
+                )))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(UiEvent::ServerMetricsError(ServerDataError::Containers(
+                    "The Docker request timed out.".to_owned(),
                 )))
                 .await;
         }
@@ -3036,11 +3133,12 @@ mod tests {
         MAX_SERVER_SESSIONS, ReconnectSettings, ServerPowerAction, ServiceAction, UiEvent,
         can_answer_with_password, connection_info_for_key, is_known_host_key,
         is_retryable_reconnect_error, parse_power_action, parse_process_action,
-        parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
-        parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
-        parse_service_logs, power_action_command, process_termination_command,
-        run_connection_with_known_hosts, sanitize_zmodem_name, service_action_command,
-        service_logs_command, valid_process_pid, valid_service_name, wait_before_reconnect,
+        parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
+        parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
+        parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
+        process_termination_command, run_connection_with_known_hosts, sanitize_zmodem_name,
+        service_action_command, service_logs_command, valid_process_pid, valid_service_name,
+        wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -3450,6 +3548,41 @@ mod tests {
 
         let error = is_known_host_key("localhost", 13265, &changed_key, &path).unwrap_err();
         assert!(!is_retryable_reconnect_error(&error));
+    }
+
+    #[test]
+    fn parse_server_docker_containers_parses_rows_and_rejects_malformed() {
+        let output = "DSHELL_DOCKER_V1
+abc123	nginx:latest	web	Up 2 hours	0.0.0.0:80->80/tcp
+";
+        let containers = parse_server_docker_containers(output).unwrap();
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].id, "abc123");
+        assert_eq!(containers[0].image, "nginx:latest");
+        assert_eq!(containers[0].names, "web");
+        assert_eq!(containers[0].status, "Up 2 hours");
+        assert_eq!(containers[0].ports, "0.0.0.0:80->80/tcp");
+
+        // Empty output means no containers.
+        assert_eq!(
+            parse_server_docker_containers(
+                "DSHELL_DOCKER_V1
+"
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+        // Missing header fails.
+        assert!(parse_server_docker_containers("abc123	img	n	s	p").is_err());
+        // Incomplete row fails.
+        assert!(
+            parse_server_docker_containers(
+                "DSHELL_DOCKER_V1
+abc	img	name"
+            )
+            .is_err()
+        );
     }
 
     #[test]

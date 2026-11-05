@@ -1415,6 +1415,9 @@ impl GroupLaunchState {
 #[derive(Clone, Debug, Default)]
 struct ServerMetricsViewState {
     metrics: Option<ServerMetrics>,
+    containers: Vec<crate::ssh::ServerDockerContainer>,
+    containers_loading: bool,
+    containers_message: String,
     loading: bool,
     message: String,
     power_action_loading: bool,
@@ -1736,6 +1739,15 @@ impl SshSession {
                 self.server_metrics.metrics = Some(metrics);
                 self.server_metrics.loading = false;
                 self.server_metrics.message.clear();
+            }
+            UiEvent::ServerMetrics(ServerData::Containers(containers)) => {
+                self.server_metrics.containers = containers;
+                self.server_metrics.containers_loading = false;
+                self.server_metrics.containers_message.clear();
+            }
+            UiEvent::ServerMetricsError(ServerDataError::Containers(message)) => {
+                self.server_metrics.containers_message = message;
+                self.server_metrics.containers_loading = false;
             }
             UiEvent::ServerMetrics(ServerData::Processes(processes)) => {
                 self.server_metrics.processes = processes;
@@ -4250,6 +4262,7 @@ struct AppView {
     inspector_forwards_open: bool,
     inspector_info_open: bool,
     inspector_server_open: bool,
+    inspector_docker_open: bool,
     inspector_processes_open: bool,
     inspector_network_open: bool,
     inspector_storage_open: bool,
@@ -4644,6 +4657,7 @@ impl AppView {
             inspector_forwards_open: true,
             inspector_info_open: true,
             inspector_server_open: true,
+            inspector_docker_open: false,
             inspector_processes_open: true,
             inspector_network_open: true,
             inspector_storage_open: true,
@@ -15011,6 +15025,40 @@ impl AppView {
         cx.notify();
     }
 
+    fn refresh_server_docker_containers(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let not_connected = self.tr("Connect to the server before refreshing containers.");
+        let not_accepting = self.tr("The SSH session is not accepting requests.");
+        let queue_full = self.tr("The SSH request queue is full.");
+        let Some(session) = self.session_mut(session_id) else {
+            return;
+        };
+        if session.state != SessionState::Connected {
+            session.server_metrics.containers_message = not_connected;
+            cx.notify();
+            return;
+        }
+        let Some(command_tx) = &session.command_tx else {
+            session.server_metrics.containers_message = not_accepting;
+            cx.notify();
+            return;
+        };
+        match command_tx.try_send(TerminalRequest::RefreshDockerContainers) {
+            Ok(()) => {
+                session.server_metrics.containers_loading = true;
+                session.server_metrics.containers_message.clear();
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                session.server_metrics.containers_message = queue_full;
+                session.server_metrics.containers_loading = false;
+            }
+            Err(_) => {
+                session.server_metrics.containers_message = not_accepting;
+                session.server_metrics.containers_loading = false;
+            }
+        }
+        cx.notify();
+    }
+
     fn refresh_server_network(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let not_connected = self.tr("Connect to the server before refreshing network information.");
         let not_accepting = self.tr("The SSH session is not accepting requests.");
@@ -22846,6 +22894,112 @@ impl AppView {
                 ));
         }
 
+        let docker_containers_open = self.inspector_docker_open;
+        body = body.child(
+            components::collapsible_header(
+                tokens,
+                "inspector-docker",
+                self.tr("Docker"),
+                docker_containers_open,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_docker_open = !this.inspector_docker_open;
+                cx.notify();
+            })),
+        );
+        if docker_containers_open {
+            let mut docker_group = div()
+                .flex()
+                .flex_col()
+                .gap(px(ui_tokens::SPACE_2))
+                .p(px(ui_tokens::SPACE_3))
+                .border_b_1()
+                .border_color(tokens.border_subtle);
+            let containers_loading = server_metrics.containers_loading;
+            let docker_refresh_label = if containers_loading {
+                self.tr("Refreshing...")
+            } else {
+                self.tr("Refresh")
+            };
+            docker_group = docker_group.child(
+                components::button(
+                    tokens,
+                    ("inspector-refresh-docker", session_id),
+                    docker_refresh_label,
+                    ButtonKind::Secondary,
+                    ButtonSize::Small,
+                )
+                .disabled(containers_loading || state != SessionState::Connected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.refresh_server_docker_containers(session_id, cx);
+                })),
+            );
+            if !server_metrics.containers_message.is_empty() {
+                docker_group = docker_group.child(components::warning_text(
+                    &tokens,
+                    server_metrics.containers_message.clone(),
+                ));
+            }
+            if server_metrics.containers.is_empty() && !containers_loading {
+                docker_group = docker_group.child(components::empty_state(
+                    &tokens,
+                    self.tr("No containers"),
+                    self.tr("Refresh to list running Docker containers."),
+                ));
+            }
+            for (container_index, container) in server_metrics.containers.iter().enumerate() {
+                docker_group = docker_group.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(ui_tokens::SPACE_1))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .bg(tokens.surface)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(ui_tokens::SPACE_2))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_size(px(ui_tokens::FONT_CAPTION))
+                                        .text_color(tokens.text_primary)
+                                        .child(container.names.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_size(px(ui_tokens::FONT_CAPTION))
+                                        .text_color(tokens.text_secondary)
+                                        .child(container.status.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
+                                .child(container.image.clone()),
+                        )
+                        .when(!container.ports.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_size(px(ui_tokens::FONT_CAPTION))
+                                    .text_color(tokens.text_secondary)
+                                    .child(container.ports.clone()),
+                            )
+                        }),
+                );
+            }
+            body = body.child(docker_group);
+        }
         body = body.child(
             components::collapsible_header(
                 tokens,

@@ -662,6 +662,10 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Reconnect the sessions that were active when dshell last exited. Only sessions matching a saved host profile are restored; credentials are never saved." => {
             "重新连接 dshell 上次退出时活跃的会话。仅恢复匹配已保存主机资料的会话；绝不保存凭据。"
         }
+        "Docker" => "Docker",
+        "No containers" => "无容器",
+        "Refresh to list running Docker containers." => "刷新以列出运行中的 Docker 容器。",
+        "Connect to the server before refreshing containers." => "请先连接服务器再刷新容器。",
         "Profile sync" => "资料同步",
         "Sync directory" => "同步目录",
         "Choose profile sync directory" => "选择资料同步目录",

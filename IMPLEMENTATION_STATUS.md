@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-06，Windows/MSVC：完成 Docker 容器面板。`ssh.rs` 新增 `ServerDockerContainer`（id/image/names/status/ports）、`SERVER_DOCKER_COMMAND`（docker ps --format 制表符分隔，3 秒超时 + 64 KiB 上限，与现有探针一致）、`parse_server_docker_containers` 纯解析函数（表头校验、50 条上限、畸形行拒绝）、`ServerData::Containers`/`ServerDataError::Containers` 事件、`TerminalRequest::RefreshDockerContainers` 请求。检查器新增 Docker 分组（折叠头 + 刷新按钮 + 容器卡片列表，空态与错误提示），跟随现有 Server health 模式。1 项解析测试。244 项 + Docker 10/10。
+
 2026-11-06，Windows/MSVC：完成内联图片功能。新增 `src/inline_image.rs`：逐字节 OSC 1337 收集器（跨 SSH 包边界匹配 `ESC ] 1337 ; File=` 前缀、BEL 与 ST 两种终止符、16 MiB 上限、失步自动重同步），`parse_osc1337_payload` 解析 name=（含百分号解码）/size=/inline= 元数据并 base64 解码，`sanitize_inline_image_name` 只保留最终路径段（不安全名回退为时间戳名）。SSH 数据循环集成：非 ZMODEM 活跃期间每字节喂入收集器，完成即保存到 Downloads 目录并发 toast 通知；VT 解析器原生吞掉 OSC 序列，终端画面不受影响。5 项单元测试（跨块边界、ST 终止、元数据解析、非 inline 拒绝、路径清洗）。243 项 + Docker 10/10。
 
 2026-11-06，Windows/MSVC：完成会话恢复功能。新增 `src/restore.rs`：`RestoreEntry`（仅连接标识 name/host/port/username，无凭据）+ 版本化 JSON 存储（`SessionRestoreStore`，discover 模式与 ProfileStore 一致，clear 幂等，未知版本静默忽略），2 项单元测试。`SshSession` 状态变化驱动持久化：AppView 事件循环在 Connected/Disconnected/Failed 事件后及 `close_session` 后调用 `persist_session_restore`（&mut self，仅保存当前 Connected 会话，空列表即清空文件）。启动恢复：Settings 新增 `restore_sessions` 开关（默认关闭）+ Profile sync 分组中的 toggle；开启时 `AppView::new` 末尾调用 `restore_previous_sessions`，仅重连匹配已保存主机资料的条目（按 host+port+username 匹配，凭据走资料自身认证方法），不匹配的条目跳过。`AppSettings`/`SettingsDocument` 新增 `restore_sessions` 字段（serde default，向后兼容）。验证：238 项 + Docker SSH 10/10。

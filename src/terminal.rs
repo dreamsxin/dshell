@@ -182,6 +182,7 @@ pub enum TerminalRequest {
     },
     RefreshServerMetrics,
     RefreshServerProcesses,
+    RefreshDockerContainers,
     RefreshServerNetwork,
     RefreshServerStorage,
     RefreshServerListeners,
