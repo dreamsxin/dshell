@@ -229,6 +229,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 34. 云同步（同步文件夹）已交付：Settings 配置同步目录，保存时自动导出、启动时自动合并（按名称去重），同步文件无凭据。`sync_profile_path` 测试覆盖。
 
+35. 会话恢复已交付：`restore.json` 记录连接标识（无凭据），Connected/Disconnected/Failed/关闭会话时重写；Settings 开关（默认关）启用启动自动重连，仅匹配已保存资料的条目。`restore.rs` 2 项测试。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。

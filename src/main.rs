@@ -5,6 +5,7 @@ mod keygen;
 mod log;
 mod openssh_config;
 mod profiles;
+mod restore;
 mod settings;
 mod sftp;
 mod shortcuts;
@@ -4425,6 +4426,7 @@ struct AppView {
     setting_lock_password: Entity<InputState>,
     setting_sync_directory: Entity<InputState>,
     pending_sync_directory: Option<String>,
+    session_restore: Option<restore::SessionRestoreStore>,
     session_switcher_selected: usize,
     session_switcher_scroll: ScrollHandle,
     compose_input: Entity<InputState>,
@@ -4802,6 +4804,7 @@ impl AppView {
             file_editor_confirm_close: None,
             pending_identity_file: None,
             pending_sync_directory: None,
+            session_restore: restore::SessionRestoreStore::discover().ok(),
             host_key_verification: None,
             pending_paste: None,
             paste_confirm_lines: 0,
@@ -4842,6 +4845,7 @@ impl AppView {
         view.set_language_placeholders(window, cx);
         view.refresh_existing_keys();
         view.sync_import_profiles();
+        view.restore_previous_sessions(window, cx);
         view
     }
 
@@ -8521,9 +8525,18 @@ impl AppView {
                                 }
                                 _ => None,
                             };
+                            let restore_changed = matches!(
+                                &event,
+                                UiEvent::Disconnected
+                                    | UiEvent::Failed(_)
+                                    | UiEvent::Status(_)
+                            );
                             let event_applied = apply_session_event(&mut view.sessions, id, event);
                             if event_applied {
                                 cx.notify();
+                            }
+                            if event_applied && restore_changed {
+                                view.persist_session_restore();
                             }
                             if event_applied
                                 && let Some((status, message, forwards)) = reconnect_data
@@ -8561,6 +8574,9 @@ impl AppView {
                                 && credentials.contains_secret()
                             {
                                 view.cache_credentials_for_session(key, &credentials);
+                            }
+                            if connection_established || failure.is_some() {
+                                view.persist_session_restore();
                             }
                             if failure.is_some() {
                                 view.pending_credentials.remove(&id);
@@ -8794,7 +8810,68 @@ impl AppView {
         }
         window.focus(&self.terminal_focus);
         cx.notify();
+        self.persist_session_restore();
         self.present_next_auth_prompt(cx);
+    }
+
+    /// Persist the set of connected sessions (connection identity only) so
+    /// the next launch can restore them when the setting is enabled.
+    fn persist_session_restore(&mut self) {
+        let Some(store) = self.session_restore.as_ref() else {
+            return;
+        };
+        let connected = self
+            .sessions
+            .iter()
+            .filter(|session| session.state == SessionState::Connected)
+            .map(|session| restore::RestoreEntry {
+                name: session
+                    .profile_name
+                    .clone()
+                    .unwrap_or_else(|| session.title.clone()),
+                host: session.host.clone(),
+                port: session.port,
+                username: session.username.clone(),
+            })
+            .collect::<Vec<_>>();
+        let result = if connected.is_empty() {
+            store.clear()
+        } else {
+            store.save(&connected)
+        };
+        if let Err(error) = result {
+            self.status = format!("Could not save session restore state: {error}");
+        }
+    }
+
+    /// Reconnect sessions recorded by the previous run. Only entries that
+    /// match a saved host profile are restored; entries without credentials
+    /// would stall the startup flow on interactive prompts.
+    fn restore_previous_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings.restore_sessions {
+            return;
+        }
+        let Some(store) = self.session_restore.as_ref() else {
+            return;
+        };
+        let Ok(entries) = store.load() else {
+            return;
+        };
+        for entry in entries {
+            let Some(profile) = self
+                .profiles
+                .iter()
+                .find(|profile| {
+                    profile.host.eq_ignore_ascii_case(&entry.host)
+                        && profile.port == entry.port
+                        && profile.username.eq_ignore_ascii_case(&entry.username)
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            self.connect_saved_profile(&profile, window, cx);
+        }
     }
 
     fn send_key(
@@ -17980,6 +18057,7 @@ impl AppView {
                 .value()
                 .trim()
                 .to_owned(),
+            restore_sessions: self.settings.restore_sessions,
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -18702,6 +18780,28 @@ impl AppView {
                             .child(components::help_text(
                                 &tokens,
                                 self.tr("Point this at a cloud storage folder (e.g. Dropbox). Host profiles auto-export there on every save and merge on startup; the synced file never contains credentials."),
+                            ))
+                            .child(
+                                components::toggle_switch(
+                                    &tokens,
+                                    "settings-restore-sessions",
+                                    self.tr("Restore sessions on startup"),
+                                    self.settings.restore_sessions,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings.restore_sessions =
+                                        !this.settings.restore_sessions;
+                                    if let Some(store) = this.settings_store.as_ref()
+                                        && let Err(error) = store.save(&this.settings)
+                                    {
+                                        this.settings_message = error;
+                                    }
+                                    cx.notify();
+                                })),
+                            )
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("Reconnect the sessions that were active when dshell last exited. Only sessions matching a saved host profile are restored; credentials are never saved."),
                             )),
                     )
                     .child(components::help_text(

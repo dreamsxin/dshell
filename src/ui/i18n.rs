@@ -658,6 +658,10 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Export session trace" => "导出会话跟踪",
         "Session trace exported ({entries} entries)." => "会话跟踪已导出（{entries} 条）。",
         "No trace entries collected for this session." => "该会话无跟踪记录。",
+        "Restore sessions on startup" => "启动时恢复会话",
+        "Reconnect the sessions that were active when dshell last exited. Only sessions matching a saved host profile are restored; credentials are never saved." => {
+            "重新连接 dshell 上次退出时活跃的会话。仅恢复匹配已保存主机资料的会话；绝不保存凭据。"
+        }
         "Profile sync" => "资料同步",
         "Sync directory" => "同步目录",
         "Choose profile sync directory" => "选择资料同步目录",

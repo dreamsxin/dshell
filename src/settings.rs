@@ -68,6 +68,9 @@ pub struct AppSettings {
     /// on startup; the file never contains credentials.
     #[serde(default)]
     pub sync_directory: String,
+    /// Reconnect the sessions that were active when dshell last exited.
+    #[serde(default)]
+    pub restore_sessions: bool,
 }
 
 impl Default for AppSettings {
@@ -90,6 +93,7 @@ impl Default for AppSettings {
             alert_memory_percent: DEFAULT_ALERT_MEMORY_PERCENT,
             alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
             sync_directory: String::new(),
+            restore_sessions: false,
         }
     }
 }
@@ -138,6 +142,7 @@ impl AppSettings {
                 DEFAULT_ALERT_DISK_PERCENT,
             ),
             sync_directory: self.sync_directory,
+            restore_sessions: self.restore_sessions,
         }
     }
 
@@ -188,6 +193,8 @@ struct SettingsDocument {
     alert_disk_percent: u8,
     #[serde(default)]
     sync_directory: String,
+    #[serde(default)]
+    restore_sessions: bool,
 }
 
 pub struct SettingsStore {
@@ -267,6 +274,7 @@ impl SettingsStore {
             alert_memory_percent: document.alert_memory_percent,
             alert_disk_percent: document.alert_disk_percent,
             sync_directory: document.sync_directory,
+            restore_sessions: document.restore_sessions,
         }
         .normalized())
     }
@@ -302,6 +310,7 @@ impl SettingsStore {
             alert_memory_percent: settings.alert_memory_percent,
             alert_disk_percent: settings.alert_disk_percent,
             sync_directory: settings.sync_directory,
+            restore_sessions: settings.restore_sessions,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -482,6 +491,7 @@ mod tests {
             alert_memory_percent: 82,
             alert_disk_percent: 91,
             sync_directory: String::new(),
+            restore_sessions: false,
         };
         store.save(&settings).unwrap();
         assert_eq!(
@@ -520,6 +530,7 @@ mod tests {
                 alert_memory_percent: 101,
                 alert_disk_percent: 0,
                 sync_directory: String::new(),
+                restore_sessions: false,
             })
             .unwrap();
         let loaded = store.load().unwrap();
@@ -621,6 +632,7 @@ mod tests {
             alert_memory_percent: DEFAULT_ALERT_MEMORY_PERCENT,
             alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
             sync_directory: String::new(),
+            restore_sessions: false,
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);
