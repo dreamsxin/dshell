@@ -769,6 +769,18 @@ fn find_archives_in_text(text: &str) -> Vec<(String, String)> {
     found
 }
 
+const MONITOR_INTERVALS: [u64; 5] = [2, 1, 5, 10, 0];
+
+/// Cycle through monitor intervals: 2 → 1 → 5 → 10 → 0 (off) → 2.
+fn next_monitor_interval(current: u64) -> u64 {
+    MONITOR_INTERVALS
+        .iter()
+        .skip_while(|value| **value != current)
+        .nth(1)
+        .copied()
+        .unwrap_or(2)
+}
+
 fn sanitize_filename(name: &str) -> Option<String> {
     let cleaned: String = name
         .chars()
@@ -2365,19 +2377,20 @@ mod session_tests {
         format_log_time, format_rate, format_storage_kib, group_launch_candidates, hex_dump,
         is_authentication_failure, is_sftp_transfer_command, keyword_matches, local_upload_kind,
         mark_sftp_ready, matching_saved_profile_for_session, memory_usage_percent,
-        merge_unique_profiles, move_profile_to_group, mpsc, next_session_switcher_index,
-        palette_matching_commands, parse_alert_percent, recall_compose_history,
-        recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
-        remove_profile_group, remove_session, rename_profile_group, render_script_recording,
-        render_session_trace, reorder_group_order, reorder_session_ids, saved_profile_for_session,
-        search_result_message, server_alert_observations, session_accepts_requests,
-        session_editor_escape, session_editor_key, session_matches_tab_group,
-        session_matches_tab_group_selection, session_matches_target, session_switcher_matches_ids,
-        session_tab_group_choices, session_tab_group_filter_after_selection,
-        session_terminal_size_for_split, session_trace_push, split_panel_terminal_size,
-        synchronized_group_target_ids, synchronized_input_targets, synchronized_targets,
-        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title,
-        update_sessions_for_profile, watch,
+        merge_unique_profiles, move_profile_to_group, mpsc, next_monitor_interval,
+        next_session_switcher_index, palette_matching_commands, parse_alert_percent,
+        recall_compose_history, recent_sftp_directories_for_target, remember_compose_history,
+        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
+        render_script_recording, render_session_trace, reorder_group_order, reorder_session_ids,
+        saved_profile_for_session, search_result_message, server_alert_observations,
+        session_accepts_requests, session_editor_escape, session_editor_key,
+        session_matches_tab_group, session_matches_tab_group_selection, session_matches_target,
+        session_switcher_matches_ids, session_tab_group_choices,
+        session_tab_group_filter_after_selection, session_terminal_size_for_split,
+        session_trace_push, split_panel_terminal_size, synchronized_group_target_ids,
+        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
+        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
+        watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -3387,6 +3400,17 @@ echo"
     }
 
     #[test]
+    fn next_monitor_interval_cycles_through_choices_and_wraps_to_two() {
+        assert_eq!(next_monitor_interval(2), 1);
+        assert_eq!(next_monitor_interval(1), 5);
+        assert_eq!(next_monitor_interval(5), 10);
+        assert_eq!(next_monitor_interval(10), 0);
+        assert_eq!(next_monitor_interval(0), 2);
+        // Unknown values fall back to the default.
+        assert_eq!(next_monitor_interval(99), 2);
+    }
+
+    #[test]
     fn hex_dump_formats_offsets_hex_and_ascii_columns() {
         let dump = hex_dump("AB");
         let lines = dump.lines().collect::<Vec<_>>();
@@ -4370,6 +4394,10 @@ struct AppView {
     paste_confirm_chars: usize,
     hex_viewer: Option<String>,
     script_recording: Option<ScriptRecording>,
+    /// Server monitor auto-refresh interval in seconds; 0 disables monitoring.
+    monitor_interval_secs: u64,
+    /// Generation counter to cancel the previous monitor loop when toggled.
+    monitor_generation: u64,
     screen_locked: bool,
     lock_password: Entity<InputState>,
     lock_message: String,
@@ -4756,6 +4784,8 @@ impl AppView {
             paste_confirm_chars: 0,
             hex_viewer: None,
             script_recording: None,
+            monitor_interval_secs: 0,
+            monitor_generation: 0,
             screen_locked: false,
             lock_message: String::new(),
             lock_password_configured: String::new(),
@@ -14691,6 +14721,68 @@ impl AppView {
         cx.notify();
     }
 
+    /// Toggle the live server monitor. When enabled, a background loop
+    /// refreshes metrics at the configured interval until the session
+    /// disconnects, the generation changes, or monitoring is disabled.
+    /// Only one monitor loop runs at a time per generation token.
+    fn toggle_server_monitor(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if self.monitor_interval_secs > 0 {
+            self.monitor_interval_secs = 0;
+            self.monitor_generation = self.monitor_generation.wrapping_add(1);
+            cx.notify();
+            return;
+        }
+        self.monitor_interval_secs = 2;
+        self.monitor_generation = self.monitor_generation.wrapping_add(1);
+        let generation = self.monitor_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let interval_secs = this
+                    .update(cx, |view, _| {
+                        if view.monitor_generation != generation || view.monitor_interval_secs == 0
+                        {
+                            None
+                        } else {
+                            Some(view.monitor_interval_secs)
+                        }
+                    })
+                    .ok()
+                    .flatten();
+                let Some(interval_secs) = interval_secs else {
+                    break;
+                };
+                let _ = this.update(cx, |view, cx| {
+                    let connected = view
+                        .session(session_id)
+                        .is_some_and(|session| session.state == SessionState::Connected);
+                    if !connected {
+                        view.monitor_interval_secs = 0;
+                        view.monitor_generation = view.monitor_generation.wrapping_add(1);
+                        cx.notify();
+                        return;
+                    }
+                    view.refresh_server_metrics(session_id, cx);
+                });
+                cx.background_executor()
+                    .timer(Duration::from_secs(interval_secs.max(1)))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// Cycle the monitor interval between 2, 1, 5, 10 seconds and off.
+    /// Stopping the loop keeps the existing generation so the running timer
+    /// exits on its next tick when the interval reaches 0.
+    fn cycle_server_monitor_interval(&mut self, cx: &mut Context<Self>) {
+        self.monitor_interval_secs = next_monitor_interval(self.monitor_interval_secs);
+        if self.monitor_interval_secs == 0 {
+            self.monitor_generation = self.monitor_generation.wrapping_add(1);
+        }
+        cx.notify();
+    }
+
     fn record_server_alerts(&mut self, session_id: u64) -> bool {
         let observations = {
             let Some(session) = self.session(session_id) else {
@@ -22521,19 +22613,61 @@ impl AppView {
             } else {
                 self.tr("Refresh")
             };
-            group = group.child(
-                components::button(
-                    tokens,
-                    ("inspector-refresh-server", session_id),
-                    refresh_label,
-                    ButtonKind::Secondary,
-                    ButtonSize::Small,
+            let monitor_active = self.monitor_interval_secs > 0;
+            let monitor_label = if monitor_active {
+                format!("⏱ {}s", self.monitor_interval_secs)
+            } else {
+                self.tr("Monitor").to_owned()
+            };
+            let monitor_row = div()
+                .flex()
+                .items_center()
+                .gap(px(ui_tokens::SPACE_1))
+                .child(
+                    components::button(
+                        tokens,
+                        ("inspector-refresh-server", session_id),
+                        refresh_label,
+                        ButtonKind::Secondary,
+                        ButtonSize::Small,
+                    )
+                    .disabled(server_metrics.loading || state != SessionState::Connected)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.refresh_server_metrics(session_id, cx);
+                    })),
                 )
-                .disabled(server_metrics.loading || state != SessionState::Connected)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.refresh_server_metrics(session_id, cx);
-                })),
-            );
+                .child(
+                    components::button(
+                        tokens,
+                        ("inspector-monitor-server", session_id),
+                        monitor_label,
+                        if monitor_active {
+                            ButtonKind::Primary
+                        } else {
+                            ButtonKind::Ghost
+                        },
+                        ButtonSize::Small,
+                    )
+                    .disabled(state != SessionState::Connected)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_server_monitor(session_id, cx);
+                    })),
+                )
+                .when(monitor_active, |row| {
+                    row.child(
+                        components::button(
+                            tokens,
+                            ("inspector-monitor-interval", session_id),
+                            self.tr("Change interval"),
+                            ButtonKind::Ghost,
+                            ButtonSize::Small,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cycle_server_monitor_interval(cx);
+                        })),
+                    )
+                });
+            group = group.child(monitor_row);
             let power_actions = div()
                 .flex()
                 .items_center()

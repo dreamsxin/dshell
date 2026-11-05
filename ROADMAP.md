@@ -223,6 +223,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 31. 第五批 P2 功能已交付：存档快捷方式（`find_archives_in_text` 扫描可见终端绝对路径归档并自动填充解压命令）；脚本录制（`ScriptRecording` 捕获输入命令，`render_script_recording` 生成 shell 脚本）；会话跟踪（`session_trace_push` 采集协议事件，`render_session_trace` 生成诊断报告，More 菜单导出）。验证通过（227 项），Docker SSH 通过（10/10）。
 
+32. 监控视图已交付：Server health 检查器新增 Monitor 自动刷新（1/2/5/10 秒可选）和 Change interval 切换按钮，代际令牌管理后台任务生命周期，断开自动停止。`next_monitor_interval` 纯函数测试覆盖。验证通过（228 项）。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。

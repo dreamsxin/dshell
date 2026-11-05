@@ -653,6 +653,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Download" => "下载",
         "Edit" => "编辑",
         "Browse" => "浏览",
+        "Monitor" => "监控",
+        "Change interval" => "切换间隔",
         "Export session trace" => "导出会话跟踪",
         "Session trace exported ({entries} entries)." => "会话跟踪已导出（{entries} 条）。",
         "No trace entries collected for this session." => "该会话无跟踪记录。",

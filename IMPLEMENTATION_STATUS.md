@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-06，Windows/MSVC：完成监控视图功能。Server health 检查器新增实时监控面板：Monitor 按钮启动/停止自动刷新循环（默认 2 秒间隔），Change interval 按钮在 2→1→5→10→0(off) 间循环切换；`toggle_server_monitor` 通过代际令牌（generation token）管理后台刷新任务的生命周期，仅在会话保持 Connected 状态时调用 `refresh_server_metrics`，断开连接或切换间隔时自动取消；`next_monitor_interval` 纯函数驱动间隔循环并测试覆盖环绕回退。覆盖率提升至 26/33（79%）。
+
 2026-11-06，Windows/MSVC：完成第五批 P2 功能。新增存档快捷方式（More 菜单扫描可见终端中绝对路径的 .tar.gz/.zip/.7z 等归档文件名并自动填充解压命令到终端输入，`find_archives_in_text` 纯函数去重+跳过相对路径+测试覆盖 tar/zip/7z 命令构造）；新增脚本录制（`ScriptRecording` 捕获会话中用户输入命令、`render_script_recording` 生成含会话元数据+输入命令+最终可见屏幕注释的 shell 脚本，通过 `send_input_to_targets` 挂钩 Paste 请求捕获输入，停止时目录选择器保存为 .sh 文件）；新增会话跟踪（`SshSession` 新增 `trace: VecDeque<(u64, String)>` 上限 128 条，`apply_event` 挂钩 Status/Failed/ConnectionInfo/Reconnecting 协议事件，`render_session_trace` 生成含会话标识+状态+主机密钥指纹+时间戳条目的诊断报告，More 菜单导出为 .log 文件）。功能覆盖率提升至 24/33（73%）。`cargo fmt --all`、验证脚本通过（227 项），Docker SSH 通过（10/10）。
 
 2026-11-06，Windows/MSVC：完成 TOTP 认证模块。新增 `src/totp.rs` 实现 RFC 4226/6238 TOTP 算法（base32 密钥解码、HMAC-SHA1、30 秒步长、6 位数字），含 RFC 6238 参考向量测试、时间步测试和相邻窗口漂移测试。`Authentication::KeyboardInteractive` 枚举变体新增 `totp_secret` 字段，当键盘交互认证需要第二个一次性密码提示时自动计算 TOTP 码并填充。`build_authentication` 函数新增可选的 TOTP 密钥参数。新增 `hmac` 和 `sha1` 依赖。功能覆盖约 26/35 项（74%）：P0 全部完成，P1 的 8/10，P2 的 10/15。高难度功能（内联图片、会话恢复、FIDO/WebAuthn、多窗口支持、系统管理器侧边栏、脚本录制、Zmodem/Ymodem 传输、会话跟踪、键映射自定义）因超出时间预算，待后续排期。`cargo fmt --all`、`scriptserify-hard-constraints.ps1` 通过（224 项通过、10 项 Docker 专项忽略），`scripts	est-docker-ssh.ps1` 通过（10/10）。未在用户活动桌面启动 GUI；TOTP 认证需要真实支持 TOTP 的 SSH 服务器验证。下一步：排期实施剩余高难度功能或开始人工验收已交付的 GUI 交互。

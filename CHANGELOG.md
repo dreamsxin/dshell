@@ -6,6 +6,9 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add a live server monitor in the Server health inspector: toggle auto
+  refresh at 1/2/5/10 second intervals with a cycle button; monitoring
+  stops automatically when the session disconnects.
 - Add archive extraction shortcuts: scan the visible terminal for archive
   filenames (.tar.gz, .zip, .7z, etc.) with absolute paths and fill the
   corresponding extraction command into the terminal.
