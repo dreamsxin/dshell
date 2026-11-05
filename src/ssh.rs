@@ -43,6 +43,7 @@ pub enum Authentication {
     KeyboardInteractive {
         password: Zeroizing<String>,
         interactive: bool,
+        totp_secret: Option<Zeroizing<String>>,
     },
     PublicKey {
         identity_file: PathBuf,
@@ -2517,8 +2518,17 @@ async fn authenticate(
         Authentication::KeyboardInteractive {
             password,
             interactive,
+            totp_secret,
         } => {
             let mut password_used = false;
+            let totp_code_provider = totp_secret.as_deref().and_then(|secret| {
+                crate::totp::TotpCompute::from_secret(
+                    secret,
+                    crate::totp::DEFAULT_STEP_SECONDS,
+                    crate::totp::DEFAULT_CODE_DIGITS,
+                )
+                .ok()
+            });
             let mut response = session
                 .authenticate_keyboard_interactive_start(username.to_owned(), None::<String>)
                 .await
@@ -2561,6 +2571,17 @@ async fn authenticate(
                                     .map(|prompt| {
                                         if prompt.echo {
                                             Zeroizing::new(String::new())
+                                        } else if password_used {
+                                            password_used = true;
+                                            let totp_code = totp_code_provider
+                                                .as_ref()
+                                                .and_then(|provider| {
+                                                    provider
+                                                        .compute(std::time::SystemTime::now(), 0)
+                                                        .ok()
+                                                })
+                                                .unwrap_or_default();
+                                            Zeroizing::new(totp_code)
                                         } else {
                                             password_used = true;
                                             Zeroizing::new(password.to_string())
@@ -4270,6 +4291,7 @@ mod tests {
                     authentication: Authentication::KeyboardInteractive {
                         password: Zeroizing::new(password),
                         interactive: false,
+                        totp_secret: None,
                     },
                     terminal_size: TerminalSize {
                         columns: 80,

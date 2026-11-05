@@ -12,6 +12,7 @@ mod snippets;
 mod ssh;
 mod terminal;
 mod terminal_compare;
+mod totp;
 mod triggers;
 mod ui;
 
@@ -625,6 +626,7 @@ fn build_authentication(
     identity_file: &str,
     password: Zeroizing<String>,
     passphrase: Zeroizing<String>,
+    totp_secret: Zeroizing<String>,
 ) -> Result<Authentication, String> {
     match method {
         AuthMethod::Password => {
@@ -639,9 +641,15 @@ fn build_authentication(
                     "A password is required for keyboard-interactive authentication.".to_owned(),
                 );
             }
+            let totp_secret_opt = if totp_secret.is_empty() {
+                None
+            } else {
+                Some(totp_secret)
+            };
             Ok(Authentication::KeyboardInteractive {
                 password,
                 interactive: true,
+                totp_secret: totp_secret_opt,
             })
         }
         AuthMethod::PublicKey => {
@@ -7639,15 +7647,20 @@ impl AppView {
             cx.notify();
             return;
         }
-        let authentication =
-            match build_authentication(auth_method, &identity_file, password, passphrase) {
-                Ok(auth) => auth,
-                Err(error) => {
-                    self.profile_message = self.tr(&error);
-                    cx.notify();
-                    return;
-                }
-            };
+        let authentication = match build_authentication(
+            auth_method,
+            &identity_file,
+            password,
+            passphrase,
+            Zeroizing::new(String::new()),
+        ) {
+            Ok(auth) => auth,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let keepalive_seconds = match keepalive_text.parse::<u16>() {
             Ok(value) => value,
             Err(_) => 0,
@@ -7817,15 +7830,20 @@ impl AppView {
             forwards: saved_forwards.clone(),
             login_commands: login_commands.clone(),
         };
-        let authentication =
-            match build_authentication(self.auth_method, &identity_file, password, passphrase) {
-                Ok(authentication) => authentication,
-                Err(error) => {
-                    self.profile_message = self.tr(&error);
-                    cx.notify();
-                    return;
-                }
-            };
+        let authentication = match build_authentication(
+            self.auth_method,
+            &identity_file,
+            password,
+            passphrase,
+            Zeroizing::new(String::new()),
+        ) {
+            Ok(authentication) => authentication,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let jump = if jump_name.is_empty() {
             None
         } else {
@@ -7863,6 +7881,7 @@ impl AppView {
                 &profile.identity_file,
                 jump_password,
                 jump_passphrase,
+                Zeroizing::new(String::new()),
             ) {
                 Ok(authentication) => authentication,
                 Err(error) => {
