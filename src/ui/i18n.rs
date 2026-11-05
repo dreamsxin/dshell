@@ -658,6 +658,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Export session trace" => "导出会话跟踪",
         "Session trace exported ({entries} entries)." => "会话跟踪已导出（{entries} 条）。",
         "No trace entries collected for this session." => "该会话无跟踪记录。",
+        "Receive ZMODEM file" => "接收 ZMODEM 文件",
         "Start script recording" => "开始脚本录制",
         "Stop script recording" => "停止脚本录制",
         "Script recording started. Inputs are captured until you stop." => {

@@ -200,6 +200,10 @@ pub enum TerminalRequest {
     ControlServerPower {
         action: ServerPowerAction,
     },
+    /// Toggle ZMODEM receive mode for the current session. When armed, the
+    /// SSH data loop probes incoming bytes for a ZRQINIT frame and receives
+    /// files into the local Downloads directory until ZFIN or error.
+    ZmodemToggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -15,6 +15,7 @@ mod terminal_compare;
 mod totp;
 mod triggers;
 mod ui;
+mod zmodem;
 
 use std::{
     cell::RefCell,
@@ -21821,6 +21822,28 @@ impl AppView {
                     this.menu_visible = false;
                     if let Some(session_id) = active_id {
                         this.toggle_script_recording(session_id, window, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-zmodem-receive",
+                    IconName::Inbox,
+                    self.tr("Receive ZMODEM file"),
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_visible = false;
+                    if let Some(session_id) = active_id {
+                        let _ = enqueue_session_request(
+                            &this.sessions,
+                            session_id,
+                            TerminalRequest::ZmodemToggle,
+                        );
+                        cx.notify();
                     }
                 })),
             )

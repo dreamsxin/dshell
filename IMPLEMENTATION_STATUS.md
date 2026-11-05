@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-06，Windows/MSVC：完成 ZMODEM 接收功能。新增 `src/zmodem.rs` 纯协议模块：手写 lrzsz 兼容 CRC-16/KERMIT（bitwise，xor 进低字节，向量 0x2189）与 zlib CRC-32；逐字节接收解析器支持 hex/binary/ZBIN32 头部、ZDLE 转义解码、子包终止符（ZCRCE/ZCRCG/ZCRCQ/ZCRCW，终止符始终以 ZDLE+XOR 转义发送以保持裸数据字节无歧义）、子包 CRC-16 低字节先行校验；响应帧构建器（ZRINIT/ZRPOS/ZACK/ZFIN/ZSKIP）；6 项单元测试覆盖 CRC 向量、往返解析、ZFILE→ZDATA→ZEOF 完整流、CRC 破坏检测、控制字符转义。SSH 数据循环集成：More 菜单 `Receive ZMODEM file` 发送 `TerminalRequest::ZmodemToggle` 显式启用接收（避免二进制输出误触发），启用后逐字节探测 ZRQINIT 并自动完成 ZRINIT→ZRPOS→ZDATA 累积→ZEOF 落盘→ZFIN+OO 会话关闭；传输期间原始字节旁路 VT 解析器与日志；`sanitize_zmodem_name` 只保留最终路径段防止路径逃逸；文件保存到 Downloads 目录（回退 home），上限 1 MiB。Docker SSH 测试 10/10 通过（数据路径改动后重跑）。
+
 2026-11-06，Windows/MSVC：完成监控视图功能。Server health 检查器新增实时监控面板：Monitor 按钮启动/停止自动刷新循环（默认 2 秒间隔），Change interval 按钮在 2→1→5→10→0(off) 间循环切换；`toggle_server_monitor` 通过代际令牌（generation token）管理后台刷新任务的生命周期，仅在会话保持 Connected 状态时调用 `refresh_server_metrics`，断开连接或切换间隔时自动取消；`next_monitor_interval` 纯函数驱动间隔循环并测试覆盖环绕回退。覆盖率提升至 26/33（79%）。
 
 2026-11-06，Windows/MSVC：完成第五批 P2 功能。新增存档快捷方式（More 菜单扫描可见终端中绝对路径的 .tar.gz/.zip/.7z 等归档文件名并自动填充解压命令到终端输入，`find_archives_in_text` 纯函数去重+跳过相对路径+测试覆盖 tar/zip/7z 命令构造）；新增脚本录制（`ScriptRecording` 捕获会话中用户输入命令、`render_script_recording` 生成含会话元数据+输入命令+最终可见屏幕注释的 shell 脚本，通过 `send_input_to_targets` 挂钩 Paste 请求捕获输入，停止时目录选择器保存为 .sh 文件）；新增会话跟踪（`SshSession` 新增 `trace: VecDeque<(u64, String)>` 上限 128 条，`apply_event` 挂钩 Status/Failed/ConnectionInfo/Reconnecting 协议事件，`render_session_trace` 生成含会话标识+状态+主机密钥指纹+时间戳条目的诊断报告，More 菜单导出为 .log 文件）。功能覆盖率提升至 24/33（73%）。`cargo fmt --all`、验证脚本通过（227 项），Docker SSH 通过（10/10）。

@@ -36,6 +36,7 @@ use crate::terminal::{
     CursorStyle, MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton,
     TerminalMouseEvent, TerminalRequest, TerminalSearchResult, TerminalSize, TerminalTheme,
 };
+use crate::zmodem::{self, ZmodemEvent, ZmodemReceiver};
 
 #[derive(Clone)]
 pub enum Authentication {
@@ -433,6 +434,34 @@ fn default_known_hosts_path() -> Result<PathBuf> {
         .or_else(|| env::var_os("HOME"))
         .context("could not determine the current user's home directory")?;
     Ok(PathBuf::from(home).join(".ssh").join("known_hosts"))
+}
+
+/// Sanitize a remote ZMODEM filename: keep only the final path segment and
+/// reject empty or dot-only names so received files cannot escape the
+/// download directory.
+fn sanitize_zmodem_name(name: &str) -> String {
+    let candidate = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    if candidate.is_empty() || candidate == "." || candidate == ".." {
+        return "zmodem-file".to_owned();
+    }
+    candidate.to_owned()
+}
+
+/// Compute the download path for a ZMODEM-received file. Files land in the
+/// user's Downloads directory when it exists, falling back to the home
+/// directory.
+fn zmodem_download_path(name: &str) -> PathBuf {
+    let safe_name = sanitize_zmodem_name(name);
+    let home = env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let downloads = home.join("Downloads");
+    if downloads.is_dir() {
+        downloads.join(safe_name)
+    } else {
+        home.join(safe_name)
+    }
 }
 
 fn scan_osc_sequences(data: &[u8], events: &mpsc::Sender<UiEvent>) {
@@ -977,6 +1006,10 @@ async fn run_connection_attempt_with_known_hosts(
     let mut terminal = TerminalEmulator::new_with_theme(terminal_size, theme);
     terminal.set_cursor_style(cursor_style);
     let mut screen_dirty = false;
+    // ZMODEM auto-detect: a passive receiver probes the stream for a ZRQINIT
+    // frame. Once detected it intercepts data until the transfer completes.
+    let mut zmodem: Option<ZmodemReceiver> = Some(ZmodemReceiver::new());
+    let mut zmodem_active = false;
     let mut log_file: Option<tokio::fs::File> = None;
     let mut log_buffer: Vec<u8> = Vec::new();
     let mut log_framed = true;
@@ -1139,6 +1172,31 @@ async fn run_connection_attempt_with_known_hosts(
                     }
                     Some(TerminalRequest::ControlServerPower { action }) => {
                         control_server_power(&mut session, &events, action).await;
+                    }
+                    Some(TerminalRequest::ZmodemToggle) => {
+                        if zmodem.is_some() {
+                            // Cancel: send the ZMODEM CAN sequence so a remote
+                            // rz/sz aborts cleanly, then disarm locally.
+                            writer
+                                .data_bytes(vec![zmodem::ZDLE; 8])
+                                .await
+                                .context("Could not cancel ZMODEM transfer")?;
+                            zmodem = None;
+                            zmodem_active = false;
+                            let _ = events
+                                .send(UiEvent::Notification(
+                                    "ZMODEM receive cancelled.".to_owned(),
+                                ))
+                                .await;
+                        } else {
+                            zmodem = Some(ZmodemReceiver::new());
+                            let _ = events
+                                .send(UiEvent::Notification(
+                                    "ZMODEM receive armed. Run sz <file> on the remote host."
+                                        .to_owned(),
+                                ))
+                                .await;
+                        }
                     }
                     None => break,
                 }
@@ -1334,21 +1392,117 @@ async fn run_connection_attempt_with_known_hosts(
             }
             message = reader.wait() => {
                 match message {
-                    Some(ChannelMsg::Data { data }) => {
-                        scan_osc_sequences(&data, &events);
-                        terminal.feed(&data);
-                        if log_file.is_some() {
-                            log_buffer.extend_from_slice(&data);
+                    Some(ChannelMsg::Data { data })
+                    | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        // ZMODEM receive: when armed, probe the stream for a
+                        // ZRQINIT frame and process transfer frames; the raw
+                        // binary payload bypasses the VT parser while active.
+                        let mut zmodem_events = Vec::new();
+                        if let Some(receiver) = zmodem.as_mut() {
+                            for &byte in data.iter() {
+                                if let Some(event) = receiver.feed(byte) {
+                                    zmodem_events.push(event);
+                                }
+                            }
                         }
-                        screen_dirty = true;
-                    }
-                    Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        scan_osc_sequences(&data, &events);
-                        terminal.feed(&data);
-                        if log_file.is_some() {
-                            log_buffer.extend_from_slice(&data);
+                        for event in zmodem_events {
+                            match event {
+                                ZmodemEvent::ZRqInit => {
+                                    writer.data_bytes(zmodem::build_zrinit()).await?;
+                                    zmodem_active = true;
+                                    let _ = events
+                                        .send(UiEvent::Notification(
+                                            "ZMODEM transfer detected.".to_owned(),
+                                        ))
+                                        .await;
+                                }
+                                ZmodemEvent::ZFile { name, .. } => {
+                                    writer.data_bytes(zmodem::build_zrpos(0)).await?;
+                                    let _ = events
+                                        .send(UiEvent::Notification(format!(
+                                            "ZMODEM receiving: {}",
+                                            sanitize_zmodem_name(&name)
+                                        )))
+                                        .await;
+                                }
+                                ZmodemEvent::ZData(_) => {}
+                                ZmodemEvent::ZEof(declared) => {
+                                    let Some(receiver) = zmodem.as_mut() else {
+                                        continue;
+                                    };
+                                    let received = receiver.take_file_data();
+                                    let name = sanitize_zmodem_name(receiver.file_name());
+                                    receiver.reset_for_next_file();
+                                    if !received.is_empty()
+                                        && (declared == 0
+                                            || u64::try_from(received.len()) == Ok(declared))
+                                    {
+                                        let path = zmodem_download_path(&name);
+                                        if let Some(parent) = path.parent() {
+                                            let _ =
+                                                tokio::fs::create_dir_all(parent).await;
+                                        }
+                                        match tokio::fs::write(&path, &received).await {
+                                            Ok(()) => {
+                                                let _ = events
+                                                    .send(UiEvent::Notification(
+                                                        format!(
+                                                            "ZMODEM saved: {}",
+                                                            path.display()
+                                                        ),
+                                                    ))
+                                                    .await;
+                                            }
+                                            Err(error) => {
+                                                let _ = events
+                                                    .send(UiEvent::Notification(
+                                                        format!(
+                                                            "Could not save ZMODEM file: {error}"
+                                                        ),
+                                                    ))
+                                                    .await;
+                                            }
+                                        }
+                                    } else {
+                                        let _ = events
+                                            .send(UiEvent::Notification(
+                                                "ZMODEM file size mismatch; discarded."
+                                                    .to_owned(),
+                                            ))
+                                            .await;
+                                    }
+                                    writer.data_bytes(zmodem::build_zrinit()).await?;
+                                }
+                                ZmodemEvent::ZFin => {
+                                    writer.data_bytes(zmodem::build_zfin()).await?;
+                                    writer.data_bytes(Bytes::from_static(b"OO")).await?;
+                                    zmodem_active = false;
+                                    zmodem = None;
+                                    let _ = events
+                                        .send(UiEvent::Notification(
+                                            "ZMODEM transfer complete.".to_owned(),
+                                        ))
+                                        .await;
+                                }
+                                ZmodemEvent::Error(message) => {
+                                    zmodem_active = false;
+                                    zmodem = None;
+                                    let _ = events
+                                        .send(UiEvent::Notification(format!(
+                                            "ZMODEM error: {message}"
+                                        )))
+                                        .await;
+                                }
+                            }
                         }
-                        screen_dirty = true;
+                        if !zmodem_active {
+                            scan_osc_sequences(&data, &events);
+                            terminal.feed(&data);
+                            if log_file.is_some() {
+                                log_buffer.extend_from_slice(&data);
+                            }
+                            screen_dirty = true;
+                        }
                     }
                     Some(ChannelMsg::ExitStatus { .. }) => {
                         remote_exited = true;
@@ -2848,8 +3002,8 @@ mod tests {
         parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
         parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
         parse_service_logs, power_action_command, process_termination_command,
-        run_connection_with_known_hosts, service_action_command, service_logs_command,
-        valid_process_pid, valid_service_name, wait_before_reconnect,
+        run_connection_with_known_hosts, sanitize_zmodem_name, service_action_command,
+        service_logs_command, valid_process_pid, valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -3259,6 +3413,17 @@ mod tests {
 
         let error = is_known_host_key("localhost", 13265, &changed_key, &path).unwrap_err();
         assert!(!is_retryable_reconnect_error(&error));
+    }
+
+    #[test]
+    fn sanitize_zmodem_name_keeps_final_segment_and_rejects_traversal() {
+        assert_eq!(sanitize_zmodem_name("hello.txt"), "hello.txt");
+        assert_eq!(sanitize_zmodem_name("/tmp/logs/app.zip"), "app.zip");
+        assert_eq!(sanitize_zmodem_name("..\\..\\etc\\passwd"), "passwd");
+        assert_eq!(sanitize_zmodem_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_zmodem_name(""), "zmodem-file");
+        assert_eq!(sanitize_zmodem_name(".."), "zmodem-file");
+        assert_eq!(sanitize_zmodem_name("."), "zmodem-file");
     }
 
     #[test]
