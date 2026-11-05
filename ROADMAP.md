@@ -221,6 +221,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 30. TOTP 认证模块已交付：新增 `src/totp.rs` 实现 RFC 4226/6238 TOTP 算法（base32 密钥解码、HMAC-SHA1、30 秒步长、6 位数字），含 RFC 6238 参考向量测试、时间步测试和相邻窗口漂移测试。`Authentication::KeyboardInteractive` 枚举变体新增 `totp_secret` 字段，键盘交互认证时自动计算并填充一次性密码。`build_authentication` 新增可选 TOTP 密钥参数。新增 `hmac` 和 `sha1` 依赖。验证通过（224 项），Docker SSH 测试通过（10/10）。
 
+31. 第五批 P2 功能已交付：存档快捷方式（`find_archives_in_text` 扫描可见终端绝对路径归档并自动填充解压命令）；脚本录制（`ScriptRecording` 捕获输入命令，`render_script_recording` 生成 shell 脚本）；会话跟踪（`session_trace_push` 采集协议事件，`render_session_trace` 生成诊断报告，More 菜单导出）。验证通过（227 项），Docker SSH 通过（10/10）。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。

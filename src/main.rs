@@ -736,6 +736,39 @@ fn hex_dump(text: &str) -> String {
     lines.join("\n") + "\n"
 }
 
+const ARCHIVE_EXTENSIONS: [&str; 9] = [
+    ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar", ".zip", ".7z",
+];
+
+/// Find archive filenames in terminal text and build extraction commands.
+///
+/// Returns (archive_path, extraction_command) pairs. Only absolute paths
+/// (`/...`) are recognised, because relative paths require OSC 7 directory
+/// tracking which dshell does not yet implement. Duplicate paths are
+/// deduplicated. Returns an empty vec when no archives are visible.
+fn find_archives_in_text(text: &str) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    for word in text.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        let matched = ARCHIVE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext));
+        if !matched || !word.starts_with('/') {
+            continue;
+        }
+        if found.iter().any(|(path, _)| path == word) {
+            continue;
+        }
+        let command = if lower.ends_with(".zip") {
+            format!("unzip -o '{word}'")
+        } else if lower.ends_with(".7z") {
+            format!("7z x -y '{word}'")
+        } else {
+            format!("tar xf '{word}'")
+        };
+        found.push((word.to_owned(), command));
+    }
+    found
+}
+
 fn sanitize_filename(name: &str) -> Option<String> {
     let cleaned: String = name
         .chars()
@@ -1230,6 +1263,49 @@ struct SshSession {
     credential_key: Option<CredentialCacheKey>,
     launch_settings: SessionLaunchSettings,
     state: SessionState,
+    /// Bounded protocol event trace for diagnostics. Always collected, never
+    /// written to disk unless the user explicitly exports it.
+    trace: VecDeque<(u64, String)>,
+}
+
+/// Maximum number of protocol trace entries kept per session.
+const SESSION_TRACE_MAX_ENTRIES: usize = 128;
+
+/// Append a protocol event to the session trace, evicting oldest entries.
+fn session_trace_push(session: &mut SshSession, event: impl Into<String>) {
+    if session.trace.len() >= SESSION_TRACE_MAX_ENTRIES {
+        session.trace.pop_front();
+    }
+    session.trace.push_back((unix_now(), event.into()));
+}
+
+/// Render the session trace as a human-readable diagnostic report.
+fn render_session_trace(session: &SshSession, host_key_info: Option<&ConnectionInfo>) -> String {
+    let mut report = String::new();
+    report.push_str("dshell session trace\n");
+    report.push_str(&format!(
+        "# Session: {}@{}:{}\n",
+        session.username, session.host, session.port
+    ));
+    report.push_str(&format!(
+        "# State: {}\n",
+        session_state_label(session.state)
+    ));
+    if let Some(info) = host_key_info {
+        report.push_str(&format!(
+            "# Host key: {} SHA256 {}\n",
+            info.host_key_algorithm, info.host_key_fingerprint
+        ));
+    }
+    if let Some(profile) = &session.profile_name {
+        report.push_str(&format!("# Profile: {profile}\n"));
+    }
+    report.push_str(&format!("# Entries: {}\n", session.trace.len()));
+    report.push_str("#\n");
+    for (timestamp, event) in &session.trace {
+        report.push_str(&format!("[{}] {}\n", format_log_time(*timestamp), event));
+    }
+    report
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1467,6 +1543,42 @@ struct PendingPaste {
     text: String,
 }
 
+/// Active script recording: captures user input commands during a session.
+/// Terminal output is captured at stop time from the current visible screen.
+struct ScriptRecording {
+    session_id: u64,
+    title: String,
+    started_unix: u64,
+    inputs: Vec<String>,
+}
+
+/// Render a script recording into a human-readable shell script.
+///
+/// Output is a comment header with session metadata, the recorded input
+/// commands as shell prompt lines, and the final visible screen as comments.
+/// Inputs are sanitized: CR/LF inside a single recorded input is replaced
+/// with spaces so each entry stays on one line.
+fn render_script_recording(recording: &ScriptRecording, visible_screen: &str) -> String {
+    let mut script = String::new();
+    script.push_str("# dshell script recording\n");
+    script.push_str(&format!("# Session: {}\n", recording.title));
+    script.push_str(&format!(
+        "# Started: {}\n",
+        format_log_time(recording.started_unix.saturating_mul(1000))
+    ));
+    script.push_str(&format!("# Inputs: {}\n", recording.inputs.len()));
+    script.push_str("#\n");
+    for input in &recording.inputs {
+        let sanitized = input.replace('\r', " ").replace('\n', " ");
+        script.push_str(&format!("> {sanitized}\n"));
+    }
+    script.push_str("#\n# Final visible screen:\n");
+    for line in visible_screen.lines() {
+        script.push_str(&format!("# {line}\n"));
+    }
+    script
+}
+
 fn remember_stopped_forward(state: &mut ForwardViewState, spec: ForwardRuleSpec) {
     if !state.stopped.contains(&spec) {
         state.stopped.push(spec);
@@ -1494,6 +1606,34 @@ impl SshSession {
             )
         {
             return false;
+        }
+        match &event {
+            UiEvent::Status(status) => {
+                session_trace_push(self, format!("Status: {status}"));
+            }
+            UiEvent::Failed(error) => {
+                session_trace_push(self, format!("Failed: {error}"));
+            }
+            UiEvent::ConnectionInfo(info) => {
+                session_trace_push(
+                    self,
+                    format!(
+                        "Host key: {} SHA256 {}",
+                        info.host_key_algorithm, info.host_key_fingerprint
+                    ),
+                );
+            }
+            UiEvent::Reconnecting {
+                attempt,
+                max_attempts,
+                delay_seconds,
+            } => {
+                session_trace_push(
+                    self,
+                    format!("Reconnecting attempt {attempt}/{max_attempts} in {delay_seconds}s"),
+                );
+            }
+            _ => {}
         }
         match event {
             UiEvent::Status(status) => {
@@ -2216,27 +2356,28 @@ fn remove_session(
 mod session_tests {
     use super::{
         AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, GroupLaunchState,
-        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, PaletteCommand, SessionEditorEscape,
-        SessionEditorKey, SessionLaunchSettings, SessionSplit, SessionState, SftpViewState,
-        SplitOrientation, SshSession, TabColor, TerminalFrame, TerminalRequest, TerminalSize,
-        UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
-        effective_terminal_theme, enqueue_session_request, filesystem_usage_percent,
-        forget_stopped_forward, format_alert_time, format_log_time, format_rate,
-        format_storage_kib, group_launch_candidates, hex_dump, is_authentication_failure,
-        is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
-        matching_saved_profile_for_session, memory_usage_percent, merge_unique_profiles,
-        move_profile_to_group, mpsc, next_session_switcher_index, palette_matching_commands,
-        parse_alert_percent, recall_compose_history, recent_sftp_directories_for_target,
-        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
-        rename_profile_group, reorder_group_order, reorder_session_ids, saved_profile_for_session,
+        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, PaletteCommand, ScriptRecording,
+        SessionEditorEscape, SessionEditorKey, SessionLaunchSettings, SessionSplit, SessionState,
+        SftpViewState, SplitOrientation, SshSession, TabColor, TerminalFrame, TerminalRequest,
+        TerminalSize, UiEvent, app_shortcut, apply_session_event, collapsed_group_key,
+        dragged_panel_width, effective_terminal_theme, enqueue_session_request,
+        filesystem_usage_percent, find_archives_in_text, forget_stopped_forward, format_alert_time,
+        format_log_time, format_rate, format_storage_kib, group_launch_candidates, hex_dump,
+        is_authentication_failure, is_sftp_transfer_command, keyword_matches, local_upload_kind,
+        mark_sftp_ready, matching_saved_profile_for_session, memory_usage_percent,
+        merge_unique_profiles, move_profile_to_group, mpsc, next_session_switcher_index,
+        palette_matching_commands, parse_alert_percent, recall_compose_history,
+        recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
+        remove_profile_group, remove_session, rename_profile_group, render_script_recording,
+        render_session_trace, reorder_group_order, reorder_session_ids, saved_profile_for_session,
         search_result_message, server_alert_observations, session_accepts_requests,
         session_editor_escape, session_editor_key, session_matches_tab_group,
         session_matches_tab_group_selection, session_matches_target, session_switcher_matches_ids,
         session_tab_group_choices, session_tab_group_filter_after_selection,
-        session_terminal_size_for_split, split_panel_terminal_size, synchronized_group_target_ids,
-        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
-        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
-        watch,
+        session_terminal_size_for_split, session_trace_push, split_panel_terminal_size,
+        synchronized_group_target_ids, synchronized_input_targets, synchronized_targets,
+        take_next_sftp_transfer, terminal_size_for_viewport, unique_duplicate_session_title,
+        update_sessions_for_profile, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -2295,6 +2436,7 @@ mod session_tests {
                 credential_key: None,
                 launch_settings: SessionLaunchSettings::default(),
                 state: SessionState::Connected,
+                trace: VecDeque::new(),
             },
             command_rx,
             cancel_rx,
@@ -3174,6 +3316,74 @@ mod session_tests {
         for command in PaletteCommand::ALL {
             assert!(!command.label().is_empty());
         }
+    }
+
+    #[test]
+    fn find_archives_in_text_scans_absolute_paths_and_skips_relative_or_duplicates() {
+        let text = "/tmp/app.tar.gz readme.txt /var/backup.zip ./local.tar /tmp/app.tar.gz";
+        let archives = find_archives_in_text(text);
+        assert_eq!(archives.len(), 2);
+        assert_eq!(archives[0].0, "/tmp/app.tar.gz");
+        assert_eq!(archives[0].1, "tar xf '/tmp/app.tar.gz'");
+        assert_eq!(archives[1].0, "/var/backup.zip");
+        assert_eq!(archives[1].1, "unzip -o '/var/backup.zip'");
+
+        // Relative paths are skipped (no OSC 7 tracking).
+        let relative = find_archives_in_text("app.tar.gz ./x.zip data.tar");
+        assert!(relative.is_empty());
+
+        let sevenzip = find_archives_in_text("/opt/tool.7z");
+        assert_eq!(sevenzip[0].1, "7z x -y '/opt/tool.7z'");
+        assert!(find_archives_in_text("").is_empty());
+    }
+
+    #[test]
+    fn render_script_recording_produces_header_inputs_and_screen() {
+        let recording = ScriptRecording {
+            session_id: 1,
+            title: "root@server:22".to_owned(),
+            started_unix: 1_700_000_000,
+            inputs: vec![
+                "ls -la".to_owned(),
+                "cd /tmp
+echo done"
+                    .to_owned(),
+            ],
+        };
+        let script = render_script_recording(
+            &recording,
+            "total 0
+drwxr-xr-x 2 root root 4096",
+        );
+        assert!(script.contains("# dshell script recording"));
+        assert!(script.contains("# Session: root@server:22"));
+        assert!(script.contains("# Inputs: 2"));
+        assert!(script.contains("> ls -la"));
+        // Multi-line input is flattened to one line.
+        assert!(script.contains("> cd /tmp echo done"));
+        assert!(!script.contains(
+            "cd /tmp
+echo"
+        ));
+        assert!(script.contains("# Final visible screen:"));
+        assert!(script.contains("# total 0"));
+    }
+
+    #[test]
+    fn render_session_trace_formats_header_and_entries() {
+        let (mut session, _, _) = test_session(1);
+        session.host = "server.example.com".to_owned();
+        session.username = "root".to_owned();
+        session.state = SessionState::Connected;
+        session_trace_push(&mut session, "Status: Connected to server");
+        session_trace_push(&mut session, "Host key: ssh-ed25519 SHA256 AAAA");
+        let report = render_session_trace(&session, None);
+        assert!(report.contains("dshell session trace"));
+        assert!(report.contains("# Session: root@server.example.com:22"));
+        assert!(report.contains("# Entries: 2"));
+        assert!(report.contains("["));
+        assert!(report.contains("Status: Connected to server"));
+        assert!(report.contains("Host key: ssh-ed25519"));
     }
 
     #[test]
@@ -4159,6 +4369,7 @@ struct AppView {
     paste_confirm_lines: usize,
     paste_confirm_chars: usize,
     hex_viewer: Option<String>,
+    script_recording: Option<ScriptRecording>,
     screen_locked: bool,
     lock_password: Entity<InputState>,
     lock_message: String,
@@ -4544,6 +4755,7 @@ impl AppView {
             paste_confirm_lines: 0,
             paste_confirm_chars: 0,
             hex_viewer: None,
+            script_recording: None,
             screen_locked: false,
             lock_message: String::new(),
             lock_password_configured: String::new(),
@@ -8004,6 +8216,7 @@ impl AppView {
                     credential_key: Some(credential_key.clone()),
                     launch_settings,
                     state: SessionState::Connecting,
+                    trace: VecDeque::new(),
                 });
                 if let Some(launch) = self.group_launch.as_mut()
                     && launch.current_session_id == retrying_session_id
@@ -8803,6 +9016,12 @@ impl AppView {
         action: &str,
         cx: &mut Context<Self>,
     ) -> usize {
+        if let Some(recording) = self.script_recording.as_mut()
+            && recording.session_id == active_session_id
+            && let TerminalRequest::Paste(text) = request()
+        {
+            recording.inputs.push(text);
+        }
         let targets = self.input_targets(active_session_id);
         let mut delivered = 0;
         for target in targets {
@@ -9301,6 +9520,176 @@ impl AppView {
 
     fn close_hex_viewer(&mut self, cx: &mut Context<Self>) {
         self.hex_viewer = None;
+        cx.notify();
+    }
+
+    fn extract_visible_archives(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let Some(frame) = self
+            .session(session_id)
+            .and_then(|session| session.frame.as_ref())
+        else {
+            self.profile_message = self.tr("No terminal output to scan.");
+            cx.notify();
+            return;
+        };
+        let text = frame_visible_text(frame);
+        let archives = find_archives_in_text(&text);
+        if archives.is_empty() {
+            self.show_toast(
+                self.tr("No archive files found in the visible terminal."),
+                Tone::Neutral,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        let commands = archives
+            .iter()
+            .map(|(_, command)| command.clone())
+            .collect::<Vec<_>>()
+            .join(" && ");
+        self.send_input_to_targets(
+            session_id,
+            || TerminalRequest::Paste(commands.clone()),
+            "Archive extraction",
+            cx,
+        );
+        self.show_toast(
+            self.tr("Extraction command for {count} archive(s) filled into the terminal.")
+                .replace("{count}", &archives.len().to_string()),
+            Tone::Success,
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn toggle_script_recording(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(recording) = self.script_recording.take() {
+            self.stop_script_recording(recording, window, cx);
+            return;
+        }
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        self.script_recording = Some(ScriptRecording {
+            session_id,
+            title: session.title.clone(),
+            started_unix: unix_now(),
+            inputs: Vec::new(),
+        });
+        self.show_toast(
+            self.tr("Script recording started. Inputs are captured until you stop."),
+            Tone::Success,
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn stop_script_recording(
+        &mut self,
+        recording: ScriptRecording,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session_id = recording.session_id;
+        let visible = self
+            .session(session_id)
+            .and_then(|session| session.frame.as_ref())
+            .map(frame_visible_text)
+            .unwrap_or_default();
+        let script = render_script_recording(&recording, &visible);
+        let input_count = recording.inputs.len();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(self.tr("Save script recording").into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(mut paths))) => {
+                if let Some(directory) = paths.pop() {
+                    let stamp = unix_now();
+                    let path = directory.join(format!("dshell-recording-{stamp}.sh"));
+                    let result = tokio::fs::write(&path, script).await;
+                    let _ = this.update(cx, |view, cx| match result {
+                        Ok(()) => {
+                            view.show_toast(
+                                view.tr("Script recording saved ({inputs} inputs).")
+                                    .replace("{inputs}", &input_count.to_string()),
+                                Tone::Success,
+                                cx,
+                            );
+                        }
+                        Err(error) => {
+                            view.show_toast(
+                                format!("Could not save script recording: {error}"),
+                                Tone::Danger,
+                                cx,
+                            );
+                        }
+                    });
+                }
+            }
+            _ => {}
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn export_session_trace(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let trace_report = render_session_trace(session, session.connection_info.as_ref());
+        let trace_entries = session.trace.len();
+        if trace_entries == 0 {
+            self.show_toast(
+                self.tr("No trace entries collected for this session."),
+                Tone::Neutral,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(self.tr("Export session trace").into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(mut paths))) => {
+                if let Some(directory) = paths.pop() {
+                    let stamp = unix_now();
+                    let path = directory.join(format!("dshell-trace-{stamp}.log"));
+                    let result = tokio::fs::write(&path, trace_report).await;
+                    let _ = this.update(cx, |view, cx| match result {
+                        Ok(()) => {
+                            view.show_toast(
+                                view.tr("Session trace exported ({entries} entries).")
+                                    .replace("{entries}", &trace_entries.to_string()),
+                                Tone::Success,
+                                cx,
+                            );
+                        }
+                        Err(error) => {
+                            view.show_toast(
+                                format!("Could not export session trace: {error}"),
+                                Tone::Danger,
+                                cx,
+                            );
+                        }
+                    });
+                }
+            }
+            _ => {}
+        })
+        .detach();
         cx.notify();
     }
 
@@ -21302,6 +21691,61 @@ impl AppView {
                     this.menu_visible = false;
                     if let Some(session_id) = active_id {
                         this.open_hex_viewer(session_id, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-extract-archives",
+                    IconName::FolderOpen,
+                    self.tr("Extract visible archives"),
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_visible = false;
+                    if let Some(session_id) = active_id {
+                        this.extract_visible_archives(session_id, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-script-recording",
+                    IconName::BookOpen,
+                    if self.script_recording.is_some() {
+                        self.tr("Stop script recording")
+                    } else {
+                        self.tr("Start script recording")
+                    },
+                    "",
+                    self.script_recording.is_some(),
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.menu_visible = false;
+                    if let Some(session_id) = active_id {
+                        this.toggle_script_recording(session_id, window, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-export-trace",
+                    IconName::File,
+                    self.tr("Export session trace"),
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_visible = false;
+                    if let Some(session_id) = active_id {
+                        this.export_session_trace(session_id, cx);
                     }
                 })),
             )

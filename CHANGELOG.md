@@ -6,6 +6,15 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add archive extraction shortcuts: scan the visible terminal for archive
+  filenames (.tar.gz, .zip, .7z, etc.) with absolute paths and fill the
+  corresponding extraction command into the terminal.
+- Add script recording: capture user input commands during a session and
+  save them as a shell script with session metadata and the final visible
+  screen as comments.
+- Add session tracing: protocol events (connection status, host key info,
+  reconnection attempts) are collected per session (max 128 entries) and
+  can be exported to a diagnostic log file.
 - Add a TOTP (time-based one-time password) module that generates RFC 6238 codes for keyboard-interactive authentication.
 - Add a lock screen that covers the workspace with a password field.
   The configured password stays only in the running session, is never

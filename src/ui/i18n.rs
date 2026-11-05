@@ -653,6 +653,22 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Download" => "下载",
         "Edit" => "编辑",
         "Browse" => "浏览",
+        "Export session trace" => "导出会话跟踪",
+        "Session trace exported ({entries} entries)." => "会话跟踪已导出（{entries} 条）。",
+        "No trace entries collected for this session." => "该会话无跟踪记录。",
+        "Start script recording" => "开始脚本录制",
+        "Stop script recording" => "停止脚本录制",
+        "Script recording started. Inputs are captured until you stop." => {
+            "脚本录制已开始。输入将被捕获直到你停止。"
+        }
+        "Save script recording" => "保存脚本录制",
+        "Script recording saved ({inputs} inputs)." => "脚本录制已保存（{inputs} 条输入）。",
+        "Extract visible archives" => "提取可见归档",
+        "No archive files found in the visible terminal." => "可见终端中未找到归档文件。",
+        "Extraction command for {count} archive(s) filled into the terminal." => {
+            "已将 {count} 个归档的解压命令填入终端。"
+        }
+        "No terminal output to scan." => "无终端输出可扫描。",
         "Choose identity file" => "选择身份文件",
         "Test connection" => "测试连接",
         "Testing connection to {host}:{port}..." => "正在测试连接 {host}:{port}...",
