@@ -13,6 +13,8 @@ gpui = "0.2.2"
 gpui-component = { version = "0.3.0", default-features = false }
 rand = "0.10"
 data-encoding = "2.6"
+hmac = "0.12"
+sha1 = "0.10"
 russh = { version = "0.64.1", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "2.4.0"
 serde = { version = "1.0", features = ["derive"] }
