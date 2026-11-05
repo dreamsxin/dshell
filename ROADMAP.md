@@ -231,6 +231,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 35. 会话恢复已交付：`restore.json` 记录连接标识（无凭据），Connected/Disconnected/Failed/关闭会话时重写；Settings 开关（默认关）启用启动自动重连，仅匹配已保存资料的条目。`restore.rs` 2 项测试。
 
+36. 内联图片已交付：`src/inline_image.rs` 逐字节 OSC 1337 收集器（跨包边界 + BEL/ST 终止 + 16 MiB 上限），解码保存到 Downloads 并通知；VT 解析器原生消费序列不干扰画面。5 项测试。243 项 + Docker 10/10。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。

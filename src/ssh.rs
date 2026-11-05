@@ -29,6 +29,7 @@ use crate::forward::{
     self, AcceptedConnection, ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec,
     RemoteTarget, RemoteTargetMap,
 };
+use crate::inline_image::InlineImageCollector;
 use crate::log;
 use crate::profiles::ReconnectSettings;
 use crate::sftp::{self, SftpCommand, SftpEvent};
@@ -1010,6 +1011,7 @@ async fn run_connection_attempt_with_known_hosts(
     // frame. Once detected it intercepts data until the transfer completes.
     let mut zmodem: Option<ZmodemReceiver> = Some(ZmodemReceiver::new());
     let mut zmodem_active = false;
+    let mut inline_images = InlineImageCollector::new();
     let mut log_file: Option<tokio::fs::File> = None;
     let mut log_buffer: Vec<u8> = Vec::new();
     let mut log_framed = true;
@@ -1405,6 +1407,16 @@ async fn run_connection_attempt_with_known_hosts(
                                 }
                             }
                         }
+                        // iTerm2 inline images: decode and save when no
+                        // binary ZMODEM transfer is consuming the stream.
+                        let mut inline_image_file = None;
+                        if !zmodem_active {
+                            for &byte in data.iter() {
+                                if let Some(file) = inline_images.feed(byte) {
+                                    inline_image_file = Some(file);
+                                }
+                            }
+                        }
                         for event in zmodem_events {
                             match event {
                                 ZmodemEvent::ZRqInit => {
@@ -1490,6 +1502,31 @@ async fn run_connection_attempt_with_known_hosts(
                                     let _ = events
                                         .send(UiEvent::Notification(format!(
                                             "ZMODEM error: {message}"
+                                        )))
+                                        .await;
+                                }
+                            }
+                        }
+                        if let Some(file) = inline_image_file {
+                            let path = crate::inline_image::inline_image_download_path(
+                                &file.name,
+                            );
+                            if let Some(parent) = path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            match tokio::fs::write(&path, &file.data).await {
+                                Ok(()) => {
+                                    let _ = events
+                                        .send(UiEvent::Notification(format!(
+                                            "Inline image saved: {}",
+                                            path.display()
+                                        )))
+                                        .await;
+                                }
+                                Err(error) => {
+                                    let _ = events
+                                        .send(UiEvent::Notification(format!(
+                                            "Could not save inline image: {error}"
                                         )))
                                         .await;
                                 }

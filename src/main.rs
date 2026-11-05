@@ -1,6 +1,7 @@
 mod auth_profiles;
 mod forward;
 mod groups;
+mod inline_image;
 mod keygen;
 mod log;
 mod openssh_config;

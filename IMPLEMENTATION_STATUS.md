@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-06，Windows/MSVC：完成内联图片功能。新增 `src/inline_image.rs`：逐字节 OSC 1337 收集器（跨 SSH 包边界匹配 `ESC ] 1337 ; File=` 前缀、BEL 与 ST 两种终止符、16 MiB 上限、失步自动重同步），`parse_osc1337_payload` 解析 name=（含百分号解码）/size=/inline= 元数据并 base64 解码，`sanitize_inline_image_name` 只保留最终路径段（不安全名回退为时间戳名）。SSH 数据循环集成：非 ZMODEM 活跃期间每字节喂入收集器，完成即保存到 Downloads 目录并发 toast 通知；VT 解析器原生吞掉 OSC 序列，终端画面不受影响。5 项单元测试（跨块边界、ST 终止、元数据解析、非 inline 拒绝、路径清洗）。243 项 + Docker 10/10。
+
 2026-11-06，Windows/MSVC：完成会话恢复功能。新增 `src/restore.rs`：`RestoreEntry`（仅连接标识 name/host/port/username，无凭据）+ 版本化 JSON 存储（`SessionRestoreStore`，discover 模式与 ProfileStore 一致，clear 幂等，未知版本静默忽略），2 项单元测试。`SshSession` 状态变化驱动持久化：AppView 事件循环在 Connected/Disconnected/Failed 事件后及 `close_session` 后调用 `persist_session_restore`（&mut self，仅保存当前 Connected 会话，空列表即清空文件）。启动恢复：Settings 新增 `restore_sessions` 开关（默认关闭）+ Profile sync 分组中的 toggle；开启时 `AppView::new` 末尾调用 `restore_previous_sessions`，仅重连匹配已保存主机资料的条目（按 host+port+username 匹配，凭据走资料自身认证方法），不匹配的条目跳过。`AppSettings`/`SettingsDocument` 新增 `restore_sessions` 字段（serde default，向后兼容）。验证：238 项 + Docker SSH 10/10。
 
 2026-11-06，Windows/MSVC：完成云同步（同步文件夹）功能。Settings 新增 Profile sync 分组：Sync directory 输入框 + Browse 文件夹选择器；`sync_profile_path` 纯函数计算 `<dir>/dshell-profiles.json`（测试覆盖）；`save_workspace` 保存成功后调用 `sync_export_profiles` 自动导出到同步目录（凭据绝不写入，失败仅显示状态消息不阻塞本地保存）；启动时 `AppView::new` 末尾调用 `sync_import_profiles`，`merge_unique_profiles` 按名称去重合并后写回本地存储。`AppSettings` 新增 `sync_directory` 字段（serde default，向后兼容），SettingsDocument 同步映射。`browse_sync_directory` 通过 pending 字段模式在 render 中回填选择结果。验证：236 项通过。
