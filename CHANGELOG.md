@@ -6,6 +6,7 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add a TOTP (time-based one-time password) module that generates RFC 6238 codes for keyboard-interactive authentication.
 - Add a lock screen that covers the workspace with a password field.
   The configured password stays only in the running session, is never
   written to settings or logs, and connections keep running while locked.

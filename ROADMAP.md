@@ -219,6 +219,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 28. 第三批 P2 功能已交付：终端搜索新增匹配高亮（`search_highlight` 字段 + `search_background` 调色板色，三套主题各一色）；侧栏主机行新增发行版图标自动检测（Ubuntu/Debian/CentOS/Alpine/Arch/Fedora/Kali/openSUSE/Amazon，`SidebarRow` 新增可选 `icon` 字段）；主机资料新增 `notes` 字段（版本化 JSON，会话编辑器可编辑，随资料保存到 `hosts.json`）。`cargo fmt --all`、验证脚本通过（218 项），Docker SSH 测试通过（10/10）。
 29. 第四批 P2 功能已交付：新增命令面板（Ctrl+K）列出全部工作区动作并支持按名称过滤；More 菜单新增"十六进制查看屏幕"，将终端可见文本渲染为十六进制；终端渲染新增光标行高亮（`TerminalRun`/`TerminalFrame` 的 cursor row 应用半透明背景色，三套主题各自适配）；会话编辑器新增"测试连接"按钮执行一次 SSH 握手与认证但不打开终端、15 秒超时即取消；新增屏幕锁（Ctrl+Shift+L）覆盖工作区并显示密码输入框，未配置密码时解锁不受限、已配置密码时密码仅在运行时内存比较、绝不写入设置或日志；主机资料导出新增 CSV 格式（`export_profiles_csv`，仅含非秘密字段，`csv_escape` 处理引号/逗号，测试验证不泄露密码）。`cargo fmt --all`、验证脚本通过（221 项），Docker SSH 测试通过（10/10）。未在用户活动桌面启动 GUI；命令面板、十六进制查看、连接测试弹层、屏幕锁交互及 DPI/IME 仍需隔离 Windows 桌面人工验收。
 
+30. TOTP 认证模块已交付：新增 `src/totp.rs` 实现 RFC 4226/6238 TOTP 算法（base32 密钥解码、HMAC-SHA1、30 秒步长、6 位数字），含 RFC 6238 参考向量测试、时间步测试和相邻窗口漂移测试。`Authentication::KeyboardInteractive` 枚举变体新增 `totp_secret` 字段，键盘交互认证时自动计算并填充一次性密码。`build_authentication` 新增可选 TOTP 密钥参数。新增 `hmac` 和 `sha1` 依赖。验证通过（224 项），Docker SSH 测试通过（10/10）。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。
