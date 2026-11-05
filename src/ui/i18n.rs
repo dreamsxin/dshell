@@ -654,6 +654,37 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Edit" => "编辑",
         "Browse" => "浏览",
         "Choose identity file" => "选择身份文件",
+        "Test connection" => "测试连接",
+        "Testing connection to {host}:{port}..." => "正在测试连接 {host}:{port}...",
+        "View visible screen as hex" => "以十六进制查看可见屏幕",
+        "Set lock password" => "设置屏幕锁密码",
+        "Screen lock" => "屏幕锁",
+        "Screen locked" => "屏幕已锁定",
+        "Enter the password to unlock this screen. Connections stay alive." => {
+            "输入密码解锁此屏幕。连接保持活跃。"
+        }
+        "Unlock" => "解锁",
+        "Incorrect password. The screen stays locked." => "密码不正确，屏幕保持锁定。",
+        "Required when locking the screen. The password is kept only in this running session and is not written to settings or logs." => {
+            "锁定屏幕时需要。密码仅保留在当前运行会话中，不写入设置或日志。"
+        }
+        "Hex view (visible screen)" => "十六进制视图（可见屏幕）",
+        "No commands match your search" => "没有匹配的命令",
+        "Search commands by name" => "按名称搜索命令",
+        "Use Up/Down to navigate, Enter to run, Esc to close" => {
+            "上/下键导航，Enter 运行，Esc 关闭"
+        }
+        "Disconnect session" => "断开会话",
+        "Toggle SFTP files" => "切换 SFTP 文件面板",
+        "Toggle keys" => "切换密钥面板",
+        "Toggle broadcast mode" => "切换广播模式",
+        "Toggle UI theme" => "切换界面主题",
+        "Replay session log" => "回放会话日志",
+        "Find in terminal" => "终端内查找",
+        "Toggle keyword highlights" => "切换关键词高亮",
+        "Toggle triggers" => "切换触发器",
+        "Open key generator" => "打开密钥生成器",
+        "Toggle port forwarding" => "切换端口转发",
         "Focus address bar" => "聚焦地址栏",
         "Save visible screen" => "保存可见屏幕",
         "Save screen" => "保存屏幕",

@@ -6,6 +6,18 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add a lock screen that covers the workspace with a password field.
+  The configured password stays only in the running session, is never
+  written to settings or logs, and connections keep running while locked.
+- Add Ctrl+Shift+L to lock or unlock the screen.
+- Add a command palette (Ctrl+K) that lists workspace actions and
+  supports filtering by name.
+- Add a hex view of the visible terminal screen in the More menu.
+- Add a cursor row highlight in the terminal, visible in live sessions
+  and log replay.
+- Add a connection test button in the session editor that completes a
+  SSH handshake without opening a terminal.
+- Add CSV export of host profiles that omit all secret fields.
 - Add search match highlighting in the terminal: matched text gets a distinct
   background color from the palette, visible in both live sessions and log
   replay.

@@ -671,6 +671,90 @@ async fn run_connection(
     .await
 }
 
+/// Test a connection without opening a terminal session.
+///
+/// Performs the SSH handshake and authentication only; returns a success
+/// message once authenticated, or an error message on failure. The connection
+/// is cancelled immediately after the test. Credentials are consumed here and
+/// not stored. Must run on a Tokio runtime.
+pub async fn test_connection(spec: ConnectionSpec) -> Result<String> {
+    let (_command_tx, mut command_rx) = mpsc::channel(8);
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let (_sftp_command_tx, _sftp_command_rx) = mpsc::channel::<SftpCommand>(1);
+    let (sftp_event_tx, sftp_event_rx) = mpsc::channel(1);
+    let _ = sftp_event_rx;
+    let sftp_cancel = Arc::new(AtomicBool::new(false));
+    let sftp_command_target = Arc::new(AsyncMutex::new(None::<mpsc::Sender<SftpCommand>>));
+    let (_forward_command_tx, mut forward_command_rx) = mpsc::channel(1);
+    let (forward_event_tx, _forward_event_rx) = mpsc::unbounded_channel::<ForwardEvent>();
+    let known_hosts_path = default_known_hosts_path()?;
+    let connection = tokio::spawn({
+        let spec = spec.clone();
+        let mut command_rx = command_rx;
+        let mut cancellation = cancel_rx;
+        let mut forward_command_rx = forward_command_rx;
+        let mut connected_once = false;
+        let mut reconnect_attempt = 0u8;
+        async move {
+            run_connection_attempt_with_known_hosts(
+                spec,
+                &mut command_rx,
+                event_tx,
+                sftp_event_tx,
+                Arc::clone(&sftp_command_target),
+                sftp_cancel,
+                &mut forward_command_rx,
+                forward_event_tx,
+                known_hosts_path,
+                &mut cancellation,
+                &mut connected_once,
+                &mut reconnect_attempt,
+            )
+            .await
+        }
+    });
+
+    let mut connected: Option<String> = None;
+    let mut failure: Option<String> = None;
+
+    match tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                UiEvent::Status(status) if status.starts_with("Connected to ") => {
+                    connected = Some(status);
+                    break;
+                }
+                UiEvent::Failed(error) => {
+                    failure = Some(error);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    {
+        Ok(_) => {}
+        Err(_) => {
+            if failure.is_none() && connected.is_none() {
+                failure = Some("Connection test timed out after 15 seconds".to_owned());
+            }
+        }
+    }
+
+    let _ = cancel_tx.send_replace(true);
+    connection.abort();
+
+    if let Some(status) = connected {
+        Ok(status)
+    } else if let Some(error) = failure {
+        bail!("Connection test failed: {error}")
+    } else {
+        bail!("Connection test failed without a message")
+    }
+}
+
 fn is_retryable_reconnect_error(error: &anyhow::Error) -> bool {
     let text = error
         .chain()

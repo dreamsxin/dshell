@@ -468,6 +468,63 @@ pub fn export_profiles(path: &Path, profiles: &[HostProfile]) -> Result<(), Stri
     })
 }
 
+/// Export host profiles as a CSV document.
+///
+/// The CSV contains only non-secret connection fields (name, host, port,
+/// username, auth method, identity file, group, tab label, tab color,
+/// keep-alive). Passwords, passphrases and key material are never written.
+pub fn export_profiles_csv(path: &Path, profiles: &[HostProfile]) -> Result<(), String> {
+    validate_profiles(profiles)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "The host profile CSV export path has no parent directory.".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Could not create host profile CSV export directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let mut rows = String::new();
+    rows.push_str("name,host,port,username,auth_method,identity_file,group,tab_label,tab_color,keepalive_seconds\n");
+    for profile in profiles {
+        rows.push_str(&csv_escape(&profile.name));
+        rows.push(',');
+        rows.push_str(&csv_escape(&profile.host));
+        rows.push(',');
+        rows.push_str(&profile.port.to_string());
+        rows.push(',');
+        rows.push_str(&csv_escape(&profile.username));
+        rows.push(',');
+        rows.push_str(&csv_escape(profile.auth_method.label()));
+        rows.push(',');
+        rows.push_str(&csv_escape(&profile.identity_file));
+        rows.push(',');
+        rows.push_str(&csv_escape(&profile.group));
+        rows.push(',');
+        rows.push_str(&csv_escape(&profile.tab_label));
+        rows.push(',');
+        rows.push_str(&csv_escape(&profile.tab_color.label()));
+        rows.push(',');
+        rows.push_str(&profile.keepalive_seconds.to_string());
+        rows.push('\n');
+    }
+    fs::write(path, rows).map_err(|error| {
+        format!(
+            "Could not write host profile CSV export at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        let escaped = value.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        value.to_owned()
+    }
+}
+
 /// Import host profiles from the versioned, credential-free export format.
 pub fn import_profiles(path: &Path) -> Result<Vec<HostProfile>, String> {
     let contents = fs::read_to_string(path).map_err(|error| {
@@ -676,6 +733,40 @@ mod tests {
             last_local_directory: String::new(),
             last_remote_directory: String::new(),
         }
+    }
+
+    #[test]
+    fn exporting_profiles_as_csv_omits_secrets_and_quotes_columns() {
+        let mut host1 = profile("staging, prod");
+        host1.host = "host.example.com".to_owned();
+        host1.username = "deploy".to_owned();
+        host1.auth_method = AuthMethod::PublicKey;
+        host1.identity_file = "~/.ssh/id_ed25519".to_owned();
+        host1.group = "Production".to_owned();
+        host1.tab_label = "Tab, Label".to_owned();
+        host1.tab_color = TabColor::Red;
+        host1.password = "supersecret".to_owned();
+        let mut host2 = profile("other-host");
+        host2.port = 22;
+        host2.keepalive_seconds = 30;
+        host2.password = "othersecret".to_owned();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.csv");
+        export_profiles_csv(&path, &[host1, host2]).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines = contents.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("name,host,port,username,auth_method,identity_file,group,tab_label,tab_color,keepalive_seconds"));
+        let first = lines[1];
+        assert!(first.contains("\"staging, prod\""));
+        assert!(first.contains("\"Tab, Label\""));
+        assert!(first.contains("~/.ssh/id_ed25519"));
+        assert!(!first.contains("supersecret"));
+        let second = lines[2];
+        assert!(second.contains("other-host,"));
+        assert!(second.contains(",22,"));
+        assert!(second.ends_with(",30"));
+        assert!(!second.contains("othersecret"));
     }
 
     #[test]

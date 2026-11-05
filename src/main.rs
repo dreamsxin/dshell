@@ -685,6 +685,49 @@ fn expand_local_path(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+const HEX_DUMP_BYTES_PER_ROW: usize = 16;
+const HEX_DUMP_MAX_BYTES: usize = 64 * 1024;
+
+fn hex_dump(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let truncated = bytes.len() > HEX_DUMP_MAX_BYTES;
+    let bytes = if truncated {
+        &bytes[..HEX_DUMP_MAX_BYTES]
+    } else {
+        bytes
+    };
+    let mut lines = Vec::new();
+    for (row, chunk) in bytes.chunks(HEX_DUMP_BYTES_PER_ROW).enumerate() {
+        let offset = row * HEX_DUMP_BYTES_PER_ROW;
+        let mut hex = String::new();
+        let mut ascii = String::new();
+        for (index, byte) in chunk.iter().enumerate() {
+            let _ = index;
+            hex.push_str(&format!("{byte:02x} "));
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                ascii.push(*byte as char);
+            } else {
+                ascii.push('.');
+            }
+        }
+        for _ in chunk.len()..HEX_DUMP_BYTES_PER_ROW {
+            hex.push_str("   ");
+        }
+        lines.push(format!("{offset:08x}  {hex} |{ascii}|"));
+    }
+    if truncated {
+        lines.push(format!(
+            "... output truncated at {} bytes (total {} bytes)",
+            HEX_DUMP_MAX_BYTES,
+            bytes.len()
+        ));
+    }
+    if lines.is_empty() {
+        lines.push("empty".to_owned());
+    }
+    lines.join("\n") + "\n"
+}
+
 fn sanitize_filename(name: &str) -> Option<String> {
     let cleaned: String = name
         .chars()
@@ -1802,6 +1845,110 @@ fn session_switcher_matches_ids(sessions: &[SshSession], query: &str) -> Vec<u64
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaletteCommand {
+    NewSession,
+    SessionProperties,
+    ImportOpenSshConfig,
+    ImportProfiles,
+    ExportProfiles,
+    CloseSession,
+    Disconnect,
+    ToggleFiles,
+    ToggleSnippets,
+    ToggleSettings,
+    ToggleKeys,
+    ToggleSidebar,
+    ToggleInspector,
+    ToggleCompose,
+    ToggleBroadcast,
+    SaveScreen,
+    ToggleTheme,
+    ReplayLog,
+    Find,
+    SessionSwitcher,
+    ToggleKeywords,
+    ToggleTriggers,
+    Keygen,
+    PortForwarding,
+}
+
+impl PaletteCommand {
+    const ALL: [Self; 24] = [
+        Self::NewSession,
+        Self::SessionProperties,
+        Self::ImportOpenSshConfig,
+        Self::ImportProfiles,
+        Self::ExportProfiles,
+        Self::CloseSession,
+        Self::Disconnect,
+        Self::ToggleFiles,
+        Self::ToggleSnippets,
+        Self::ToggleSettings,
+        Self::ToggleKeys,
+        Self::ToggleSidebar,
+        Self::ToggleInspector,
+        Self::ToggleCompose,
+        Self::ToggleBroadcast,
+        Self::SaveScreen,
+        Self::ToggleTheme,
+        Self::ReplayLog,
+        Self::Find,
+        Self::SessionSwitcher,
+        Self::ToggleKeywords,
+        Self::ToggleTriggers,
+        Self::Keygen,
+        Self::PortForwarding,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NewSession => "New session",
+            Self::SessionProperties => "Session properties",
+            Self::ImportOpenSshConfig => "Import OpenSSH config",
+            Self::ImportProfiles => "Import dshell host profiles",
+            Self::ExportProfiles => "Export host profiles",
+            Self::CloseSession => "Close session",
+            Self::Disconnect => "Disconnect session",
+            Self::ToggleFiles => "Toggle SFTP files",
+            Self::ToggleSnippets => "Toggle snippets",
+            Self::ToggleSettings => "Toggle settings",
+            Self::ToggleKeys => "Toggle keys",
+            Self::ToggleSidebar => "Toggle sidebar",
+            Self::ToggleInspector => "Toggle inspector",
+            Self::ToggleCompose => "Toggle compose",
+            Self::ToggleBroadcast => "Toggle broadcast mode",
+            Self::SaveScreen => "Save visible screen",
+            Self::ToggleTheme => "Toggle UI theme",
+            Self::ReplayLog => "Replay session log",
+            Self::Find => "Find in terminal",
+            Self::SessionSwitcher => "Switch session",
+            Self::ToggleKeywords => "Toggle keyword highlights",
+            Self::ToggleTriggers => "Toggle triggers",
+            Self::Keygen => "Open key generator",
+            Self::PortForwarding => "Toggle port forwarding",
+        }
+    }
+}
+
+fn palette_command_matches(command: PaletteCommand, query: &str) -> bool {
+    let keywords = query.split_whitespace().collect::<Vec<_>>();
+    keywords.is_empty()
+        || keywords.iter().all(|keyword| {
+            command
+                .label()
+                .to_lowercase()
+                .contains(&keyword.to_lowercase())
+        })
+}
+
+fn palette_matching_commands(query: &str) -> Vec<PaletteCommand> {
+    PaletteCommand::ALL
+        .into_iter()
+        .filter(|command| palette_command_matches(*command, query))
+        .collect()
+}
+
 fn next_session_switcher_index(current: usize, count: usize, direction: i32) -> Option<usize> {
     if count == 0 {
         return None;
@@ -2061,26 +2208,27 @@ fn remove_session(
 mod session_tests {
     use super::{
         AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, GroupLaunchState,
-        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, SessionEditorEscape,
+        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, PaletteCommand, SessionEditorEscape,
         SessionEditorKey, SessionLaunchSettings, SessionSplit, SessionState, SftpViewState,
         SplitOrientation, SshSession, TabColor, TerminalFrame, TerminalRequest, TerminalSize,
         UiEvent, app_shortcut, apply_session_event, collapsed_group_key, dragged_panel_width,
         effective_terminal_theme, enqueue_session_request, filesystem_usage_percent,
         forget_stopped_forward, format_alert_time, format_log_time, format_rate,
-        format_storage_kib, group_launch_candidates, is_authentication_failure,
+        format_storage_kib, group_launch_candidates, hex_dump, is_authentication_failure,
         is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
         matching_saved_profile_for_session, memory_usage_percent, merge_unique_profiles,
-        move_profile_to_group, mpsc, next_session_switcher_index, parse_alert_percent,
-        recall_compose_history, recent_sftp_directories_for_target, remember_compose_history,
-        remember_stopped_forward, remove_profile_group, remove_session, rename_profile_group,
-        reorder_group_order, reorder_session_ids, saved_profile_for_session, search_result_message,
-        server_alert_observations, session_accepts_requests, session_editor_escape,
-        session_editor_key, session_matches_tab_group, session_matches_tab_group_selection,
-        session_matches_target, session_switcher_matches_ids, session_tab_group_choices,
-        session_tab_group_filter_after_selection, session_terminal_size_for_split,
-        split_panel_terminal_size, synchronized_group_target_ids, synchronized_input_targets,
-        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
-        unique_duplicate_session_title, update_sessions_for_profile, watch,
+        move_profile_to_group, mpsc, next_session_switcher_index, palette_matching_commands,
+        parse_alert_percent, recall_compose_history, recent_sftp_directories_for_target,
+        remember_compose_history, remember_stopped_forward, remove_profile_group, remove_session,
+        rename_profile_group, reorder_group_order, reorder_session_ids, saved_profile_for_session,
+        search_result_message, server_alert_observations, session_accepts_requests,
+        session_editor_escape, session_editor_key, session_matches_tab_group,
+        session_matches_tab_group_selection, session_matches_target, session_switcher_matches_ids,
+        session_tab_group_choices, session_tab_group_filter_after_selection,
+        session_terminal_size_for_split, split_panel_terminal_size, synchronized_group_target_ids,
+        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
+        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
+        watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -3003,6 +3151,42 @@ mod session_tests {
         assert!(keyword_matches("request timed out", &["timed".to_owned()]));
         assert!(!keyword_matches("connected", &keywords));
         assert!(!keyword_matches("error", &[String::new()]));
+    }
+
+    #[test]
+    fn command_palette_filters_and_covers_all_entries() {
+        assert_eq!(palette_matching_commands("").len(), 24);
+        let results = palette_matching_commands("session");
+        assert!(results.contains(&PaletteCommand::NewSession));
+        assert!(results.contains(&PaletteCommand::CloseSession));
+        assert!(!results.contains(&PaletteCommand::ToggleBroadcast));
+        assert!(palette_matching_commands("broadcast").contains(&PaletteCommand::ToggleBroadcast));
+        assert!(palette_matching_commands("zzz-no-match").is_empty());
+        // Every command must have a label.
+        for command in PaletteCommand::ALL {
+            assert!(!command.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn hex_dump_formats_offsets_hex_and_ascii_columns() {
+        let dump = hex_dump("AB");
+        let lines = dump.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("00000000  41 42 "));
+        assert!(lines[0].ends_with("|AB|"));
+
+        let multi = hex_dump("0123456789ABCDEF G");
+        let lines = multi.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].starts_with("00000010"));
+        assert!(lines[1].ends_with("| G|"));
+
+        // Non-printable characters are shown as dots.
+        let control = hex_dump("a\u{7}b");
+        assert!(control.contains("|a.b"));
+        assert!(hex_dump("").trim() == "empty");
+        assert!(hex_dump("").ends_with('\n'));
     }
 
     #[test]
@@ -3956,6 +4140,8 @@ struct AppView {
     session_switcher_search: Entity<InputState>,
     address_bar: Entity<InputState>,
     session_switcher_visible: bool,
+    command_palette_visible: bool,
+    command_palette_selected: usize,
     terminal_comparison: Option<TerminalComparison>,
     file_editor: Option<FileEditorState>,
     file_editor_confirm_close: Option<FileEditorConfirmClose>,
@@ -3964,6 +4150,12 @@ struct AppView {
     pending_paste: Option<PendingPaste>,
     paste_confirm_lines: usize,
     paste_confirm_chars: usize,
+    hex_viewer: Option<String>,
+    screen_locked: bool,
+    lock_password: Entity<InputState>,
+    lock_message: String,
+    lock_password_configured: String,
+    setting_lock_password: Entity<InputState>,
     session_switcher_selected: usize,
     session_switcher_scroll: ScrollHandle,
     compose_input: Entity<InputState>,
@@ -4092,6 +4284,8 @@ impl AppView {
             InputState::new(window, cx).placeholder("Search sessions by name, user, host or port")
         });
         let address_bar = cx.new(|cx| InputState::new(window, cx).placeholder("user@host:port"));
+        let lock_password =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Enter password to unlock"));
         let compose_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line()
@@ -4331,6 +4525,8 @@ impl AppView {
             session_switcher_search,
             address_bar,
             session_switcher_visible: false,
+            command_palette_visible: false,
+            command_palette_selected: 0,
             terminal_comparison: None,
             file_editor: None,
             file_editor_confirm_close: None,
@@ -4339,9 +4535,15 @@ impl AppView {
             pending_paste: None,
             paste_confirm_lines: 0,
             paste_confirm_chars: 0,
+            hex_viewer: None,
+            screen_locked: false,
+            lock_message: String::new(),
+            lock_password_configured: String::new(),
             session_switcher_selected: 0,
             session_switcher_scroll: ScrollHandle::new(),
             compose_input,
+            lock_password,
+            setting_lock_password: cx.new(|cx| InputState::new(window, cx).placeholder("Optional")),
             compose_visible: false,
             compose_history: Vec::new(),
             compose_recall: 0,
@@ -7409,6 +7611,91 @@ impl AppView {
         cx.notify();
     }
 
+    fn test_current_connection(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.read(cx).value().trim().to_owned();
+        let port_text = self.port.read(cx).value().trim().to_owned();
+        let username = self.username.read(cx).value().trim().to_owned();
+        let identity_file = self.identity_file.read(cx).value().trim().to_owned();
+        let auth_method = self.auth_method;
+        let password = Zeroizing::new(self.password.read(cx).text().to_string());
+        let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
+        let keepalive_text = self.keepalive_seconds.read(cx).value().trim().to_owned();
+
+        let port = match port_text.parse::<u16>() {
+            Ok(port) if port > 0 && port <= 65535 => port,
+            _ => {
+                self.profile_message = self.tr("Port must be between 1 and 65535.");
+                cx.notify();
+                return;
+            }
+        };
+        if host.is_empty() {
+            self.profile_message = self.tr("Host is required.");
+            cx.notify();
+            return;
+        }
+        if username.is_empty() {
+            self.profile_message = self.tr("Username is required.");
+            cx.notify();
+            return;
+        }
+        let authentication =
+            match build_authentication(auth_method, &identity_file, password, passphrase) {
+                Ok(auth) => auth,
+                Err(error) => {
+                    self.profile_message = self.tr(&error);
+                    cx.notify();
+                    return;
+                }
+            };
+        let keepalive_seconds = match keepalive_text.parse::<u16>() {
+            Ok(value) => value,
+            Err(_) => 0,
+        };
+        let theme = effective_terminal_theme(self.profile_terminal_theme, self.settings.theme);
+        let spec = ConnectionSpec {
+            host: host.clone(),
+            port,
+            username,
+            authentication,
+            terminal_size: self.terminal_size,
+            jump: None,
+            keepalive_seconds,
+            reconnect: ReconnectSettings::default(),
+            theme,
+            cursor_style: self.settings.cursor_style,
+        };
+        self.profile_message = self
+            .tr("Testing connection to {host}:{port}...")
+            .replace("{host}", &host)
+            .replace("{port}", &port.to_string());
+        cx.notify();
+        cx.spawn(
+            async move |this, cx| match ssh::test_connection(spec).await {
+                Ok(status) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.profile_message = String::new();
+                        view.show_toast(status, Tone::Success, cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.profile_message = String::new();
+                        view.show_toast(
+                            view.tr("Connection test failed: {error}")
+                                .replace("{error}", &error.to_string()),
+                            Tone::Danger,
+                            cx,
+                        );
+                        cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
     fn cache_credentials_for_session(
         &mut self,
         key: CredentialCacheKey,
@@ -8192,6 +8479,11 @@ impl AppView {
         }
         let modifiers = event.keystroke.modifiers;
         let key_name = event.keystroke.key.to_ascii_lowercase();
+        if key_name == "k" && (modifiers.control || modifiers.platform) && !modifiers.shift {
+            cx.stop_propagation();
+            self.toggle_command_palette(window, cx);
+            return;
+        }
         if let Some(shortcut) = app_shortcut(
             &self.settings.shortcuts,
             &key_name,
@@ -8213,6 +8505,7 @@ impl AppView {
                 AppShortcut::Find => self.open_search(session_id, window, cx),
                 AppShortcut::ToggleSessionSwitcher => self.toggle_session_switcher(window, cx),
                 AppShortcut::FocusAddressBar => self.focus_address_bar(window, cx),
+                AppShortcut::ToggleScreenLock => self.toggle_screen_lock(window, cx),
                 AppShortcut::SelectSession(index) => {
                     if let Some(target) = self.sessions.get(index).map(|session| session.id) {
                         self.select_session(target, window, cx);
@@ -8811,6 +9104,114 @@ impl AppView {
         cx.notify();
     }
 
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette_visible {
+            self.close_command_palette(window, cx);
+        } else {
+            self.command_palette_visible = true;
+            self.command_palette_selected = 0;
+            self.session_switcher_visible = false;
+            self.session_switcher_search
+                .update(cx, |state, cx| state.focus(window, cx));
+            cx.notify();
+        }
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette_visible {
+            self.command_palette_visible = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
+    fn move_command_palette_selection(&mut self, direction: i32, cx: &mut Context<Self>) {
+        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let count = palette_matching_commands(&query).len();
+        if count == 0 {
+            self.command_palette_selected = 0;
+            return;
+        }
+        self.command_palette_selected =
+            next_session_switcher_index(self.command_palette_selected, count, direction)
+                .unwrap_or_default();
+        cx.notify();
+    }
+
+    fn execute_palette_command(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let commands = palette_matching_commands(&query);
+        let Some(command) = commands
+            .get(index.min(commands.len().saturating_sub(1)))
+            .copied()
+        else {
+            return;
+        };
+        self.command_palette_visible = false;
+        let active_id = self.active_session_id;
+        window.focus(&self.terminal_focus);
+        match command {
+            PaletteCommand::NewSession => self.new_profile(window, cx),
+            PaletteCommand::SessionProperties => {
+                self.session_editor_section = SessionEditorSection::Connection;
+                self.session_editor_open = true;
+                self.request_overlay_focus();
+            }
+            PaletteCommand::ImportOpenSshConfig => self.begin_config_import(cx),
+            PaletteCommand::ImportProfiles => self.begin_profile_import(cx),
+            PaletteCommand::ExportProfiles => self.begin_profile_export(cx),
+            PaletteCommand::CloseSession => {
+                if let Some(id) = active_id {
+                    self.close_session(id, window, cx);
+                }
+            }
+            PaletteCommand::Disconnect => {
+                if let Some(id) = active_id {
+                    self.disconnect_session(id, cx);
+                }
+            }
+            PaletteCommand::ToggleFiles => {
+                if let Some(id) = active_id {
+                    self.toggle_sftp(id, cx);
+                }
+            }
+            PaletteCommand::ToggleSnippets => self.toggle_snippets(cx),
+            PaletteCommand::ToggleSettings => self.toggle_settings(window, cx),
+            PaletteCommand::ToggleKeys => self.toggle_keys(window, cx),
+            PaletteCommand::ToggleSidebar => self.toggle_sidebar(window, cx),
+            PaletteCommand::ToggleInspector => self.toggle_inspector(window, cx),
+            PaletteCommand::ToggleCompose => self.toggle_compose(window, cx),
+            PaletteCommand::ToggleBroadcast => self.toggle_broadcast(window, cx),
+            PaletteCommand::SaveScreen => {
+                if let Some(id) = active_id {
+                    self.save_visible_screen(id, window, cx);
+                }
+            }
+            PaletteCommand::ToggleTheme => self.toggle_ui_theme(cx),
+            PaletteCommand::ReplayLog => self.begin_log_replay(cx),
+            PaletteCommand::Find => {
+                if let Some(id) = active_id {
+                    self.open_search(id, window, cx);
+                }
+            }
+            PaletteCommand::SessionSwitcher => self.open_session_switcher(window, cx),
+            PaletteCommand::ToggleKeywords => self.toggle_keywords(window, cx),
+            PaletteCommand::ToggleTriggers => self.toggle_triggers(window, cx),
+            PaletteCommand::Keygen => self.toggle_keys(window, cx),
+            PaletteCommand::PortForwarding => {
+                if let Some(id) = active_id {
+                    self.toggle_tunnels(id, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn toggle_session_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.session_switcher_visible {
             self.close_session_switcher(window, cx);
@@ -8863,6 +9264,25 @@ impl AppView {
                 cx.notify();
             }
         }
+    }
+
+    fn open_hex_viewer(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let Some(frame) = self
+            .session(session_id)
+            .and_then(|session| session.frame.as_ref())
+        else {
+            self.profile_message = self.tr("No terminal output to view.");
+            cx.notify();
+            return;
+        };
+        let text = frame_visible_text(frame);
+        self.hex_viewer = Some(hex_dump(&text));
+        cx.notify();
+    }
+
+    fn close_hex_viewer(&mut self, cx: &mut Context<Self>) {
+        self.hex_viewer = None;
+        cx.notify();
     }
 
     fn save_visible_screen(
@@ -10336,6 +10756,18 @@ impl AppView {
                 this.cancel_session_editor(window, cx);
             })),
         );
+        footer = footer.child(
+            components::button(
+                &tokens,
+                "credential-prompt-test-connection",
+                self.tr("Test connection"),
+                ButtonKind::Ghost,
+                ButtonSize::Regular,
+            )
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.test_current_connection(cx);
+            })),
+        );
         if group_batch_prompt {
             footer = footer.child(
                 components::button(
@@ -10604,6 +11036,61 @@ impl AppView {
                             )),
                     )
                     .child(footer),
+            )
+            .into_any_element()
+    }
+
+    fn hex_viewer_overlay(&mut self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> AnyElement {
+        let Some(content) = self.hex_viewer.as_ref() else {
+            return div().into_any_element();
+        };
+        let content = content.clone();
+        components::modal_overlay(tokens, "hex-viewer-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_hex_viewer(cx);
+                }
+            }))
+            .child(
+                components::modal_panel(tokens, "hex-viewer-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_SESSION))
+                    .max_h(px(ui_tokens::MODAL_HEIGHT_SESSION))
+                    .child(
+                        components::modal_header(tokens, self.tr("Hex view (visible screen)"))
+                            .child(
+                                components::icon_button(
+                                    tokens,
+                                    "hex-viewer-close",
+                                    IconName::Close,
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                    self.tr("Close"),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_hex_viewer(cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("hex-viewer-content")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p(px(ui_tokens::SPACE_3))
+                            .bg(tokens.surface)
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .font_family("Consolas, monospace")
+                            .text_color(tokens.text_secondary)
+                            .child(content),
+                    ),
             )
             .into_any_element()
     }
@@ -14269,6 +14756,71 @@ impl AppView {
         cx.notify();
     }
 
+    fn lock_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.screen_locked {
+            return div().into_any_element();
+        }
+        let tokens = self.tokens();
+        let message = self.lock_message.clone();
+        components::modal_overlay(&tokens, "screen-lock-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.toggle_screen_lock(window, cx);
+                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
+                    cx.stop_propagation();
+                    this.unlock_screen(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(&tokens, "screen-lock-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_CONFIRM))
+                    .max_h(px(400.))
+                    .child(components::modal_header(
+                        &tokens,
+                        self.tr("Screen locked"),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_3))
+                            .p(px(ui_tokens::SPACE_4))
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("Enter the password to unlock this screen. Connections stay alive."),
+                            ))
+                            .child(
+                                TextInput::new(&self.lock_password)
+                                    .h(px(ui_tokens::CONTROL_HEIGHT))
+                                    .w_full()
+                                    .mask_toggle(),
+                            )
+                            .when(!message.is_empty(), |body| {
+                                body.child(components::warning_text(&tokens, message.clone()))
+                            }),
+                    )
+                    .child(
+                        components::modal_footer(&tokens)
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "lock-unlock",
+                                    self.tr("Unlock"),
+                                    ButtonKind::Primary,
+                                    ButtonSize::Regular,
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.unlock_screen(window, cx);
+                                })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn service_action_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = self.tokens();
         let Some((_, name, action)) = self.pending_service_action.clone() else {
@@ -15806,6 +16358,56 @@ impl AppView {
         ui::theme::install(cx, self.ui_theme);
         self.persist_ui_preferences(cx);
         cx.notify();
+    }
+
+    fn toggle_screen_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen_locked {
+            Self::set_input_value(&self.lock_password, "", window, cx);
+            self.lock_message = String::new();
+            self.screen_locked = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        } else {
+            Self::set_input_value(&self.lock_password, "", window, cx);
+            self.lock_message = String::new();
+            self.screen_locked = true;
+            self.request_overlay_focus();
+            cx.notify();
+        }
+    }
+
+    fn unlock_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let supplied = self.lock_password.read(cx).text().to_string();
+        let configured = self.lock_password_configured.clone();
+        if configured.is_empty() {
+            self.screen_locked = false;
+            self.lock_message = String::new();
+            window.focus(&self.terminal_focus);
+            cx.notify();
+            return;
+        }
+        if supplied == configured {
+            Self::set_input_value(&self.lock_password, "", window, cx);
+            self.screen_locked = false;
+            self.lock_message = String::new();
+            window.focus(&self.terminal_focus);
+        } else {
+            self.lock_message = self
+                .tr("Incorrect password. The screen stays locked.")
+                .to_owned();
+        }
+        cx.notify();
+    }
+
+    fn store_lock_password_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entered = self.setting_lock_password.read(cx).text().to_string();
+        self.lock_password_configured = entered;
+        Self::set_input_value(&self.setting_lock_password, "", window, cx);
+        cx.notify();
+    }
+
+    fn save_setting_lock_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        Self::set_input_value(&self.lock_password, "", window, cx);
     }
 
     fn persist_ui_preferences(&mut self, cx: &mut Context<Self>) {
@@ -17449,6 +18051,23 @@ impl AppView {
                             .gap(px(ui_tokens::SPACE_2))
                             .child(components::section_label(&tokens, self.tr("Language")))
                             .child(language_selector),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(components::section_label(&tokens, self.tr("Screen lock")))
+                            .child(components::field(
+                                &tokens,
+                                self.tr("Set lock password"),
+                                &self.setting_lock_password,
+                                true,
+                            ))
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("Required when locking the screen. The password is kept only in this running session and is not written to settings or logs."),
+                            )),
                     )
                     .child(components::help_text(
                         &tokens,
@@ -19633,6 +20252,125 @@ impl AppView {
             .into_any_element()
     }
 
+    fn command_palette_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let commands = palette_matching_commands(&query);
+        let selected_index = self
+            .command_palette_selected
+            .min(commands.len().saturating_sub(1));
+        let mut list = div()
+            .id("command-palette-list")
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p(px(ui_tokens::SPACE_3));
+        if commands.is_empty() {
+            list = list.child(components::empty_state(
+                tokens,
+                self.tr("No commands match your search"),
+                self.tr("Search commands by name"),
+            ));
+        } else {
+            for (index, command) in commands.into_iter().enumerate() {
+                let selected = selected_index == index;
+                let label = self.tr(command.label());
+                list = list.child(
+                    div()
+                        .id(("command-palette-row", index))
+                        .flex()
+                        .items_center()
+                        .gap(px(ui_tokens::SPACE_2))
+                        .min_h(px(ui_tokens::LIST_ROW_HEIGHT))
+                        .px(px(ui_tokens::SPACE_3))
+                        .border_1()
+                        .border_color(if selected {
+                            tokens.focus_ring
+                        } else {
+                            tokens.border_subtle
+                        })
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .bg(if selected {
+                            tokens.surface_raised
+                        } else {
+                            tokens.surface
+                        })
+                        .hover(|style| style.bg(tokens.surface_raised))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.execute_palette_command(index, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_size(px(ui_tokens::FONT_BODY))
+                                .text_color(tokens.text_primary)
+                                .child(label),
+                        ),
+                );
+            }
+        }
+        components::modal_overlay(tokens, "command-palette-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.to_ascii_lowercase();
+                let modifiers = event.keystroke.modifiers;
+                if key == "escape" {
+                    cx.stop_propagation();
+                    this.close_command_palette(window, cx);
+                } else if key == "enter" {
+                    cx.stop_propagation();
+                    this.execute_palette_command(this.command_palette_selected, window, cx);
+                } else if key == "up" {
+                    cx.stop_propagation();
+                    this.move_command_palette_selection(-1, cx);
+                } else if key == "down" {
+                    cx.stop_propagation();
+                    this.move_command_palette_selection(1, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(tokens, "command-palette-panel")
+                    .w_full()
+                    .max_w(px(ui_tokens::MODAL_WIDTH_AUTH))
+                    .max_h(px(520.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .h(px(ui_tokens::MODAL_HEADER_HEIGHT))
+                            .px(px(ui_tokens::SPACE_4))
+                            .border_b_1()
+                            .border_color(tokens.border_subtle)
+                            .child(
+                                TextInput::new(&self.session_switcher_search)
+                                    .h(px(ui_tokens::CONTROL_HEIGHT_SM))
+                                    .w_full(),
+                            ),
+                    )
+                    .child(list)
+                    .child(
+                        div()
+                            .px(px(ui_tokens::SPACE_3))
+                            .py(px(ui_tokens::SPACE_2))
+                            .border_t_1()
+                            .border_color(tokens.border_subtle)
+                            .child(components::help_text(
+                                tokens,
+                                self.tr("Use Up/Down to navigate, Enter to run, Esc to close"),
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn session_tab_group_overlay(
         &mut self,
         tokens: &ThemeTokens,
@@ -20528,6 +21266,23 @@ impl AppView {
                     this.menu_visible = false;
                     if let Some(session_id) = active_id {
                         this.save_visible_screen(session_id, window, cx);
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-hex-view",
+                    IconName::File,
+                    self.tr("View visible screen as hex"),
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_visible = false;
+                    if let Some(session_id) = active_id {
+                        this.open_hex_viewer(session_id, cx);
                     }
                 })),
             )
@@ -22393,11 +23148,23 @@ fn render_terminal_grid(
 ) -> AnyElement {
     let mut grid = div().flex().flex_col().flex_1().min_h_0();
     for (row_index, row) in frame.rows.iter().enumerate() {
+        let cursor_row = frame
+            .cursor
+            .is_some_and(|cursor| cursor.row as usize == row_index);
         let mut rendered_row = div()
             .flex()
             .relative()
             .h(px(settings.cell_height()))
             .flex_shrink_0();
+        if cursor_row {
+            let base = rgb(palette.selection_background);
+            rendered_row = rendered_row.bg(Rgba {
+                r: base.r,
+                g: base.g,
+                b: base.b,
+                a: 0.28,
+            });
+        }
         for run in row {
             rendered_row = rendered_row.child(render_terminal_run(
                 run,
@@ -22514,6 +23281,7 @@ enum AppShortcut {
     Find,
     ToggleSessionSwitcher,
     FocusAddressBar,
+    ToggleScreenLock,
     SelectSession(usize),
 }
 
@@ -22550,6 +23318,7 @@ fn app_shortcut(
                 ShortcutAction::Find => AppShortcut::Find,
                 ShortcutAction::ToggleSessionSwitcher => AppShortcut::ToggleSessionSwitcher,
                 ShortcutAction::FocusAddressBar => AppShortcut::FocusAddressBar,
+                ShortcutAction::ToggleScreenLock => AppShortcut::ToggleScreenLock,
             });
         }
     }
@@ -22819,6 +23588,9 @@ impl Render for AppView {
         if self.session_switcher_visible {
             root = root.child(self.session_switcher_overlay(&tokens, cx));
         }
+        if self.command_palette_visible {
+            root = root.child(self.command_palette_overlay(&tokens, cx));
+        }
         if self.terminal_comparison.is_some() {
             root = root.child(self.terminal_comparison_overlay(&tokens, cx));
         }
@@ -22852,11 +23624,17 @@ impl Render for AppView {
         if self.pending_paste.is_some() {
             root = root.child(self.paste_confirm_overlay(&tokens, cx));
         }
+        if self.hex_viewer.is_some() {
+            root = root.child(self.hex_viewer_overlay(&tokens, cx));
+        }
         if self.pending_service_action.is_some() {
             root = root.child(self.service_action_overlay(cx));
         }
         if self.pending_power_action.is_some() {
             root = root.child(self.power_action_overlay(cx));
+        }
+        if self.screen_locked {
+            root = root.child(self.lock_overlay(cx));
         }
         if self.pending_process_termination.is_some() {
             root = root.child(self.process_termination_overlay(cx));
