@@ -37,7 +37,7 @@ use crate::terminal::{
     CursorStyle, MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton,
     TerminalMouseEvent, TerminalRequest, TerminalSearchResult, TerminalSize, TerminalTheme,
 };
-use crate::zmodem::{self, ZmodemEvent, ZmodemReceiver};
+use crate::zmodem::{self, ZmodemEvent, ZmodemReceiver, ZmodemSendStep, ZmodemSender};
 
 #[derive(Clone)]
 pub enum Authentication {
@@ -1047,6 +1047,7 @@ async fn run_connection_attempt_with_known_hosts(
     // frame. Once detected it intercepts data until the transfer completes.
     let mut zmodem: Option<ZmodemReceiver> = Some(ZmodemReceiver::new());
     let mut zmodem_active = false;
+    let mut zmodem_sender: Option<ZmodemSender> = None;
     let mut inline_images = InlineImageCollector::new();
     let mut log_file: Option<tokio::fs::File> = None;
     let mut log_buffer: Vec<u8> = Vec::new();
@@ -1215,6 +1216,19 @@ async fn run_connection_attempt_with_known_hosts(
                         control_server_power(&mut session, &events, action).await;
                     }
                     Some(TerminalRequest::ZmodemToggle) => {
+                        if zmodem_sender.take().is_some() {
+                            // An active send is cancelled the same way: the
+                            // CAN sequence makes the remote rz give up.
+                            writer
+                                .data_bytes(vec![zmodem::ZDLE; 8])
+                                .await
+                                .context("Could not cancel ZMODEM transfer")?;
+                            let _ = events
+                                .send(UiEvent::Notification(
+                                    "ZMODEM send cancelled.".to_owned(),
+                                ))
+                                .await;
+                        }
                         if zmodem.is_some() {
                             // Cancel: send the ZMODEM CAN sequence so a remote
                             // rz/sz aborts cleanly, then disarm locally.
@@ -1238,6 +1252,34 @@ async fn run_connection_attempt_with_known_hosts(
                                 ))
                                 .await;
                         }
+                    }
+                    Some(TerminalRequest::ZmodemSendFile { name, data }) => {
+                        // Send mode replaces any armed receive mode; the raw
+                        // byte streams cannot share the channel parser.
+                        if zmodem.take().is_some() {
+                            zmodem_active = false;
+                        }
+                        let sender = ZmodemSender::new(&name, data).map_err(|error| {
+                            anyhow::anyhow!("Could not start the ZMODEM send: {error}")
+                        })?;
+                        // Start rz on the remote shell, then announce the
+                        // transfer. The ZRQINIT bytes queue in the PTY input
+                        // until rz begins reading stdin.
+                        writer
+                            .data_bytes(Bytes::from_static(b"rz\n"))
+                            .await
+                            .context("Could not start the ZMODEM send")?;
+                        writer
+                            .data_bytes(sender.start())
+                            .await
+                            .context("Could not start the ZMODEM send")?;
+                        let _ = events
+                            .send(UiEvent::Notification(format!(
+                                "ZMODEM sending {} (started rz on the remote host).",
+                                sender.file_name()
+                            )))
+                            .await;
+                        zmodem_sender = Some(sender);
                     }
                     None => break,
                 }
@@ -1449,11 +1491,58 @@ async fn run_connection_attempt_with_known_hosts(
                         // iTerm2 inline images: decode and save when no
                         // binary ZMODEM transfer is consuming the stream.
                         let mut inline_image_file = None;
-                        if !zmodem_active {
+                        if !zmodem_active && zmodem_sender.is_none() {
                             for &byte in data.iter() {
                                 if let Some(file) = inline_images.feed(byte) {
                                     inline_image_file = Some(file);
                                 }
+                            }
+                        }
+                        // ZMODEM send: drive the outgoing transfer from the
+                        // remote rz's replies. The raw bytes bypass the VT
+                        // parser while the transfer runs.
+                        let mut zmodem_send_active = false;
+                        let mut zmodem_send_done = false;
+                        let mut zmodem_send_aborted: Option<String> = None;
+                        if let Some(sender) = zmodem_sender.as_mut() {
+                            for &byte in data.iter() {
+                                for step in sender.feed(byte) {
+                                    match step {
+                                        ZmodemSendStep::Write(frames) => {
+                                            writer
+                                                .data_bytes(frames)
+                                                .await
+                                                .context("Could not send ZMODEM data")?;
+                                        }
+                                        ZmodemSendStep::Done => {
+                                            zmodem_send_done = true;
+                                        }
+                                        ZmodemSendStep::Aborted(message) => {
+                                            zmodem_send_aborted = Some(message);
+                                        }
+                                    }
+                                }
+                            }
+                            zmodem_send_active = true;
+                        }
+                        if zmodem_send_done || zmodem_send_aborted.is_some() {
+                            let file_name = zmodem_sender
+                                .as_ref()
+                                .map(|sender| sender.file_name().to_owned())
+                                .unwrap_or_default();
+                            zmodem_sender = None;
+                            if let Some(message) = zmodem_send_aborted {
+                                let _ = events
+                                    .send(UiEvent::Notification(format!(
+                                        "ZMODEM send aborted: {message}"
+                                    )))
+                                    .await;
+                            } else {
+                                let _ = events
+                                    .send(UiEvent::Notification(format!(
+                                        "ZMODEM file sent: {file_name}"
+                                    )))
+                                    .await;
                             }
                         }
                         for event in zmodem_events {
@@ -1467,6 +1556,10 @@ async fn run_connection_attempt_with_known_hosts(
                                         ))
                                         .await;
                                 }
+                                ZmodemEvent::ZRinit
+                                | ZmodemEvent::ZRpos(_)
+                                | ZmodemEvent::ZAck(_)
+                                | ZmodemEvent::ZSkip => {}
                                 ZmodemEvent::ZFile { name, .. } => {
                                     writer.data_bytes(zmodem::build_zrpos(0)).await?;
                                     let _ = events
@@ -1571,7 +1664,7 @@ async fn run_connection_attempt_with_known_hosts(
                                 }
                             }
                         }
-                        if !zmodem_active {
+                        if !zmodem_active && zmodem_sender.is_none() {
                             scan_osc_sequences(&data, &events);
                             terminal.feed(&data);
                             if log_file.is_some() {

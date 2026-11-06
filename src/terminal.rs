@@ -205,6 +205,12 @@ pub enum TerminalRequest {
     /// SSH data loop probes incoming bytes for a ZRQINIT frame and receives
     /// files into the local Downloads directory until ZFIN or error.
     ZmodemToggle,
+    /// Start a ZMODEM send towards a remote `rz`: offer `name` with `data`
+    /// (capped by the module's 1 MiB limit) and stream it until ZFIN.
+    ZmodemSendFile {
+        name: String,
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

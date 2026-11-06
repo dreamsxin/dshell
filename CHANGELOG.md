@@ -6,6 +6,12 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add ZMODEM send: pick a local file from the session More menu
+  ("Send file via ZMODEM (rz)") and dshell starts `rz` on the remote
+  host, offers the file and streams it with ZCRCG-continuation
+  subpackets up to the 1 MiB ZMODEM limit. The receive parser now also
+  handles multi-subpacket ZDATA frames (real `sz` streams) instead of
+  single-subpacket frames only.
 - Add multi-hop jump host chains: enter comma-separated saved host names
   in the jump host field (for example `bastion, relay`) and dshell dials
   them left to right through nested direct-tcpip channels before reaching

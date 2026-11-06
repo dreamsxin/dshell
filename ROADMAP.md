@@ -225,7 +225,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 32. 监控视图已交付：Server health 检查器新增 Monitor 自动刷新（1/2/5/10 秒可选）和 Change interval 切换按钮，代际令牌管理后台任务生命周期，断开自动停止。`next_monitor_interval` 纯函数测试覆盖。验证通过（228 项）。
 
-33. ZMODEM 接收已交付：`src/zmodem.rs` 纯协议模块（CRC-16/KERMIT 手写实现 + 逐字节解析器 + 响应帧构建器，6 项测试）；More 菜单显式启用接收，传输期间原始字节旁路 VT 解析器；文件落入 Downloads 目录，路径逃逸防护 + 1 MiB 上限。Docker SSH 10/10。
+33. ZMODEM 接收已交付：`src/zmodem.rs` 纯协议模块（CRC-16/KERMIT 手写实现 + 逐字节解析器 + 响应帧构建器，6 项测试）；More 菜单显式启用接收，传输期间原始字节旁路 VT 解析器；文件落入 Downloads 目录，路径逃逸防护 + 1 MiB 上限。Docker SSH 10/10。ZMODEM 发送随后交付：More 菜单选择本地文件（≤1 MiB）自动在远端启动 `rz` 并按 ZCRCG 续包流式发送；解析器同时修复为支持真实 sz 的多子包 ZDATA 帧（10 项 ZMODEM 测试）。
 
 34. 云同步（同步文件夹）已交付：Settings 配置同步目录，保存时自动导出、启动时自动合并（按名称去重），同步文件无凭据。`sync_profile_path` 测试覆盖。
 

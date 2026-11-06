@@ -27,7 +27,7 @@
 | P2 脚本录制 | 10+ | ✅ 已实现（录制输入命令并导出为 shell 脚本） |
 | P2 系统管理器侧边栏 | 30+ | ✅ 部分实现（Docker 容器面板；进程/服务已有） |
 | P2 监控视图 | 12 | ✅ 已实现（Monitor 自动刷新 + 间隔切换） |
-| P2 Zmodem/Ymodem | 40+ | ✅ 已实现（接收侧，More 菜单启用） |
+| P2 Zmodem/Ymodem | 60+ | ✅ 已实现（收发双向：More 菜单接收 sz 文件 / 发送本地文件给 rz；多子包 ZDATA 帧解析） |
 | P1 多级跳板链 | 30+ | ✅ 已实现（逗号分隔跳板链逐级 `direct-tcpip` 拨号；每跳独立认证与 known_hosts 校验；Docker 两跳集成测试） |
 | P2 FIDO/WebAuthn | 0 | ✅ 经 Agent 认证覆盖（系统 ssh-agent 透传 FIDO2 sk 密钥签名；直接硬件密钥文件认证未实现） |
 | P2 多窗口支持 | 0 | ⏸ 已评估，暂缓（AppView 单窗口架构重构风险高，GPUI 支持多窗口但会话/事件循环绑定单窗口） |
@@ -198,7 +198,7 @@
 | P2 脚本录制 | 10+ | ✅ 已实现（录制输入命令并导出为 shell 脚本） |
 | P2 系统管理器侧边栏 | 30+ | ✅ 部分实现（Docker 容器面板；进程/服务已有） |
 | P2 监控视图 | 12 | ✅ 已实现（Monitor 自动刷新 + 间隔切换） |
-| P2 Zmodem/Ymodem | 40+ | ✅ 已实现（接收侧，More 菜单启用） |
+| P2 Zmodem/Ymodem | 60+ | ✅ 已实现（收发双向：More 菜单接收 sz 文件 / 发送本地文件给 rz；多子包 ZDATA 帧解析） |
 | P1 多级跳板链 | 30+ | ✅ 已实现（逗号分隔跳板链逐级 `direct-tcpip` 拨号；每跳独立认证与 known_hosts 校验；Docker 两跳集成测试） |
 | P2 FIDO/WebAuthn | 0 | ✅ 经 Agent 认证覆盖（系统 ssh-agent 透传 FIDO2 sk 密钥签名；直接硬件密钥文件认证未实现） |
 | P2 多窗口支持 | 0 | ⏸ 已评估，暂缓（AppView 单窗口架构重构风险高，GPUI 支持多窗口但会话/事件循环绑定单窗口） |

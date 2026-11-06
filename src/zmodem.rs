@@ -1,11 +1,12 @@
-//! ZMODEM receive protocol (per the original ZMODEM specification by Chuck
+//! ZMODEM protocol (per the original ZMODEM specification by Chuck
 //! Forsberg, matching the lrzsz wire behavior).
 //!
-//! Supports the receive side only (remote `sz` sends to us), which covers the
-//! common "download via ZMODEM" workflow triggered by running `sz <file>` on
-//! the remote host. Frames are parsed byte by byte so the parser can be fed
-//! directly from the SSH data stream; responses are built as raw byte frames
-//! that the caller writes to the SSH channel.
+//! The receive side covers the common "download via ZMODEM" workflow
+//! triggered by running `sz <file>` on the remote host; the send side
+//! ([`ZmodemSender`]) covers "upload via ZMODEM" towards a remote `rz`.
+//! Frames are parsed byte by byte so the parser can be fed directly from
+//! the SSH data stream; responses are built as raw byte frames that the
+//! caller writes to the SSH channel.
 //!
 //! Control characters (below 0x20, plus 0x7F, 0x8D, and ZDLE itself) are
 //! ZDLE-escaped on the wire: ZDLE followed by the byte XOR 0x40. CRC-16
@@ -81,6 +82,14 @@ const MAX_SUBPACKET_BYTES: usize = 2 * 1024;
 pub enum ZmodemEvent {
     /// Remote sender announced itself; caller should reply with ZRINIT.
     ZRqInit,
+    /// Receiver capabilities acknowledged (sender flow: start offering files).
+    ZRinit,
+    /// Receiver requested (re)start at the given offset (sender flow).
+    ZRpos(u32),
+    /// Receiver acknowledged up to the given offset.
+    ZAck(u32),
+    /// Receiver refused the offered file.
+    ZSkip,
     /// File metadata received: (name, declared size in bytes).
     ZFile { name: String, size: Option<u64> },
     /// File data chunk received.
@@ -294,8 +303,18 @@ impl ZmodemReceiver {
     }
 
     fn dispatch_header(&mut self, type_byte: u8, payload: &[u8]) -> Option<ZmodemEvent> {
+        let position = u32::from_be_bytes([
+            payload.first().copied().unwrap_or(0),
+            payload.get(1).copied().unwrap_or(0),
+            payload.get(2).copied().unwrap_or(0),
+            payload.get(3).copied().unwrap_or(0),
+        ]);
         match type_byte {
             ZRQINIT => Some(ZmodemEvent::ZRqInit),
+            ZRINIT => Some(ZmodemEvent::ZRinit),
+            ZACK => Some(ZmodemEvent::ZAck(position)),
+            ZRPOS => Some(ZmodemEvent::ZRpos(position)),
+            ZSKIP => Some(ZmodemEvent::ZSkip),
             ZFIN => Some(ZmodemEvent::ZFin),
             ZFILE => {
                 self.file_name.clear();
@@ -311,16 +330,8 @@ impl ZmodemReceiver {
                 self.phase = Phase::HeaderTail;
                 None
             }
-            ZEOF => {
-                let size = u32::from_be_bytes([
-                    payload.first().copied().unwrap_or(0),
-                    payload.get(1).copied().unwrap_or(0),
-                    payload.get(2).copied().unwrap_or(0),
-                    payload.get(3).copied().unwrap_or(0),
-                ]);
-                Some(ZmodemEvent::ZEof(u64::from(size)))
-            }
-            ZCAN => Some(ZmodemEvent::Error("Transfer cancelled by sender".into())),
+            ZEOF => Some(ZmodemEvent::ZEof(u64::from(position))),
+            ZCAN => Some(ZmodemEvent::Error("Transfer cancelled by remote".into())),
             _ => None,
         }
     }
@@ -364,7 +375,13 @@ impl ZmodemReceiver {
         let wire_crc = (u16::from(self.crc_bytes[1]) << 8) | u16::from(self.crc_bytes[0]);
         let mut crc_input = std::mem::take(&mut self.subpacket);
         crc_input.push(self.subpacket_terminator);
-        self.phase = Phase::Scan;
+        // ZCRCG/ZCRCQ announce more subpackets in the same ZDATA frame; any
+        // other terminator ends the frame and the next byte starts a header.
+        self.phase = if matches!(self.subpacket_terminator, ZCRCG | ZCRCQ) {
+            Phase::Subpacket
+        } else {
+            Phase::Scan
+        };
         if crc16(&crc_input) != wire_crc {
             return Some(ZmodemEvent::Error("CRC-16 mismatch".into()));
         }
@@ -516,6 +533,156 @@ pub fn build_subpacket_zcrcw(data: &[u8]) -> Vec<u8> {
     build_subpacket(data, ZCRCW)
 }
 
+/// Bytes per data subpacket when sending files (1 KiB of payload; up to
+/// 4 KiB on the wire after ZDLE escaping).
+const SEND_CHUNK_BYTES: usize = 1024;
+
+/// One action the transfer driver should perform after feeding bytes to the
+/// sender.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZmodemSendStep {
+    /// Write these protocol bytes to the SSH channel.
+    Write(Vec<u8>),
+    /// The file was delivered and the session closed cleanly.
+    Done,
+    /// The transfer was aborted with a human-readable reason.
+    Aborted(String),
+}
+
+/// Sender-side transfer state. The remote host runs `rz`; this side offers
+/// one file per transfer, streams its bytes in subpackets and closes the
+/// session. Incoming protocol bytes are parsed with the same frame parser
+/// the receive path uses.
+#[derive(Debug)]
+pub struct ZmodemSender {
+    receiver: ZmodemReceiver,
+    file_name: String,
+    data: Vec<u8>,
+    phase: SendPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendPhase {
+    /// ZRQINIT sent; waiting for the receiver's ZRINIT.
+    Announced,
+    /// ZFILE offered; waiting for ZRPOS or ZSKIP.
+    FileOffered,
+    /// ZDATA and ZEOF sent; waiting for the final ZACK.
+    DataSent,
+    /// ZFIN sent; waiting for the receiver's ZFIN.
+    FinSent,
+}
+
+impl ZmodemSender {
+    /// Prepare a transfer of `data` under `path`'s final path segment.
+    /// Enforce the size limit here so both call sites and tests share it.
+    pub fn new(path: &str, data: Vec<u8>) -> Result<Self, String> {
+        if data.len() > MAX_ZMODEM_FILE_BYTES {
+            return Err(format!(
+                "File exceeds the {} byte ZMODEM send limit",
+                MAX_ZMODEM_FILE_BYTES
+            ));
+        }
+        let file_name = path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+            .unwrap_or("zmodem-file")
+            .to_owned();
+        Ok(Self {
+            receiver: ZmodemReceiver::new(),
+            file_name,
+            data,
+            phase: SendPhase::Announced,
+        })
+    }
+
+    /// Frames to send when starting the transfer: the ZRQINIT announcement.
+    pub fn start(&self) -> Vec<u8> {
+        build_hex_header(ZRQINIT, 0)
+    }
+
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    /// Feed one incoming byte from the SSH channel and return the actions
+    /// the driver should perform.
+    pub fn feed(&mut self, byte: u8) -> Vec<ZmodemSendStep> {
+        let mut steps = Vec::new();
+        let Some(event) = self.receiver.feed(byte) else {
+            return steps;
+        };
+        match (self.phase, event) {
+            (SendPhase::Announced, ZmodemEvent::ZRinit) => {
+                // Offer the file: ZFILE header (flags 0) plus a
+                // "name size" subpacket that waits for the receiver.
+                let metadata = format!("{} {}", self.file_name, self.data.len());
+                let mut frames = header_frame(ZFILE, 0);
+                frames.extend(build_subpacket(metadata.as_bytes(), ZCRCW));
+                self.phase = SendPhase::FileOffered;
+                steps.push(ZmodemSendStep::Write(frames));
+            }
+            (SendPhase::FileOffered, ZmodemEvent::ZRpos(offset)) => {
+                // Stream the payload: ZDATA header, 1 KiB subpackets —
+                // ZCRCG for continuations, ZCRCE for the last — then ZEOF
+                // with the total size.
+                let mut frames = header_frame(ZDATA, offset);
+                let chunk_count = self.data.len().div_ceil(SEND_CHUNK_BYTES);
+                for (index, chunk) in self.data.chunks(SEND_CHUNK_BYTES).enumerate() {
+                    let terminator = if index + 1 == chunk_count {
+                        ZCRCE
+                    } else {
+                        ZCRCG
+                    };
+                    frames.extend(build_subpacket(chunk, terminator));
+                }
+                frames.extend(header_frame(
+                    ZEOF,
+                    u32::try_from(self.data.len()).unwrap_or(u32::MAX),
+                ));
+                self.phase = SendPhase::DataSent;
+                steps.push(ZmodemSendStep::Write(frames));
+            }
+            (SendPhase::FileOffered, ZmodemEvent::ZSkip) => {
+                steps.push(ZmodemSendStep::Aborted(format!(
+                    "The remote host skipped {}",
+                    self.file_name
+                )));
+            }
+            (SendPhase::DataSent, ZmodemEvent::ZAck(_)) => {
+                // The receiver confirmed the whole file; close the session.
+                self.phase = SendPhase::FinSent;
+                steps.push(ZmodemSendStep::Write(build_zfin()));
+            }
+            (SendPhase::FinSent, ZmodemEvent::ZFin) => {
+                // Session close: "OO" ends the exchange.
+                steps.push(ZmodemSendStep::Write(b"OO".to_vec()));
+                steps.push(ZmodemSendStep::Done);
+            }
+            (
+                _,
+                ZmodemEvent::ZRqInit
+                | ZmodemEvent::ZRinit
+                | ZmodemEvent::ZRpos(_)
+                | ZmodemEvent::ZAck(_)
+                | ZmodemEvent::ZSkip
+                | ZmodemEvent::ZFile { .. }
+                | ZmodemEvent::ZData(_)
+                | ZmodemEvent::ZEof(_)
+                | ZmodemEvent::ZFin,
+            ) => {
+                // Frames that do not advance the sender's current phase are
+                // ignored; the parser resynchronizes on the next frame.
+            }
+            (_, ZmodemEvent::Error(message)) => {
+                steps.push(ZmodemSendStep::Aborted(message));
+            }
+        }
+        steps
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,5 +779,124 @@ mod tests {
         assert!(escaped_pairs >= 5);
         // No raw NUL bytes may appear on the wire.
         assert!(!frame.contains(&0x00));
+    }
+
+    /// Run one side of a transfer against the other by feeding the steps
+    /// each produces. Returns the events the parser recognized.
+    fn drive_into_receiver(sender: &mut ZmodemSender, bytes: &[u8]) -> Vec<ZmodemEvent> {
+        let mut steps = Vec::new();
+        for &byte in bytes {
+            steps.extend(sender.feed(byte));
+        }
+        let mut events = Vec::new();
+        let mut receiver = ZmodemReceiver::new();
+        for step in steps {
+            if let ZmodemSendStep::Write(frames) = step {
+                for byte in frames {
+                    if let Some(event) = receiver.feed(byte) {
+                        events.push(event);
+                    }
+                }
+            }
+        }
+        events
+    }
+
+    #[test]
+    fn sender_completes_full_transfer_against_receive_parser() {
+        let body: Vec<u8> = (0..2500u32).map(|index| (index % 251) as u8).collect();
+        let mut sender = ZmodemSender::new("D:\\tmp\\report.bin", body.clone()).unwrap();
+        assert_eq!(sender.file_name(), "report.bin");
+        // The sender opens with a hex ZRQINIT the receiver understands.
+        let mut receiver = ZmodemReceiver::new();
+        for byte in sender.start() {
+            if let Some(event) = receiver.feed(byte) {
+                assert_eq!(event, ZmodemEvent::ZRqInit);
+            }
+        }
+
+        // Receiver capabilities arrive; the sender offers the file.
+        let events = drive_into_receiver(&mut sender, &build_zrinit());
+        assert_eq!(
+            events,
+            vec![ZmodemEvent::ZFile {
+                name: "report.bin".to_owned(),
+                size: Some(body.len() as u64),
+            }]
+        );
+
+        // ZRPOS triggers the payload: ZDATA chunks plus ZEOF.
+        let events = drive_into_receiver(&mut sender, &build_zrpos(0));
+        assert!(events.contains(&ZmodemEvent::ZEof(body.len() as u64)));
+        let data_bytes: Vec<u8> = events
+            .into_iter()
+            .flat_map(|event| match event {
+                ZmodemEvent::ZData(chunk) => chunk,
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(data_bytes, body);
+
+        // ZACK closes: the sender sends ZFIN, then answers the receiver's
+        // ZFIN with "OO" and reports completion.
+        let mut steps = Vec::new();
+        for &byte in build_zack(0).iter() {
+            steps.extend(sender.feed(byte));
+        }
+        assert!(matches!(
+            steps.first(),
+            Some(ZmodemSendStep::Write(frames)) if frames.first() == Some(&ZPAD)
+        ));
+        let mut steps = Vec::new();
+        for &byte in build_zfin().iter() {
+            steps.extend(sender.feed(byte));
+        }
+        assert_eq!(
+            steps,
+            vec![ZmodemSendStep::Write(b"OO".to_vec()), ZmodemSendStep::Done,]
+        );
+    }
+
+    /// Feed bytes to the sender and collect every step without a parser
+    /// round trip.
+    fn collect_steps(sender: &mut ZmodemSender, bytes: &[u8]) -> Vec<ZmodemSendStep> {
+        let mut steps = Vec::new();
+        for &byte in bytes {
+            steps.extend(sender.feed(byte));
+        }
+        steps
+    }
+
+    #[test]
+    fn sender_aborts_when_receiver_skips_the_file() {
+        let mut sender = ZmodemSender::new("a.txt", b"hi".to_vec()).unwrap();
+        let steps = collect_steps(&mut sender, &build_zrinit());
+        // ZRINIT advances to the file offer: exactly one Write step.
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(steps[0], ZmodemSendStep::Write(_)));
+        let steps = collect_steps(&mut sender, &header_frame(ZSKIP, 0));
+        assert!(matches!(
+            steps.as_slice(),
+            [ZmodemSendStep::Aborted(message)] if message.contains("a.txt")
+        ));
+    }
+
+    #[test]
+    fn sender_aborts_on_receiver_cancel_and_rejects_oversize_files() {
+        let mut sender = ZmodemSender::new("a.txt", b"hi".to_vec()).unwrap();
+        for &byte in build_zrinit().iter() {
+            sender.feed(byte);
+        }
+        let mut steps = Vec::new();
+        for &byte in header_frame(ZCAN, 0).iter() {
+            steps.extend(sender.feed(byte));
+        }
+        assert!(matches!(
+            steps.as_slice(),
+            [ZmodemSendStep::Aborted(message)] if message.contains("cancelled")
+        ));
+
+        let oversize = vec![0u8; MAX_ZMODEM_FILE_BYTES + 1];
+        assert!(ZmodemSender::new("big.bin", oversize).is_err());
     }
 }

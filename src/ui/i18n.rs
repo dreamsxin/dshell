@@ -673,6 +673,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
             "指向云存储文件夹（如 Dropbox）。主机资料在每次保存时自动导出到该目录，并在启动时自动合并；同步文件绝不包含凭据。"
         }
         "Receive ZMODEM file" => "接收 ZMODEM 文件",
+        "Send file via ZMODEM (rz)" => "通过 ZMODEM 发送文件（rz）",
+        "Choose a file to send via ZMODEM" => "选择要通过 ZMODEM 发送的文件",
         "Start script recording" => "开始脚本录制",
         "Stop script recording" => "停止脚本录制",
         "Script recording started. Inputs are captured until you stop." => {

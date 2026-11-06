@@ -6445,6 +6445,71 @@ impl AppView {
         .detach();
     }
 
+    /// Pick a local file and start a ZMODEM send towards the remote `rz`.
+    /// The transfer data flows through the session command channel; only
+    /// files up to the ZMODEM module's limit are accepted.
+    fn browse_zmodem_send_file(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(self.tr("Choose a file to send via ZMODEM").into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(mut paths))) => {
+                let Some(path) = paths.pop() else {
+                    return;
+                };
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "zmodem-file".to_owned());
+                // Bounded read: reject files over the ZMODEM limit before
+                // pulling bytes into memory.
+                const ZMODEM_SEND_LIMIT: u64 = crate::zmodem::MAX_ZMODEM_FILE_BYTES as u64;
+                let read_result = match std::fs::metadata(&path) {
+                    Ok(metadata) if metadata.len() > ZMODEM_SEND_LIMIT => Err(format!(
+                        "The file is larger than the {ZMODEM_SEND_LIMIT} byte ZMODEM send limit"
+                    )),
+                    Ok(_) => std::fs::read(&path).map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                let data = match read_result {
+                    Ok(data) => data,
+                    Err(message) => {
+                        let _ = this.update(cx, |view, cx| {
+                            view.show_toast(
+                                format!("Could not send via ZMODEM: {message}"),
+                                Tone::Danger,
+                                cx,
+                            );
+                        });
+                        return;
+                    }
+                };
+                let _ = this.update(cx, |view, cx| {
+                    let _ = enqueue_session_request(
+                        &view.sessions,
+                        session_id,
+                        TerminalRequest::ZmodemSendFile { name, data },
+                    );
+                    cx.notify();
+                });
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |view, cx| {
+                    view.show_toast(
+                        format!("Could not open a file picker: {error}"),
+                        Tone::Danger,
+                        cx,
+                    );
+                });
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
     fn open_session_properties(
         &mut self,
         session_id: u64,
@@ -22215,6 +22280,23 @@ impl AppView {
                             TerminalRequest::ZmodemToggle,
                         );
                         cx.notify();
+                    }
+                })),
+            )
+            .child(
+                menu_item(
+                    tokens,
+                    "menu-zmodem-send",
+                    IconName::ArrowUp,
+                    self.tr("Send file via ZMODEM (rz)"),
+                    "",
+                    false,
+                    active_id.is_some(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_visible = false;
+                    if let Some(session_id) = active_id {
+                        this.browse_zmodem_send_file(session_id, cx);
                     }
                 })),
             )
