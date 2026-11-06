@@ -108,10 +108,69 @@ fn sidebar_width(settings: &AppSettings, collapsed: bool) -> f32 {
     }
 }
 
+/// Terminal cell metrics in logical pixels. The grid layout, cursor position
+/// and glyph rendering must all agree with the font's real advance width:
+/// a fixed ratio estimate drifts from the actual monospace advance, which
+/// opens a growing gap between typed characters and the cursor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CellMetrics {
+    width: f32,
+    height: f32,
+}
+
+/// Measure the configured monospace font's advance width with the text
+/// system. The probe string is long enough that fractional rounding in a
+/// single glyph cannot skew the average.
+fn measure_cell_metrics(settings: &AppSettings, window: &Window) -> CellMetrics {
+    let probe = "0".repeat(64);
+    let run = gpui::TextRun {
+        len: probe.len(),
+        font: gpui::font(settings.font_family.clone()),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let layout = window
+        .text_system()
+        .layout_line(&probe, px(settings.font_size), &[run], None);
+    let advance = f32::from(layout.width) / probe.len() as f32;
+    CellMetrics::measured(advance, settings)
+}
+
+impl CellMetrics {
+    /// Ratio-based estimate used when no measurement is available yet.
+    fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            width: settings.cell_width(),
+            height: settings.cell_height(),
+        }
+    }
+
+    /// Build metrics from a measured monospace advance at the configured
+    /// font size. Degenerate measurements (zero, non-finite or absurdly
+    /// large) fall back to the ratio estimate.
+    fn measured(advance: f32, settings: &AppSettings) -> Self {
+        let width = if advance.is_finite()
+            && advance > 1.0
+            && advance <= f32::from(settings.font_size) * 4.0
+        {
+            advance
+        } else {
+            settings.cell_width()
+        };
+        Self {
+            width,
+            height: settings.cell_height(),
+        }
+    }
+}
+
 fn terminal_size_for_viewport(
     width: f32,
     height: f32,
     settings: &AppSettings,
+    metrics: CellMetrics,
     sidebar_collapsed: bool,
     inspector_visible: bool,
 ) -> TerminalSize {
@@ -138,7 +197,7 @@ fn terminal_size_for_viewport(
         - ui_tokens::SPACE_4
         - TERMINAL_PANEL_HEADER_PX
         - TERMINAL_CARD_BORDER_PX;
-    TerminalSize::for_window_with(width, height, settings.cell_width(), settings.cell_height())
+    TerminalSize::for_window_with(width, height, metrics.width, metrics.height)
 }
 
 #[derive(Clone, Debug)]
@@ -2419,8 +2478,8 @@ mod session_tests {
     use std::path::Path;
 
     use super::{
-        AppShortcut, CachedCredentials, CredentialCacheKey, ForwardViewState, GroupLaunchState,
-        LayoutDragTarget, LocalUploadKind, MouseTrackingMode, PaletteCommand,
+        AppShortcut, CachedCredentials, CellMetrics, CredentialCacheKey, ForwardViewState,
+        GroupLaunchState, LayoutDragTarget, LocalUploadKind, MouseTrackingMode, PaletteCommand,
         SYNC_PROFILE_FILE_NAME, ScriptRecording, SessionEditorEscape, SessionEditorKey,
         SessionLaunchSettings, SessionSplit, SessionState, SftpViewState, SplitOrientation,
         SshSession, TabColor, TerminalFrame, TerminalRequest, TerminalSize, UiEvent, app_shortcut,
@@ -3631,7 +3690,14 @@ echo"
         let mut previous_columns = u16::MAX;
         for font_size in [9.0, 13.0, 24.0, 32.0] {
             settings.font_size = font_size;
-            let size = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
+            let size = terminal_size_for_viewport(
+                1280.0,
+                800.0,
+                &settings,
+                CellMetrics::from_settings(&settings),
+                false,
+                false,
+            );
             assert!(size.columns > 0 && size.rows > 0, "font size {font_size}");
             assert!(
                 size.columns < previous_columns,
@@ -3644,7 +3710,14 @@ echo"
         // logical viewports; the layout must stay positive at every step.
         settings.font_size = 13.0;
         for (width, height) in [(1920.0, 1080.0), (1280.0, 720.0), (960.0, 540.0)] {
-            let size = terminal_size_for_viewport(width, height, &settings, false, false);
+            let size = terminal_size_for_viewport(
+                width,
+                height,
+                &settings,
+                CellMetrics::from_settings(&settings),
+                false,
+                false,
+            );
             assert!(size.columns > 0 && size.rows > 0, "{width}x{height}");
         }
     }
@@ -3672,10 +3745,24 @@ echo"
     #[test]
     fn custom_panel_widths_reduce_terminal_columns_without_changing_rows() {
         let mut settings = AppSettings::default();
-        let default_size = terminal_size_for_viewport(1280.0, 800.0, &settings, false, true);
+        let default_size = terminal_size_for_viewport(
+            1280.0,
+            800.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            false,
+            true,
+        );
         settings.sidebar_width = ui_tokens::SIDEBAR_MAX_WIDTH;
         settings.inspector_width = ui_tokens::INSPECTOR_MAX_WIDTH;
-        let narrow = terminal_size_for_viewport(1280.0, 800.0, &settings, false, true);
+        let narrow = terminal_size_for_viewport(
+            1280.0,
+            800.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            false,
+            true,
+        );
         assert!(narrow.columns < default_size.columns);
         assert_eq!(narrow.rows, default_size.rows);
     }
@@ -4135,9 +4222,38 @@ echo"
     }
 
     #[test]
+    fn cell_metrics_measured_uses_the_font_advance_with_fallback() {
+        let mut settings = AppSettings::default();
+        settings.font_size = 14.0;
+        // A sane measured advance is used verbatim.
+        let metrics = CellMetrics::measured(8.4, &settings);
+        assert_eq!(metrics.width, 8.4);
+        assert_eq!(metrics.height, settings.cell_height());
+        // Degenerate measurements fall back to the ratio estimate.
+        for broken in [0.0, -1.0, f32::NAN, f32::INFINITY, 400.0] {
+            let metrics = CellMetrics::measured(broken, &settings);
+            assert_eq!(
+                metrics.width,
+                settings.cell_width(),
+                "advance {broken} must fall back"
+            );
+        }
+        // The upper bound scales with the font size.
+        let metrics = CellMetrics::measured(settings.font_size * 3.5, &settings);
+        assert_eq!(metrics.width, settings.font_size * 3.5);
+    }
+
+    #[test]
     fn shell_viewport_keeps_the_terminal_usable_at_common_window_sizes() {
         let settings = AppSettings::default();
-        let minimum = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
+        let minimum = terminal_size_for_viewport(
+            1280.0,
+            800.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            false,
+            false,
+        );
         assert!(
             minimum.columns >= 80,
             "1280x800 must keep at least 80 columns, got {}",
@@ -4145,7 +4261,14 @@ echo"
         );
         assert!(minimum.rows >= 24);
 
-        let expanded = terminal_size_for_viewport(1920.0, 1080.0, &settings, false, false);
+        let expanded = terminal_size_for_viewport(
+            1920.0,
+            1080.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            false,
+            false,
+        );
         assert!(expanded.columns > minimum.columns);
         assert!(expanded.rows > minimum.rows);
     }
@@ -4153,8 +4276,22 @@ echo"
     #[test]
     fn collapsing_the_sidebar_widens_the_terminal() {
         let settings = AppSettings::default();
-        let expanded = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
-        let collapsed = terminal_size_for_viewport(1280.0, 800.0, &settings, true, false);
+        let expanded = terminal_size_for_viewport(
+            1280.0,
+            800.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            false,
+            false,
+        );
+        let collapsed = terminal_size_for_viewport(
+            1280.0,
+            800.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            true,
+            false,
+        );
         assert!(collapsed.columns > expanded.columns);
         assert_eq!(collapsed.rows, expanded.rows);
     }
@@ -4162,8 +4299,22 @@ echo"
     #[test]
     fn opening_the_inspector_reduces_terminal_columns_only() {
         let settings = AppSettings::default();
-        let hidden = terminal_size_for_viewport(1280.0, 800.0, &settings, false, false);
-        let shown = terminal_size_for_viewport(1280.0, 800.0, &settings, false, true);
+        let hidden = terminal_size_for_viewport(
+            1280.0,
+            800.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            false,
+            false,
+        );
+        let shown = terminal_size_for_viewport(
+            1280.0,
+            800.0,
+            &settings,
+            CellMetrics::from_settings(&settings),
+            false,
+            true,
+        );
         assert!(shown.columns < hidden.columns);
         assert_eq!(shown.rows, hidden.rows);
     }
@@ -4429,6 +4580,9 @@ struct AppView {
     /// timer so window dragging does not write to disk per frame.
     pending_window_bounds: Option<WindowBoundsSaved>,
     window_bounds_generation: u64,
+    /// Measured terminal cell metrics for the configured font; recomputed
+    /// when the font family or size changes.
+    cell_metrics: CellMetrics,
     settings_font_family: Entity<InputState>,
     settings_font_size: Entity<InputState>,
     settings_alert_cpu: Entity<InputState>,
@@ -4652,8 +4806,14 @@ impl AppView {
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("user"));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
         password.update(cx, |state, cx| state.set_masked(true, window, cx));
-        let terminal_size =
-            Self::size_for_window(window, &settings, settings.sidebar_collapsed, false);
+        let cell_metrics = measure_cell_metrics(&settings, window);
+        let terminal_size = Self::size_for_window(
+            window,
+            &settings,
+            cell_metrics,
+            settings.sidebar_collapsed,
+            false,
+        );
         let sync_directory_init = settings.sync_directory.clone();
         let (profile_store, data, profiles_ready, profile_message) = match ProfileStore::discover()
         {
@@ -4832,6 +4992,7 @@ impl AppView {
             settings_store,
             pending_window_bounds: None,
             window_bounds_generation: 0,
+            cell_metrics,
             settings_font_family,
             settings_font_size,
             settings_alert_cpu,
@@ -5475,6 +5636,7 @@ impl AppView {
     fn size_for_window(
         window: &Window,
         settings: &AppSettings,
+        metrics: CellMetrics,
         sidebar_collapsed: bool,
         inspector_visible: bool,
     ) -> TerminalSize {
@@ -5483,15 +5645,24 @@ impl AppView {
             bounds.size.width / px(1.0),
             bounds.size.height / px(1.0),
             settings,
+            metrics,
             sidebar_collapsed,
             inspector_visible,
         )
+    }
+
+    /// Measure the configured monospace font's advance width so the terminal
+    /// grid, cursor and glyph positions all agree. Falls back to the ratio
+    /// estimate when the text system cannot shape the probe.
+    fn measure_cell_metrics(&mut self, window: &Window) {
+        self.cell_metrics = measure_cell_metrics(&self.settings, window);
     }
 
     fn resize_terminal(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.terminal_size = Self::size_for_window(
             window,
             &self.settings,
+            self.cell_metrics,
             self.sidebar_collapsed,
             self.inspector_visible,
         );
@@ -5554,16 +5725,16 @@ impl AppView {
                 split.orientation,
                 panel_sizes.first().map(|size| size.as_f32()),
                 0,
-                self.settings.cell_width(),
-                self.settings.cell_height(),
+                self.cell_metrics.width,
+                self.cell_metrics.height,
             );
             let second = split_panel_terminal_size(
                 self.terminal_size,
                 split.orientation,
                 panel_sizes.get(1).map(|size| size.as_f32()),
                 1,
-                self.settings.cell_width(),
-                self.settings.cell_height(),
+                self.cell_metrics.width,
+                self.cell_metrics.height,
             );
             (split, first, second)
         });
@@ -5831,12 +6002,10 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let replay_size = TerminalSize {
-            columns: (1000.0 / self.settings.cell_width())
+            columns: (1000.0 / self.cell_metrics.width)
                 .floor()
                 .clamp(20.0, 240.0) as u16,
-            rows: (620.0 / self.settings.cell_height())
-                .floor()
-                .clamp(5.0, 120.0) as u16,
+            rows: (620.0 / self.cell_metrics.height).floor().clamp(5.0, 120.0) as u16,
         };
         let mut terminal = TerminalEmulator::new_with_theme(replay_size, self.settings.theme);
         terminal.set_cursor_style(self.settings.cursor_style);
@@ -5934,7 +6103,7 @@ impl AppView {
     }
 
     fn scroll_log_replay(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let cell_height = self.settings.cell_height();
+        let cell_height = self.cell_metrics.height;
         let delta_y = match event.delta {
             ScrollDelta::Lines(delta) => delta.y,
             ScrollDelta::Pixels(delta) => delta.y / px(cell_height),
@@ -6179,6 +6348,7 @@ impl AppView {
                             .child(render_terminal_grid(
                                 &frame,
                                 &self.settings,
+                                self.cell_metrics,
                                 palette,
                                 &keyword_highlights,
                             )),
@@ -9213,10 +9383,10 @@ impl AppView {
         let size = self
             .session(session_id)
             .map_or(self.terminal_size, |session| session.terminal_size);
-        let column = (((position.x - bounds.origin.x) / px(1.0)) / self.settings.cell_width())
+        let column = (((position.x - bounds.origin.x) / px(1.0)) / self.cell_metrics.width)
             .floor()
             .clamp(0.0, f32::from(size.columns.saturating_sub(1))) as u16;
-        let row = (((position.y - bounds.origin.y) / px(1.0)) / self.settings.cell_height())
+        let row = (((position.y - bounds.origin.y) / px(1.0)) / self.cell_metrics.height)
             .floor()
             .clamp(0.0, f32::from(size.rows.saturating_sub(1))) as u16;
         Some(TerminalPosition { row, column })
@@ -10459,6 +10629,7 @@ impl AppView {
             terminal_view = terminal_view.child(render_terminal_grid(
                 frame,
                 &self.settings,
+                self.cell_metrics,
                 palette,
                 &keyword_highlights,
             ));
@@ -18399,6 +18570,7 @@ impl AppView {
             return;
         }
         self.settings = settings;
+        self.measure_cell_metrics(window);
         self.set_language_placeholders(window, cx);
         for session in &self.sessions {
             if session.command_tx.is_some() {
@@ -18472,6 +18644,7 @@ impl AppView {
         }
         self.collapsed_groups.clear();
         self.settings = settings;
+        self.measure_cell_metrics(window);
         self.settings_theme = self.settings.theme;
         self.settings_cursor = self.settings.cursor_style;
         self.settings_language = self.settings.language;
@@ -19254,7 +19427,7 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         self.activate_session(session_id, window, cx);
-        let cell_height = self.settings.cell_height();
+        let cell_height = self.cell_metrics.height;
         let Some(session) = self.session_mut(session_id) else {
             return;
         };
@@ -24517,6 +24690,7 @@ impl Focusable for AppView {
 fn render_terminal_grid(
     frame: &TerminalFrame,
     settings: &AppSettings,
+    metrics: CellMetrics,
     palette: TerminalPalette,
     keyword_highlights: &[String],
 ) -> AnyElement {
@@ -24528,7 +24702,7 @@ fn render_terminal_grid(
         let mut rendered_row = div()
             .flex()
             .relative()
-            .h(px(settings.cell_height()))
+            .h(px(metrics.height))
             .flex_shrink_0();
         if cursor_row {
             let base = rgb(palette.selection_background);
@@ -24543,6 +24717,7 @@ fn render_terminal_grid(
             rendered_row = rendered_row.child(render_terminal_run(
                 run,
                 settings,
+                metrics,
                 palette,
                 keyword_matches(&run.text, keyword_highlights),
             ));
@@ -24551,13 +24726,13 @@ fn render_terminal_grid(
             && cursor.row as usize == row_index
             && cursor.style != CursorStyle::Block
         {
-            let left = px(cursor.column as f32 * settings.cell_width());
+            let left = px(cursor.column as f32 * metrics.width);
             let cursor_mark = match cursor.style {
                 CursorStyle::Underline => div()
                     .absolute()
                     .left(left)
-                    .top(px(settings.cell_height() - 2.))
-                    .w(px(settings.cell_width()))
+                    .top(px(metrics.height - 2.))
+                    .w(px(metrics.width))
                     .h(px(2.))
                     .bg(rgb(frame.foreground)),
                 CursorStyle::Bar => div()
@@ -24565,7 +24740,7 @@ fn render_terminal_grid(
                     .left(left)
                     .top(px(0.))
                     .w(px(2.))
-                    .h(px(settings.cell_height()))
+                    .h(px(metrics.height))
                     .bg(rgb(frame.foreground)),
                 CursorStyle::Block => div(),
             };
@@ -24579,13 +24754,14 @@ fn render_terminal_grid(
 fn render_terminal_run(
     run: &TerminalRun,
     settings: &AppSettings,
+    metrics: CellMetrics,
     palette: TerminalPalette,
     keyword_highlighted: bool,
 ) -> impl IntoElement {
     let mut cell_run = div()
         .flex_shrink_0()
-        .w(px(settings.cell_width() * run.width_cells as f32))
-        .h(px(settings.cell_height()))
+        .w(px(metrics.width * run.width_cells as f32))
+        .h(px(metrics.height))
         .font_family(settings.font_family.clone())
         .text_size(px(settings.font_size))
         .text_color(rgb(run.foreground))

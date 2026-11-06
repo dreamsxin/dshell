@@ -6,6 +6,11 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Fix the terminal cursor drifting away from typed characters: cell
+  metrics are now measured from the configured font's real advance
+  width via the text system instead of a fixed ratio estimate, so the
+  grid, cursor and glyph positions all agree at every font size and
+  family.
 - Add Xshell-style input conveniences: copy on select writes terminal
   selections to the clipboard when the mouse is released, right click
   pastes the clipboard while the remote application is not capturing
