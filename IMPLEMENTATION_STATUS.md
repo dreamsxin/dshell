@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-06，Windows/MSVC：发布 v0.1.43。汇总自 v0.1.42 以来交付的全部功能：SFTP 文件编辑器、PublicKey BOM 修复与连接表单字段重排、身份文件文件选择器、主机密钥验证对话框、地址栏（Alt+D）、保存可见屏幕、内置关键词高亮、广播模式、多行粘贴确认、动态标签标题（OSC 0/2）、OSC 52 剪贴板/OSC 9 通知、搜索匹配高亮、主机发行版图标、主机备注、连接测试、命令面板（Ctrl+K）、十六进制查看、光标行高亮、屏幕锁（Ctrl+Shift+L）、CSV 导出、TOTP 键盘交互认证、存档快捷方式、脚本录制、会话跟踪、监控自动刷新、ZMODEM 接收、云同步（同步文件夹）、会话恢复、内联图片保存、Docker 容器面板。`cargo fmt --all`、`scriptserify-hard-constraints.ps1` 通过（238 项通过、10 项 Docker 专项忽略），`scripts	est-docker-ssh.ps1` 通过（10/10）。未在用户活动桌面启动 GUI；DPI/IME/字形检查、真实 sz/docker ps 远端联调与新建托盘图标行为仍需隔离 Windows 桌面人工验收。下一步：托盘面板人工验收，多窗口支持架构迭代评估。
+
 2026-11-06，Windows/MSVC：完成 Docker 容器面板。`ssh.rs` 新增 `ServerDockerContainer`（id/image/names/status/ports）、`SERVER_DOCKER_COMMAND`（docker ps --format 制表符分隔，3 秒超时 + 64 KiB 上限，与现有探针一致）、`parse_server_docker_containers` 纯解析函数（表头校验、50 条上限、畸形行拒绝）、`ServerData::Containers`/`ServerDataError::Containers` 事件、`TerminalRequest::RefreshDockerContainers` 请求。检查器新增 Docker 分组（折叠头 + 刷新按钮 + 容器卡片列表，空态与错误提示），跟随现有 Server health 模式。1 项解析测试。244 项 + Docker 10/10。
 
 2026-11-06，Windows/MSVC：完成内联图片功能。新增 `src/inline_image.rs`：逐字节 OSC 1337 收集器（跨 SSH 包边界匹配 `ESC ] 1337 ; File=` 前缀、BEL 与 ST 两种终止符、16 MiB 上限、失步自动重同步），`parse_osc1337_payload` 解析 name=（含百分号解码）/size=/inline= 元数据并 base64 解码，`sanitize_inline_image_name` 只保留最终路径段（不安全名回退为时间戳名）。SSH 数据循环集成：非 ZMODEM 活跃期间每字节喂入收集器，完成即保存到 Downloads 目录并发 toast 通知；VT 解析器原生吞掉 OSC 序列，终端画面不受影响。5 项单元测试（跨块边界、ST 终止、元数据解析、非 inline 拒绝、路径清洗）。243 项 + Docker 10/10。

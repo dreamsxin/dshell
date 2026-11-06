@@ -2,7 +2,18 @@
 
 All notable changes to dshell are documented here.
 
-## Unreleased
+## [0.1.43] - 2026-11-06
+
+Adds the first wave of Netcatty/Xshell-parity features: quick-connect
+address bar, SFTP file editor, host key verification dialog, command
+palette, ZMODEM receive, session restore, profile sync, live server
+monitor, Docker containers panel, iTerm2 inline image saving, screen
+lock, script recording, session tracing, archive extraction shortcuts,
+search match highlighting, host distribution icons, host notes, CSV
+export, TOTP keyboard-interactive authentication, and OSC 0/2 title,
+OSC 52 clipboard and OSC 9 notification handling.
+
+### Added
 
 ### Added
 
@@ -74,6 +85,17 @@ All notable changes to dshell are documented here.
 - Add a built-in SFTP file editor: edit a remote file in a modal multi-line
   text area and save back to the host with Ctrl+S, with a 1 MiB size limit,
   unsaved-change confirmation, and Simplified Chinese translations.
+
+### Verification
+
+- 2026-11-06: `cargo fmt --all`, `scriptserify-hard-constraints.ps1` passed
+  (238 unit tests, 10 Docker-specific ignores),
+  `scripts	est-docker-ssh.ps1` passed 10/10 against a temporary Ubuntu
+  container.
+- Known limitations: DPI, IME and glyph alignment checks plus real remote
+  `sz`/`docker ps` integration still require isolated Windows desktop
+  manual verification; tray icon behavior is newly added and needs manual
+  verification (see below).
 
 ## [0.1.42] - 2026-10-27
 

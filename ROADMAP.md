@@ -235,6 +235,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 37. Docker 容器面板已交付：检查器 Docker 分组，SSH exec `docker ps` 探针 + 解析函数（1 项测试），错误与空态提示。244 项 + Docker 10/10。
 
+38. v0.1.43 发布：汇总 v0.1.42 后全部功能（见 CHANGELOG）。验证：238 项单测 + Docker 10/10。后续候选：托盘面板人工验收、多窗口架构迭代、内联图片渲染进终端网格。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。
