@@ -6,6 +6,12 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add Xshell-style input conveniences: copy on select writes terminal
+  selections to the clipboard when the mouse is released, right click
+  pastes the clipboard while the remote application is not capturing
+  the mouse, and the main window restores its last size and position
+  on launch. Each behavior is on by default and can be turned off in
+  Settings.
 - Add ZMODEM send: pick a local file from the session More menu
   ("Send file via ZMODEM (rz)") and dshell starts `rz` on the remote
   host, offers the file and streams it with ZCRCG-continuation

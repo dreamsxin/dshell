@@ -675,6 +675,18 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Receive ZMODEM file" => "接收 ZMODEM 文件",
         "Send file via ZMODEM (rz)" => "通过 ZMODEM 发送文件（rz）",
         "Choose a file to send via ZMODEM" => "选择要通过 ZMODEM 发送的文件",
+        "Copy on select" => "选中即复制",
+        "Copy terminal text to the clipboard as soon as the mouse selection ends." => {
+            "鼠标选择结束后立即将终端文本复制到剪贴板。"
+        }
+        "Paste on right click" => "右键粘贴",
+        "Right-click pastes the clipboard into the terminal when the remote application is not capturing the mouse." => {
+            "在远端程序未捕获鼠标时，右键将剪贴板内容粘贴到终端。"
+        }
+        "Remember window size and position" => "记住窗口大小和位置",
+        "Restore the main window's geometry from the last run on the next launch." => {
+            "下次启动时恢复上次的主窗口大小和位置。"
+        }
         "Start script recording" => "开始脚本录制",
         "Stop script recording" => "停止脚本录制",
         "Script recording started. Inputs are captured until you stop." => {

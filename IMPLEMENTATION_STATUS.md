@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-07，Windows/MSVC：完成三个常用交互功能。①选中即复制：左键本地选择拖拽结束（`mouse_up`，远端未捕获鼠标时）打上 `pending_selection_copy` 标记，下一个携带非空 `selection_text` 的 Screen 帧到达时写入剪贴板并清除标记（渲染 tick 16 ms 内必达，静态画面选择同样生效）。②右键粘贴：远端未捕获鼠标时右键直接把剪贴板内容经 `send_input_to_targets` 粘贴到终端（广播到多会话时提示），被捕获时右键事件照常下发给远端程序。③窗口位置记忆：`AppSettings` 新增 `remember_window`/`window_bounds`（`WindowBoundsSaved` x/y/width/height/maximized，`sane()` 校验有限性、最小 400×240、上限与原点范围，保存时 `normalized()` 再次过滤）；`observe_window_bounds` 回调记录几何并经 1.5 秒去抖任务写入设置（拖动不逐帧落盘）；启动时 `main()` 读取设置，`WindowOptions.window_bounds` 按保存值以 `Windowed`/`Maximized` 恢复，缺失或非法值回退默认。三项均默认开启，Settings 面板提供开关（新设置字段 serde default，旧 settings.json 无损加载且默认开启）。新增 3 项设置单测（开关与几何往返、旧文件缺字段默认、非法几何拒绝）。验证：`cargo fmt --all`、硬约束脚本通过（254 项通过、11 项 Docker 专项忽略），Docker SSH 11/11。选中复制/右键粘贴/窗口恢复的实际手感需人工验收。下一步：托盘面板、跳板链、ZMODEM 发送与本轮功能人工验收。
+
 2026-11-07，Windows/MSVC：完成 ZMODEM 发送。`src/zmodem.rs` 新增 `ZmodemSender` 状态机（复用同一逐字节帧解析器识别远端 rz 应答）：ZRQINIT 宣告 → ZRINIT 收到后发送 ZFILE 头 + "name size" ZCRCW 子包 → ZRPOS 触发 1 KiB 分块流式发送（ZCRCG 续包、末包 ZCRCE）→ ZEOF → ZACK 后 ZFIN → 远端 ZFIN 后回 "OO" 完成；ZSKIP/ZCAN/CRC 错误中断并提示。`TerminalRequest::ZmodemSendFile`（name + data，1 MiB 上限在 `ZmodemSender::new` 与文件选择处双重校验）；More 菜单新增 "Send file via ZMODEM (rz)"，原生文件选择器读文件后经命令通道入队；发送前自动键入 `rz
 ` 启动远端 rz（ZRQINIT 字节在 PTY 输入队列等待 rz 读取）。传输期间原始字节旁路 VT 解析器、inline 图片收集与 OSC 扫描；收发模式互斥（任一侧启动时清掉另一侧；ZmodemToggle 可取消进行中的发送）。同时修复接收解析器既有缺陷：ZCRCG/ZCRCQ 续包后保持在子包阶段而非回到帧扫描，真实 sz 的多子包 ZDATA 流现在可以完整接收。ZmodemEvent 扩展 ZRinit/ZRpos/ZAck/ZSkip 变体。3 项新单元测试（全链路回环字节一致、ZSKIP 中断、ZCAN 中断 + 超限拒绝），ZMODEM 测试共 10 项。验证：`cargo fmt --all`、硬约束脚本通过（251 项通过、11 项 Docker 专项忽略），Docker SSH 11/11（数据路径改动后重跑）。真实 lrzsz 远端收发、DPI/IME/字形仍待人工验收。下一步：托盘面板、跳板链与 ZMODEM 发送人工验收，多窗口支持架构迭代评估。
 

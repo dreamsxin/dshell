@@ -71,6 +71,68 @@ pub struct AppSettings {
     /// Reconnect the sessions that were active when dshell last exited.
     #[serde(default)]
     pub restore_sessions: bool,
+    /// Copy selected terminal text to the clipboard as soon as the mouse
+    /// button is released (Xshell-style copy on select).
+    #[serde(default = "default_true")]
+    pub copy_on_select: bool,
+    /// Paste the clipboard into the terminal on right click while the remote
+    /// application is not capturing the mouse.
+    #[serde(default = "default_true")]
+    pub paste_on_right_click: bool,
+    /// Restore the main window's size and position from the last run.
+    #[serde(default = "default_true")]
+    pub remember_window: bool,
+    /// Last known main window geometry, recorded while dshell runs.
+    #[serde(default)]
+    pub window_bounds: Option<WindowBoundsSaved>,
+}
+
+/// Serialized main window geometry. Values are logical pixels; validity is
+/// enforced by [`WindowBoundsSaved::sane`] before use.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowBoundsSaved {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub maximized: bool,
+}
+
+impl WindowBoundsSaved {
+    /// Accept only finite, positive, reasonably sized geometry so a corrupt
+    /// or hostile settings file cannot open the window off-screen or with a
+    /// zero area.
+    pub fn sane(self) -> Option<Self> {
+        if !self.x.is_finite()
+            || !self.y.is_finite()
+            || !self.width.is_finite()
+            || !self.height.is_finite()
+        {
+            return None;
+        }
+        if self.width < 400.0 || self.height < 240.0 {
+            return None;
+        }
+        if self.width > 20000.0 || self.height > 20000.0 {
+            return None;
+        }
+        // Keep the origin near the visible desktop even across monitor
+        // changes; the OS repositions windows it deems invisible otherwise.
+        let x = self.x.clamp(-2000.0, 20000.0);
+        let y = self.y.clamp(-2000.0, 20000.0);
+        Some(Self {
+            x,
+            y,
+            width: self.width,
+            height: self.height,
+            maximized: self.maximized,
+        })
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -94,6 +156,10 @@ impl Default for AppSettings {
             alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
             sync_directory: String::new(),
             restore_sessions: false,
+            copy_on_select: true,
+            paste_on_right_click: true,
+            remember_window: true,
+            window_bounds: None,
         }
     }
 }
@@ -143,6 +209,10 @@ impl AppSettings {
             ),
             sync_directory: self.sync_directory,
             restore_sessions: self.restore_sessions,
+            copy_on_select: self.copy_on_select,
+            paste_on_right_click: self.paste_on_right_click,
+            remember_window: self.remember_window,
+            window_bounds: self.window_bounds.and_then(WindowBoundsSaved::sane),
         }
     }
 
@@ -195,6 +265,14 @@ struct SettingsDocument {
     sync_directory: String,
     #[serde(default)]
     restore_sessions: bool,
+    #[serde(default = "default_true")]
+    copy_on_select: bool,
+    #[serde(default = "default_true")]
+    paste_on_right_click: bool,
+    #[serde(default = "default_true")]
+    remember_window: bool,
+    #[serde(default)]
+    window_bounds: Option<WindowBoundsSaved>,
 }
 
 pub struct SettingsStore {
@@ -275,6 +353,10 @@ impl SettingsStore {
             alert_disk_percent: document.alert_disk_percent,
             sync_directory: document.sync_directory,
             restore_sessions: document.restore_sessions,
+            copy_on_select: document.copy_on_select,
+            paste_on_right_click: document.paste_on_right_click,
+            remember_window: document.remember_window,
+            window_bounds: document.window_bounds,
         }
         .normalized())
     }
@@ -311,6 +393,10 @@ impl SettingsStore {
             alert_disk_percent: settings.alert_disk_percent,
             sync_directory: settings.sync_directory,
             restore_sessions: settings.restore_sessions,
+            copy_on_select: settings.copy_on_select,
+            paste_on_right_click: settings.paste_on_right_click,
+            remember_window: settings.remember_window,
+            window_bounds: settings.window_bounds,
         })
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
         fs::write(&self.path, contents).map_err(|error| {
@@ -464,6 +550,81 @@ mod tests {
     }
 
     #[test]
+    fn input_toggles_and_window_bounds_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::at(directory.path().join("settings.json"));
+        let mut settings = AppSettings::default();
+        settings.copy_on_select = false;
+        settings.paste_on_right_click = false;
+        settings.remember_window = false;
+        settings.window_bounds = Some(WindowBoundsSaved {
+            x: 120.0,
+            y: 84.0,
+            width: 1400.0,
+            height: 900.0,
+            maximized: false,
+        });
+        store.save(&settings).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(!loaded.copy_on_select);
+        assert!(!loaded.paste_on_right_click);
+        assert!(!loaded.remember_window);
+        assert_eq!(
+            loaded.window_bounds,
+            Some(WindowBoundsSaved {
+                x: 120.0,
+                y: 84.0,
+                width: 1400.0,
+                height: 900.0,
+                maximized: false,
+            })
+        );
+    }
+
+    #[test]
+    fn window_bounds_without_new_fields_defaults_on() {
+        // Settings written before the copy-on-select / right-click paste /
+        // window memory features existed must load with the Xshell-style
+        // behaviors enabled and no remembered geometry.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"font_size":14.0,"font_family":"monospace"}"#,
+        )
+        .unwrap();
+        let loaded = SettingsStore::at(path).load().unwrap();
+        assert!(loaded.copy_on_select);
+        assert!(loaded.paste_on_right_click);
+        assert!(loaded.remember_window);
+        assert_eq!(loaded.window_bounds, None);
+    }
+
+    #[test]
+    fn insane_window_bounds_are_rejected_on_save() {
+        let mut settings = AppSettings::default();
+        settings.window_bounds = Some(WindowBoundsSaved {
+            x: f32::NAN,
+            y: -1.0,
+            width: 10.0,
+            height: 900.0,
+            maximized: false,
+        });
+        let normalized = settings.clone().normalized();
+        assert_eq!(normalized.window_bounds, None);
+
+        settings.window_bounds = Some(WindowBoundsSaved {
+            x: 10.0,
+            y: 10.0,
+            width: 1400.0,
+            height: 900.0,
+            maximized: false,
+        });
+        let normalized = settings.normalized();
+        assert!(normalized.window_bounds.is_some());
+    }
+
+    #[test]
     fn settings_round_trip_and_clamp_invalid_values() {
         let directory = tempfile::tempdir().unwrap();
         let store = SettingsStore::at(directory.path().join("settings.json"));
@@ -492,6 +653,10 @@ mod tests {
             alert_disk_percent: 91,
             sync_directory: String::new(),
             restore_sessions: false,
+            copy_on_select: true,
+            paste_on_right_click: true,
+            remember_window: true,
+            window_bounds: None,
         };
         store.save(&settings).unwrap();
         assert_eq!(
@@ -531,6 +696,10 @@ mod tests {
                 alert_disk_percent: 0,
                 sync_directory: String::new(),
                 restore_sessions: false,
+                copy_on_select: true,
+                paste_on_right_click: true,
+                remember_window: true,
+                window_bounds: None,
             })
             .unwrap();
         let loaded = store.load().unwrap();
@@ -633,6 +802,10 @@ mod tests {
             alert_disk_percent: DEFAULT_ALERT_DISK_PERCENT,
             sync_directory: String::new(),
             restore_sessions: false,
+            copy_on_select: true,
+            paste_on_right_click: true,
+            remember_window: true,
+            window_bounds: None,
         };
         assert!((settings.cell_width() - 16.0).abs() < 0.001);
         assert!((settings.cell_height() - 36.0).abs() < 0.001);

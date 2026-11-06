@@ -1501,7 +1501,6 @@ async fn run_connection_attempt_with_known_hosts(
                         // ZMODEM send: drive the outgoing transfer from the
                         // remote rz's replies. The raw bytes bypass the VT
                         // parser while the transfer runs.
-                        let mut zmodem_send_active = false;
                         let mut zmodem_send_done = false;
                         let mut zmodem_send_aborted: Option<String> = None;
                         if let Some(sender) = zmodem_sender.as_mut() {
@@ -1523,7 +1522,6 @@ async fn run_connection_attempt_with_known_hosts(
                                     }
                                 }
                             }
-                            zmodem_send_active = true;
                         }
                         if zmodem_send_done || zmodem_send_aborted.is_some() {
                             let file_name = zmodem_sender

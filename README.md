@@ -69,7 +69,9 @@ loaded. Exported profile backups omit all credentials.
 
 Drag with the left mouse button to select terminal text. Use `Ctrl+Shift+C` to
 copy a non-empty selection and `Ctrl+Shift+V` to paste from the system clipboard;
-the terminal's bracketed-paste mode is respected.
+the terminal's bracketed-paste mode is respected. Copy on select and right-click
+paste are enabled by default (Xshell-style) and can be turned off in Settings,
+which also offers to remember the main window's size and position across runs.
 
 ## Run
 

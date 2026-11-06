@@ -53,7 +53,10 @@ use profiles::{
     export_profiles as export_host_profiles, import_profiles as import_host_profiles,
     parse_custom_tab_color_hex, parse_login_commands, record_recent,
 };
-use settings::{AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore};
+use settings::{
+    AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore,
+    WindowBoundsSaved,
+};
 use sftp::{
     LocalEntry, RemoteEntry, RemoteFilesystemInfo, SftpCommand, SftpEvent, TransferKind,
     format_permission_mode, list_local_directory, parent_remote_path, parse_permission_mode,
@@ -1289,6 +1292,9 @@ struct SshSession {
     terminal_size: TerminalSize,
     scroll_remainder: f32,
     mouse_position: Option<TerminalPosition>,
+    /// Set on left mouse-up when copy-on-select is enabled; the clipboard
+    /// write happens when the next frame carries the finished selection.
+    pending_selection_copy: bool,
     command_tx: Option<mpsc::Sender<TerminalRequest>>,
     input_locked: bool,
     cancel_tx: Option<watch::Sender<bool>>,
@@ -2477,6 +2483,7 @@ mod session_tests {
                 },
                 scroll_remainder: 0.0,
                 mouse_position: None,
+                pending_selection_copy: false,
                 command_tx: Some(command_tx),
                 input_locked: false,
                 cancel_tx: Some(cancel_tx),
@@ -4418,6 +4425,10 @@ struct AppView {
     pending_auth_prompts: VecDeque<AuthPromptState>,
     settings: AppSettings,
     settings_store: Option<SettingsStore>,
+    /// Latest observed window geometry, saved to settings on a debounce
+    /// timer so window dragging does not write to disk per frame.
+    pending_window_bounds: Option<WindowBoundsSaved>,
+    window_bounds_generation: u64,
     settings_font_family: Entity<InputState>,
     settings_font_size: Entity<InputState>,
     settings_alert_cpu: Entity<InputState>,
@@ -4668,6 +4679,7 @@ impl AppView {
         };
         let bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
             this.resize_terminal(window, cx);
+            this.record_window_bounds(window, cx);
         });
         let side_by_side_state = ResizableState::new(cx);
         let stacked_state = ResizableState::new(cx);
@@ -4818,6 +4830,8 @@ impl AppView {
             shortcut_inputs,
             settings,
             settings_store,
+            pending_window_bounds: None,
+            window_bounds_generation: 0,
             settings_font_family,
             settings_font_size,
             settings_alert_cpu,
@@ -5483,6 +5497,49 @@ impl AppView {
         );
         self.resize_sessions(cx);
         cx.notify();
+    }
+
+    /// Capture the current window geometry and schedule a debounced settings
+    /// save so dragging or resizing does not write to disk on every frame.
+    fn record_window_bounds(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.settings.remember_window {
+            return;
+        }
+        let bounds = window.bounds();
+        let saved = WindowBoundsSaved {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+            maximized: window.is_maximized(),
+        };
+        if self.pending_window_bounds == Some(saved) {
+            return;
+        }
+        self.pending_window_bounds = Some(saved);
+        self.window_bounds_generation = self.window_bounds_generation.wrapping_add(1);
+        let generation = self.window_bounds_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.window_bounds_generation != generation {
+                    return;
+                }
+                let Some(saved) = view.pending_window_bounds.take() else {
+                    return;
+                };
+                view.settings.window_bounds = Some(saved);
+                if let Some(store) = view.settings_store.as_ref()
+                    && let Err(error) = store.save(&view.settings)
+                {
+                    view.settings_message = error;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn resize_sessions(&mut self, cx: &mut Context<Self>) {
@@ -8423,6 +8480,7 @@ impl AppView {
                     terminal_size,
                     scroll_remainder: 0.0,
                     mouse_position: None,
+                    pending_selection_copy: false,
                     command_tx: Some(terminal),
                     input_locked: false,
                     cancel_tx: Some(cancellation),
@@ -8663,6 +8721,23 @@ impl AppView {
                             let event_applied = apply_session_event(&mut view.sessions, id, event);
                             if event_applied {
                                 cx.notify();
+                            }
+                            // Copy on select: the frame that reports a
+                            // non-empty selection after a local drag ends.
+                            if let Some(frame) = screen.as_ref()
+                                && view.settings.copy_on_select
+                                && let Some(session) = view.session_mut(id)
+                            {
+                                if session.pending_selection_copy {
+                                    if let Some(text) =
+                                        frame.selection_text.as_deref().filter(|t| !t.is_empty())
+                                    {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.to_owned(),
+                                        ));
+                                    }
+                                    session.pending_selection_copy = false;
+                                }
                             }
                             if event_applied && restore_changed {
                                 view.persist_session_restore();
@@ -9160,6 +9235,37 @@ impl AppView {
         }) {
             return;
         }
+        // Xshell-style right-click paste: only while the remote application
+        // is not capturing the mouse, so tracked right clicks still reach
+        // the application.
+        if event.button == MouseButton::Right
+            && self.settings.paste_on_right_click
+            && self.session(session_id).is_some_and(|session| {
+                session
+                    .frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.mouse_tracking_mode == MouseTrackingMode::Disabled)
+            })
+        {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                && !text.is_empty()
+            {
+                let delivered = self.send_input_to_targets(
+                    session_id,
+                    || TerminalRequest::Paste(text.clone()),
+                    "Terminal paste",
+                    cx,
+                );
+                if delivered > 1 {
+                    self.show_toast(
+                        format!("Pasted into {delivered} sessions."),
+                        Tone::Success,
+                        cx,
+                    );
+                }
+            }
+            return;
+        }
         let Some(button) = terminal_mouse_button(event.button) else {
             return;
         };
@@ -9195,6 +9301,22 @@ impl AppView {
         let Some(button) = terminal_mouse_button(event.button) else {
             return;
         };
+        // Copy on select: a finished left-button drag with the mouse not
+        // captured by the remote application ends a local selection. The
+        // clipboard write happens when the next frame reports the selection.
+        if button == TerminalMouseButton::Left
+            && self.settings.copy_on_select
+            && self.session(session_id).is_some_and(|session| {
+                session
+                    .frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.mouse_tracking_mode == MouseTrackingMode::Disabled)
+            })
+            && let Some(session) = self.session_mut(session_id)
+        {
+            session.pending_selection_copy = true;
+            cx.notify();
+        }
         let previous_position = self
             .session(session_id)
             .and_then(|session| session.mouse_position);
@@ -18260,6 +18382,10 @@ impl AppView {
                 .trim()
                 .to_owned(),
             restore_sessions: self.settings.restore_sessions,
+            copy_on_select: self.settings.copy_on_select,
+            paste_on_right_click: self.settings.paste_on_right_click,
+            remember_window: self.settings.remember_window,
+            window_bounds: self.settings.window_bounds,
         }
         .normalized();
         let Some(store) = self.settings_store.as_ref() else {
@@ -19004,6 +19130,75 @@ impl AppView {
                             .child(components::help_text(
                                 &tokens,
                                 self.tr("Reconnect the sessions that were active when dshell last exited. Only sessions matching a saved host profile are restored; credentials are never saved."),
+                            ))
+                            .child(
+                                components::toggle_switch(
+                                    &tokens,
+                                    "settings-copy-on-select",
+                                    self.tr("Copy on select"),
+                                    self.settings.copy_on_select,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings.copy_on_select =
+                                        !this.settings.copy_on_select;
+                                    if let Some(store) = this.settings_store.as_ref()
+                                        && let Err(error) = store.save(&this.settings)
+                                    {
+                                        this.settings_message = error;
+                                    }
+                                    cx.notify();
+                                })),
+                            )
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("Copy terminal text to the clipboard as soon as the mouse selection ends."),
+                            ))
+                            .child(
+                                components::toggle_switch(
+                                    &tokens,
+                                    "settings-paste-on-right-click",
+                                    self.tr("Paste on right click"),
+                                    self.settings.paste_on_right_click,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings.paste_on_right_click =
+                                        !this.settings.paste_on_right_click;
+                                    if let Some(store) = this.settings_store.as_ref()
+                                        && let Err(error) = store.save(&this.settings)
+                                    {
+                                        this.settings_message = error;
+                                    }
+                                    cx.notify();
+                                })),
+                            )
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("Right-click pastes the clipboard into the terminal when the remote application is not capturing the mouse."),
+                            ))
+                            .child(
+                                components::toggle_switch(
+                                    &tokens,
+                                    "settings-remember-window",
+                                    self.tr("Remember window size and position"),
+                                    self.settings.remember_window,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings.remember_window =
+                                        !this.settings.remember_window;
+                                    if !this.settings.remember_window {
+                                        this.settings.window_bounds = None;
+                                    }
+                                    if let Some(store) = this.settings_store.as_ref()
+                                        && let Err(error) = store.save(&this.settings)
+                                    {
+                                        this.settings_message = error;
+                                    }
+                                    cx.notify();
+                                })),
+                            )
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("Restore the main window's geometry from the last run on the next launch."),
                             )),
                     )
                     .child(components::help_text(
@@ -24845,8 +25040,32 @@ fn main() {
         if let Err(error) = tray::install(tray_tx) {
             eprintln!("System tray unavailable: {error}");
         }
+        // Restore the last window geometry when the user asked for it; a
+        // missing or insane saved geometry falls back to the default
+        // maximized window.
+        let mut window_options = WindowOptions::default();
+        if let Ok(settings) = SettingsStore::discover().and_then(|store| store.load())
+            && settings.remember_window
+            && let Some(saved) = settings.window_bounds.and_then(WindowBoundsSaved::sane)
+        {
+            let bounds = gpui::Bounds {
+                origin: gpui::Point {
+                    x: gpui::px(saved.x),
+                    y: gpui::px(saved.y),
+                },
+                size: gpui::Size {
+                    width: gpui::px(saved.width),
+                    height: gpui::px(saved.height),
+                },
+            };
+            window_options.window_bounds = Some(if saved.maximized {
+                gpui::WindowBounds::Maximized(bounds)
+            } else {
+                gpui::WindowBounds::Windowed(bounds)
+            });
+        }
         let window = cx
-            .open_window(WindowOptions::default(), |window, cx| {
+            .open_window(window_options, |window, cx| {
                 let view = cx.new(|cx| AppView::new(window, cx));
                 cx.set_global(tray::TrayBridge {
                     window: window.window_handle(),
