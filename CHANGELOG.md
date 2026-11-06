@@ -6,6 +6,13 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Add multi-hop jump host chains: enter comma-separated saved host names
+  in the jump host field (for example `bastion, relay`) and dshell dials
+  them left to right through nested direct-tcpip channels before reaching
+  the target. Each hop authenticates with its saved credentials, each hop
+  and the target are host-key verified against known_hosts, and the whole
+  chain is torn down when the session closes. Verified by a Docker
+  integration test that connects through two chained hops.
 - Add a system tray panel: tray icon with a context menu (Open dshell,
   New session, Quit) drawn programmatically in the app accent color.
   Tray clicks activate the main window; New session opens the session
@@ -21,8 +28,6 @@ lock, script recording, session tracing, archive extraction shortcuts,
 search match highlighting, host distribution icons, host notes, CSV
 export, TOTP keyboard-interactive authentication, and OSC 0/2 title,
 OSC 52 clipboard and OSC 9 notification handling.
-
-### Added
 
 ### Added
 

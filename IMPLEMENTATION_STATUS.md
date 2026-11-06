@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-07，Windows/MSVC：完成多级跳板机链。`ConnectionSpec.jump` 从单跳扩展为 `Vec<JumpSpec>`（按最近优先排序，空即直连）；`ssh.rs` 的连接建立改为链式拨号：第一跳从本机 `client::connect`，后续每跳通过上一跳句柄的 `channel_open_direct_tcpip` 通道以 `client::connect_stream` 建立，目标经最后一跳的 `direct-tcpip` 通道接入；每跳使用各自已保存资料的凭据独立认证，每跳与目标分别用各自 host/user/port 严格校验 known_hosts（中间跳 handler 不携带转发状态），会话关闭时按序断开整条链。`main.rs` 新增 `parse_jump_chain` 纯解析函数（逗号分隔、去空白、折叠相邻重复），连接与会话编辑器按链校验：每跳必须是已保存主机、跳板资料自身不得再含 `proxy_jump`（提示改用逗号书写完整链）、不得自引用/指向同一目标/链内重复；凭据提示窗口按链显示每跳摘要，多跳共用共享的 Jump password/passphrase 输入（跟随第一跳的认证方式）；状态路由显示 ` via <chain>`。中文文案同步（含新的嵌套跳板提示与"跳板链（N 级）"标签）。验证：`cargo fmt --all`、硬约束脚本通过（248 项通过、11 项 Docker 专项忽略），Docker SSH 11/11（新增 `docker_ssh_two_jump_host_round_trip`：同容器两级链 + 目标全链认证、shell 往返与全链断开）。跳板链真实双机拓扑、DPI/IME/字形仍待人工验收。下一步：托盘面板与跳板链人工验收，多窗口支持架构迭代评估。
+
 2026-11-06，Windows/MSVC：完成托盘面板。新增 `src/tray.rs`：`tray-icon` 0.25 原生托盘图标（程序化绘制 32×32 RGBA——圆角深蓝方块 + 浅色终端提示符箭头，无二进制资产），muda 上下文菜单（Open dshell / New session / Quit）。托盘事件在平台线程触发，通过 `std::sync::mpsc` 通道送入 GPUI 前台任务轮询（150 ms try_recv + timer），经 `TrayBridge` 全局（AnyWindowHandle + Entity<AppView>，AppView::new 所在窗口闭包内 set_global）执行：Open/左键单击激活主窗口（activate_window），New session 经 `window.root::<AppView>()` 打开会话编辑器，Quit 调用 `App::quit`。通道轮询循环在 Quit 后退出；托盘菜单文案为英文（GPUI 事件循环外无 i18n 上下文，v1 限制）。`tray-icon` 未列入禁止依赖（保持原生、无 WebView）。验证：`cargo fmt --all`、硬约束脚本通过（247 项通过、10 项 Docker 专项忽略），Docker SSH 10/10（SSH 路径未改动，回归基线）。托盘图标显示、菜单点击、窗口激活行为需用户人工验收（隔离桌面约束）。
 
 2026-11-06，Windows/MSVC：发布 v0.1.43。汇总自 v0.1.42 以来交付的全部功能：SFTP 文件编辑器、PublicKey BOM 修复与连接表单字段重排、身份文件文件选择器、主机密钥验证对话框、地址栏（Alt+D）、保存可见屏幕、内置关键词高亮、广播模式、多行粘贴确认、动态标签标题（OSC 0/2）、OSC 52 剪贴板/OSC 9 通知、搜索匹配高亮、主机发行版图标、主机备注、连接测试、命令面板（Ctrl+K）、十六进制查看、光标行高亮、屏幕锁（Ctrl+Shift+L）、CSV 导出、TOTP 键盘交互认证、存档快捷方式、脚本录制、会话跟踪、监控自动刷新、ZMODEM 接收、云同步（同步文件夹）、会话恢复、内联图片保存、Docker 容器面板。`cargo fmt --all`、`scriptserify-hard-constraints.ps1` 通过（238 项通过、10 项 Docker 专项忽略），`scripts	est-docker-ssh.ps1` 通过（10/10）。未在用户活动桌面启动 GUI；DPI/IME/字形检查、真实 sz/docker ps 远端联调与新建托盘图标行为仍需隔离 Windows 桌面人工验收。下一步：托盘面板人工验收，多窗口支持架构迭代评估。
@@ -234,7 +236,7 @@
 - 目录上传/下载对目标根目录做一次覆盖确认；符号链接和其他特殊文件跳过；远端条目名必须是安全的单段名称，避免下载路径逃逸。
 - 跳板机使用另一个已保存主机资料：目标 SSH 握手通过跳板会话的 `direct-tcpip` channel 建立，跳板和目标分别用各自的 host/user/port 校验 known_hosts。未知或变更的跳板密钥会立即失败，不会因为经过代理而跳过检查。
 - 跳板机和目标各自选择认证方式；跳板使用密码或加密私钥时，会话属性窗口提供独立的“Jump password”或“Jump key passphrase”输入，连接后与目标凭据一起清零。跳板提供的 SFTP 子系统仍属于目标连接，下载和终端流量都经过跳板。
-- 跳板引用写入主机资料（`proxy_jump`），保存主机可同时保存跳板密码和口令；导出资料会移除这些凭据，私钥材料不会复制。保存资料时要求跳板指向另一个已保存主机；连接时拒绝自引用、指向同一目标地址和二级嵌套跳板。
+- 跳板引用写入主机资料（`proxy_jump`），保存主机可同时保存跳板密码和口令；导出资料会移除这些凭据，私钥材料不会复制。保存资料时要求跳板指向另一个已保存主机；连接时拒绝自引用、指向同一目标地址和链内重复。支持多级跳板链：跳板字段可填写逗号分隔的多个已保存主机名，从左到右逐级经 `direct-tcpip` 通道拨号到目标；每跳独立认证并分别校验 known_hosts，跳板资料自身不得再嵌套跳板（应把完整链写在连接处）。
 - 端口转发按会话独立管理：本地和动态规则在客户端绑定监听端口，远程规则通过 `tcpip-forward` 请求由服务器监听；端口 0 自动分配并在 Tunnels 面板显示实际端口。每条规则显示活动连接数，可单独停止；断开会话时关闭本地监听器、取消远端转发并清理映射。
 - 转发规则写入主机资料的 `forwards`，连接该资料时在认证完成后自动启动；在 Tunnels 面板新增或停止规则会同步更新资料文件。快速连接仍使用会话级规则。规则数量上限为 32，保存时校验监听地址和目标完整性。
 - 主机资料支持 `keepalive_seconds`（0 到 3600 秒，0 关闭）；连接时设置 russh 的 keepalive interval，跳板和目标连接都会应用该配置。

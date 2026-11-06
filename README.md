@@ -175,8 +175,11 @@ private key itself is never copied, and exported profile backups omit all
 credentials.
 
 To connect through another saved host, enter its name in the `Jump host` field
-of the session properties. The jump host and the target authenticate
-separately, and both server keys must already be present in known_hosts.
+of the session properties. Multi-hop chains are supported: enter
+comma-separated saved host names (for example `bastion, relay`) and dshell
+dials them left to right before reaching the target. Every hop and the target
+authenticate separately, and every server key must already be present in
+known_hosts.
 Jump-host passwords and key passphrases are requested in their own fields,
 kept in memory only until dshell exits and cleared from the form when the
 connection starts. The Services inspector also exposes

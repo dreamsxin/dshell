@@ -757,6 +757,27 @@ fn sync_profile_path(directory: &str) -> PathBuf {
     Path::new(directory).join(SYNC_PROFILE_FILE_NAME)
 }
 
+/// Parse a comma-separated jump chain into ordered hop names. Names are
+/// trimmed; empty segments and adjacent duplicates collapse. Returns an
+/// empty vec for a direct connection.
+fn parse_jump_chain(jump_names: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    for name in jump_names.split(',') {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if chain
+            .last()
+            .is_some_and(|previous: &String| previous.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        chain.push(name.to_owned());
+    }
+    chain
+}
+
 fn find_archives_in_text(text: &str) -> Vec<(String, String)> {
     let mut found: Vec<(String, String)> = Vec::new();
     for word in text.split_whitespace() {
@@ -2404,7 +2425,7 @@ mod session_tests {
         is_sftp_transfer_command, keyword_matches, local_upload_kind, mark_sftp_ready,
         matching_saved_profile_for_session, memory_usage_percent, merge_unique_profiles,
         move_profile_to_group, mpsc, next_monitor_interval, next_session_switcher_index,
-        palette_matching_commands, parse_alert_percent, recall_compose_history,
+        palette_matching_commands, parse_alert_percent, parse_jump_chain, recall_compose_history,
         recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
         remove_profile_group, remove_session, rename_profile_group, render_script_recording,
         render_session_trace, reorder_group_order, reorder_session_ids, saved_profile_for_session,
@@ -3433,6 +3454,22 @@ echo"
         assert_eq!(next_monitor_interval(0), 2);
         // Unknown values fall back to the default.
         assert_eq!(next_monitor_interval(99), 2);
+    }
+
+    #[test]
+    fn parse_jump_chain_trims_splits_and_collapses_duplicates() {
+        assert!(parse_jump_chain("").is_empty());
+        assert!(parse_jump_chain(" , ").is_empty());
+        assert_eq!(parse_jump_chain("bastion1"), vec!["bastion1".to_owned()]);
+        assert_eq!(
+            parse_jump_chain("bastion1 , bastion2"),
+            vec!["bastion1".to_owned(), "bastion2".to_owned()]
+        );
+        // Adjacent duplicates collapse; case-insensitive.
+        assert_eq!(
+            parse_jump_chain("bastion1, BASTION1, bastion2"),
+            vec!["bastion1".to_owned(), "bastion2".to_owned()]
+        );
     }
 
     #[test]
@@ -4485,8 +4522,9 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("~/.ssh/id_ed25519"));
         let key_passphrase = cx.new(|cx| InputState::new(window, cx).placeholder("Key passphrase"));
         key_passphrase.update(cx, |state, cx| state.set_masked(true, window, cx));
-        let jump_profile =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Saved jump host name"));
+        let jump_profile = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Saved jump host names, comma-separated")
+        });
         let jump_password =
             cx.new(|cx| InputState::new(window, cx).placeholder("Jump host password"));
         jump_password.update(cx, |state, cx| state.set_masked(true, window, cx));
@@ -4877,7 +4915,7 @@ impl AppView {
             (&self.profile_group, "Ungrouped"),
             (&self.group_editor_name, "Group name"),
             (&self.key_passphrase, "Key passphrase"),
-            (&self.jump_profile, "Saved jump host name"),
+            (&self.jump_profile, "Saved jump host names, comma-separated"),
             (&self.jump_password, "Jump host password"),
             (&self.jump_passphrase, "Jump key passphrase"),
             (&self.snippet_name, "Snippet name"),
@@ -8002,7 +8040,7 @@ impl AppView {
             username,
             authentication,
             terminal_size: self.terminal_size,
-            jump: None,
+            jump: Vec::new(),
             keepalive_seconds,
             reconnect: ReconnectSettings::default(),
             theme,
@@ -8174,24 +8212,24 @@ impl AppView {
                 return;
             }
         };
-        let jump = if jump_name.is_empty() {
-            None
-        } else {
+        let jump_chain = parse_jump_chain(&jump_name);
+        let mut jump = Vec::with_capacity(jump_chain.len());
+        for (index, name) in jump_chain.iter().enumerate() {
             let Some(profile) = self
                 .profiles
                 .iter()
-                .find(|profile| profile.name.eq_ignore_ascii_case(&jump_name))
+                .find(|profile| profile.name.eq_ignore_ascii_case(name))
                 .cloned()
             else {
                 self.profile_message = self
                     .tr("Jump host {name} is not a saved host.")
-                    .replace("{name}", &jump_name);
+                    .replace("{name}", name);
                 cx.notify();
                 return;
             };
             if !profile.proxy_jump.trim().is_empty() {
                 self.profile_message = self
-                    .tr("Jump host {name} already uses jump host {jump}. Nested jump hosts are not supported yet.")
+                    .tr("Jump host {name} already uses jump host {jump}. Remove the nested jump host from its profile.")
                     .replace("{name}", &profile.name)
                     .replace("{jump}", &profile.proxy_jump);
                 cx.notify();
@@ -8206,11 +8244,21 @@ impl AppView {
                 cx.notify();
                 return;
             }
+            if jump_chain[..index]
+                .iter()
+                .any(|previous| previous.eq_ignore_ascii_case(&profile.name))
+            {
+                self.profile_message = self
+                    .tr("Jump host {name} appears more than once in the chain.")
+                    .replace("{name}", &profile.name);
+                cx.notify();
+                return;
+            }
             let jump_authentication = match build_authentication(
                 profile.auth_method,
                 &profile.identity_file,
-                jump_password,
-                jump_passphrase,
+                jump_password.clone(),
+                jump_passphrase.clone(),
                 Zeroizing::new(String::new()),
             ) {
                 Ok(authentication) => authentication,
@@ -8223,13 +8271,13 @@ impl AppView {
                     return;
                 }
             };
-            Some(JumpSpec {
+            jump.push(JumpSpec {
                 host: profile.host.clone(),
                 port: profile.port,
                 username: profile.username.clone(),
                 authentication: jump_authentication,
-            })
-        };
+            });
+        }
 
         let id = self.next_session_id;
         self.next_session_id = self.next_session_id.saturating_add(1);
@@ -8248,7 +8296,7 @@ impl AppView {
                     |profile| profile_tab_title(profile).to_owned(),
                 )
             });
-        let route = if jump.is_some() {
+        let route = if !jump.is_empty() {
             format!(" via {jump_name}")
         } else {
             String::new()
@@ -10466,30 +10514,44 @@ impl AppView {
         }
 
         let jump_name = self.jump_profile.read(cx).value().trim().to_owned();
-        let jump_profile = self
-            .profiles
+        let jump_chain = parse_jump_chain(&jump_name);
+        let jump_profiles: Vec<Option<HostProfile>> = jump_chain
             .iter()
-            .find(|profile| profile.name.eq_ignore_ascii_case(&jump_name))
-            .cloned();
+            .map(|name| {
+                self.profiles
+                    .iter()
+                    .find(|profile| profile.name.eq_ignore_ascii_case(name))
+                    .cloned()
+            })
+            .collect();
+        let jump_profile = jump_profiles.first().cloned().flatten();
         let jump_method = jump_profile.as_ref().map(|profile| profile.auth_method);
-        let jump_summary = jump_profile.as_ref().map_or_else(
-            || {
-                if jump_name.is_empty() {
-                    self.tr("Leave empty for a direct connection.")
-                } else {
-                    format!("{jump_name} is not a saved host.")
-                }
-            },
-            |profile| {
-                format!(
-                    "{}@{}:{} · {}",
-                    profile.username,
-                    profile.host,
-                    profile.port,
-                    profile.auth_method.label()
-                )
-            },
-        );
+        let missing_jump = jump_chain
+            .iter()
+            .zip(jump_profiles.iter())
+            .find(|(_, profile)| profile.is_none())
+            .map(|(name, _)| name.clone());
+        let jump_summary = if jump_chain.is_empty() {
+            self.tr("Leave empty for a direct connection.")
+        } else if let Some(missing) = &missing_jump {
+            self.tr("Jump host {name} is not a saved host.")
+                .replace("{name}", missing)
+        } else {
+            jump_profiles
+                .iter()
+                .flatten()
+                .map(|profile| {
+                    format!(
+                        "{}@{}:{} · {}",
+                        profile.username,
+                        profile.host,
+                        profile.port,
+                        profile.auth_method.label()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("  →  ")
+        };
         let custom_tab_color_hex = self
             .profile_tab_color_hex
             .read(cx)
@@ -11267,42 +11329,67 @@ impl AppView {
             ));
         }
         if !jump_name.is_empty() {
-            fields = fields.child(components::subheading(&tokens, self.tr("Jump host")));
-            if let Some(profile) = jump_profile {
-                fields = fields.child(components::help_text(
-                    &tokens,
-                    format!(
-                        "{}@{}:{} · {}",
-                        profile.username,
-                        profile.host,
-                        profile.port,
-                        self.tr(profile.auth_method.label())
-                    ),
-                ));
-                match profile.auth_method {
-                    AuthMethod::Password | AuthMethod::KeyboardInteractive => {
-                        fields = fields.child(components::field(
-                            &tokens,
-                            self.tr("Jump password"),
-                            &self.jump_password,
-                            true,
-                        ));
-                    }
-                    AuthMethod::PublicKey => {
-                        fields = fields.child(components::field(
-                            &tokens,
-                            self.tr("Jump key passphrase"),
-                            &self.jump_passphrase,
-                            true,
-                        ));
-                    }
-                    AuthMethod::Agent => {}
-                }
+            let jump_chain = parse_jump_chain(&jump_name);
+            let chain_label = if jump_chain.len() > 1 {
+                self.tr("Jump chain ({count} hops)")
+                    .replace("{count}", &jump_chain.len().to_string())
             } else {
+                self.tr("Jump host")
+            };
+            fields = fields.child(components::subheading(&tokens, chain_label));
+            let mut unresolved: Option<String> = None;
+            for name in &jump_chain {
+                match self.saved_jump_profile(name) {
+                    Some(profile) => {
+                        fields = fields.child(components::help_text(
+                            &tokens,
+                            format!(
+                                "{}@{}:{} · {}",
+                                profile.username,
+                                profile.host,
+                                profile.port,
+                                self.tr(profile.auth_method.label())
+                            ),
+                        ));
+                    }
+                    None => {
+                        unresolved = Some(name.clone());
+                        break;
+                    }
+                }
+            }
+            // Chain hops authenticate with the shared jump credentials below;
+            // the fields shown follow the first hop's method.
+            match jump_profile.as_ref().map(|profile| profile.auth_method) {
+                Some(AuthMethod::Password | AuthMethod::KeyboardInteractive) => {
+                    fields = fields.child(components::field(
+                        &tokens,
+                        self.tr("Jump password"),
+                        &self.jump_password,
+                        true,
+                    ));
+                }
+                Some(AuthMethod::PublicKey) => {
+                    fields = fields.child(components::field(
+                        &tokens,
+                        self.tr("Jump key passphrase"),
+                        &self.jump_passphrase,
+                        true,
+                    ));
+                }
+                _ => {}
+            }
+            if let Some(name) = unresolved {
                 fields = fields.child(components::warning_text(
                     &tokens,
                     self.tr("Jump host {name} is not a saved host.")
-                        .replace("{name}", &jump_name),
+                        .replace("{name}", &name),
+                ));
+            }
+            if jump_chain.len() > 1 {
+                fields = fields.child(components::help_text(
+                    &tokens,
+                    self.tr("All hops share the jump credentials above."),
                 ));
             }
         }

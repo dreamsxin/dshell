@@ -438,8 +438,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
             "公钥认证需要输入身份文件路径。"
         }
         "Jump host {name} is not a saved host." => "跳板机{name}不是已保存的主机。",
-        "Jump host {name} already uses jump host {jump}. Nested jump hosts are not supported yet." => {
-            "跳板机{name}已经使用跳板机{jump}。暂不支持多级跳板机。"
+        "Jump host {name} already uses jump host {jump}. Remove the nested jump host from its profile." => {
+            "跳板机{name}已经使用跳板机{jump}。请将该主机配置中的跳板机清空，或在连接时用逗号书写完整的跳板链。"
         }
         "The jump host resolves to the same target; choose a different jump host." => {
             "跳板机解析到相同目标，请选择其他跳板机。"
@@ -951,8 +951,13 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Filter session tabs" => "筛选会话标签",
         "Close tab group filter" => "关闭标签分组筛选",
         "No tabs in this group" => "此分组中没有活动标签",
-        "Saved jump host name" => "已保存的跳板机名称",
+        "Saved jump host names, comma-separated" => "已保存的跳板机名称，多个用英文逗号分隔",
         "Leave empty for a direct connection." => "直接连接时留空。",
+        "Jump host {name} appears more than once in the chain." => {
+            "跳板机{name}在跳板链中出现了多次。"
+        }
+        "Jump chain ({count} hops)" => "跳板链（{count} 级）",
+        "All hops share the jump credentials above." => "所有跳板机共用上方填写的跳板凭据。",
         "Snippet name" => "片段名称",
         "ERROR or timeout" => "ERROR 或 timeout",
         "Response" => "响应",

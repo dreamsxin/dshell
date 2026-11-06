@@ -79,7 +79,10 @@ pub struct ConnectionSpec {
     pub username: String,
     pub authentication: Authentication,
     pub terminal_size: TerminalSize,
-    pub jump: Option<JumpSpec>,
+    /// Jump chain, ordered nearest-first: hops[0] is dialed directly from
+    /// this machine, each later hop is dialed through the previous one, and
+    /// the target is dialed through the last hop. Empty connects directly.
+    pub jump: Vec<JumpSpec>,
     pub keepalive_seconds: u16,
     pub reconnect: ReconnectSettings,
     pub theme: TerminalTheme,
@@ -886,48 +889,70 @@ async fn run_connection_attempt_with_known_hosts(
         }
         let config = Arc::new(config);
         let mut session;
-        let mut jump_session = None;
-        if let Some(jump) = jump {
-            let jump_handler = KnownHostsHandler {
-                host: jump.host.clone(),
-                port: jump.port,
-                path: known_hosts_path.clone(),
-                remote_forwards: Arc::new(Mutex::new(HashMap::new())),
-                forward_events: None,
-                events: None,
-            };
-            let mut jump_handle = client::connect(
-                Arc::clone(&config),
-                (jump.host.as_str(), jump.port),
-                jump_handler,
-            )
-            .await
-            .context("SSH jump host handshake failed")?;
-            authenticate(
-                &mut jump_handle,
-                &jump.username,
-                jump.authentication,
-                &events,
-            )
-            .await
-            .context("SSH jump host authentication failed")?;
-            let channel = jump_handle
-                .channel_open_direct_tcpip(host.clone(), u32::from(port), "127.0.0.1", 0)
-                .await
-                .context("The jump host could not connect to the target host")?;
+        let mut hop_handles: Vec<client::Handle<KnownHostsHandler>> = Vec::new();
+        if !jump.is_empty() {
+            // Jump chain, nearest-first: hop 0 is dialed directly from this
+            // machine, each later hop through the previous handle, and the
+            // target through the last hop. Intermediate handlers carry no
+            // forwarding state; only the target handler does.
+            for hop in jump.into_iter() {
+                let handler = KnownHostsHandler {
+                    host: hop.host.clone(),
+                    port: hop.port,
+                    path: known_hosts_path.clone(),
+                    remote_forwards: Arc::new(Mutex::new(HashMap::new())),
+                    forward_events: None,
+                    events: None,
+                };
+                let mut handle = match hop_handles.last_mut() {
+                    None => {
+                        client::connect(Arc::clone(&config), (hop.host.as_str(), hop.port), handler)
+                            .await
+                            .with_context(|| {
+                                format!("SSH jump host {} handshake failed", hop.host)
+                            })?
+                    }
+                    Some(previous) => {
+                        let channel = previous
+                            .channel_open_direct_tcpip(
+                                hop.host.clone(),
+                                u32::from(hop.port),
+                                "127.0.0.1",
+                                0,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!("Jump host could not connect to {}", hop.host)
+                            })?;
+                        client::connect_stream(Arc::clone(&config), channel.into_stream(), handler)
+                            .await
+                            .with_context(|| format!("SSH handshake through {} failed", hop.host))?
+                    }
+                };
+                authenticate(&mut handle, &hop.username, hop.authentication, &events)
+                    .await
+                    .with_context(|| format!("SSH jump host {} authentication failed", hop.host))?;
+                hop_handles.push(handle);
+            }
             let target_handler = KnownHostsHandler {
                 host: host.clone(),
                 port,
-                path: known_hosts_path.clone(),
+                path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
+            let last_hop = hop_handles
+                .last_mut()
+                .expect("hop chain is non-empty when jump is set");
+            let channel = last_hop
+                .channel_open_direct_tcpip(host.clone(), u32::from(port), "127.0.0.1", 0)
+                .await
+                .context("The jump host could not connect to the target host")?;
             session =
                 client::connect_stream(Arc::clone(&config), channel.into_stream(), target_handler)
                     .await
                     .context("SSH target handshake through the jump host failed")?;
-            jump_session = Some(jump_handle);
         } else {
             let handler = KnownHostsHandler {
                 host: host.clone(),
@@ -983,10 +1008,10 @@ async fn run_connection_attempt_with_known_hosts(
             )
             .await?;
         channel.request_shell(true).await?;
-        Ok::<_, anyhow::Error>((session, channel, jump_session, sftp_channel))
+        Ok::<_, anyhow::Error>((session, channel, hop_handles, sftp_channel))
     };
     tokio::pin!(setup);
-    let (mut session, channel, jump_session, sftp_channel) = tokio::select! {
+    let (mut session, channel, hop_handles, sftp_channel) = tokio::select! {
         result = &mut setup => result?,
         _ = wait_for_cancellation(cancellation) => {
             let _ = events.send(UiEvent::Disconnected).await;
@@ -1595,8 +1620,8 @@ async fn run_connection_attempt_with_known_hosts(
     let _ = session
         .disconnect(Disconnect::ByApplication, "client closed", "en")
         .await;
-    if let Some(jump_session) = jump_session {
-        let _ = jump_session
+    for mut hop in hop_handles {
+        let _ = hop
             .disconnect(Disconnect::ByApplication, "target session closed", "en")
             .await;
     }
@@ -3661,7 +3686,7 @@ abc	img	name"
                 columns: 80,
                 rows: 24,
             },
-            jump: None,
+            jump: Vec::new(),
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
             theme: TerminalTheme::Default,
@@ -3750,7 +3775,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -4140,7 +4165,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -4272,7 +4297,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -4484,12 +4509,12 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: Some(JumpSpec {
+                    jump: vec![JumpSpec {
                         host: jump_host,
                         port: jump_port,
                         username,
                         authentication: Authentication::Password(Zeroizing::new(password)),
-                    }),
+                    }],
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -4593,6 +4618,164 @@ abc	img	name"
 
     #[test]
     #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_two_jump_host_round_trip() {
+        // Chain the same container twice: hop 1 and hop 2 are both the test
+        // SSH server dialing itself through nested direct-tcpip channels.
+        let jump_host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let jump_port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts_path = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async move {
+                let (command_tx, command_rx) = mpsc::channel(32);
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (sftp_commands, sftp_events, sftp_cancel) = sftp_test_channels();
+                let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
+                    forward_test_channels();
+                let spec = ConnectionSpec {
+                    host: "127.0.0.1".to_owned(),
+                    port: 22,
+                    username: username.clone(),
+                    authentication: Authentication::Password(Zeroizing::new(password.clone())),
+                    terminal_size: TerminalSize {
+                        columns: 80,
+                        rows: 24,
+                    },
+                    jump: vec![
+                        JumpSpec {
+                            host: jump_host.clone(),
+                            port: jump_port,
+                            username: username.clone(),
+                            authentication: Authentication::Password(Zeroizing::new(
+                                password.clone(),
+                            )),
+                        },
+                        // The second hop is dialed from inside the container,
+                        // so it targets the container's own sshd directly.
+                        JumpSpec {
+                            host: "127.0.0.1".to_owned(),
+                            port: 22,
+                            username,
+                            authentication: Authentication::Password(Zeroizing::new(password)),
+                        },
+                    ],
+                    keepalive_seconds: 0,
+                    reconnect: ReconnectSettings::default(),
+                    theme: TerminalTheme::Default,
+                    cursor_style: CursorStyle::Block,
+                };
+                let connection = run_connection_with_known_hosts(
+                    spec,
+                    command_rx,
+                    event_tx,
+                    sftp_commands,
+                    sftp_events,
+                    sftp_cancel,
+                    forward_commands,
+                    forward_events,
+                    known_hosts_path,
+                    cancel_rx,
+                );
+                tokio::pin!(connection);
+
+                let exercise = async {
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for the two-jump connection")?
+                            .context("SSH event stream closed during connection")?
+                        {
+                            UiEvent::Status(status) if status.starts_with("Connected to ") => break,
+                            UiEvent::Failed(error) => bail!("SSH connection failed: {error}"),
+                            UiEvent::Disconnected => bail!("SSH disconnected during connection"),
+                            UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
+                        }
+                    }
+
+                    command_tx
+                        .send(TerminalRequest::Paste(
+                            r"printf 'DSHELL_TWO_JUMP_READY\n'".to_owned(),
+                        ))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    next_screen(&mut event_rx, |frame| {
+                        frame_text(frame).contains("DSHELL_TWO_JUMP_READY")
+                    })
+                    .await
+                    .context("waiting for shell output through the two-jump chain")?;
+
+                    cancel_tx.send_replace(true);
+                    loop {
+                        match timeout(Duration::from_secs(20), event_rx.recv())
+                            .await
+                            .context("timed out waiting for two-jump disconnect")?
+                            .context("SSH event stream closed before disconnect")?
+                        {
+                            UiEvent::Disconnected => break,
+                            UiEvent::Failed(error) => bail!("SSH session failed: {error}"),
+                            UiEvent::Status(_)
+                            | UiEvent::Reconnecting { .. }
+                            | UiEvent::LogState(_)
+                            | UiEvent::Screen(_)
+                            | UiEvent::AuthPrompt { .. }
+                            | UiEvent::HostKeyVerificationRequest { .. }
+                            | UiEvent::TerminalTitle(_)
+                            | UiEvent::ClipboardWrite(_)
+                            | UiEvent::Notification(_)
+                            | UiEvent::SearchResult(_)
+                            | UiEvent::ConnectionInfo(_)
+                            | UiEvent::ServerMetrics(_)
+                            | UiEvent::ServerMetricsError(_) => {}
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+
+                let result = timeout(Duration::from_secs(60), async {
+                    tokio::select! {
+                        result = exercise => {
+                            result?;
+                            connection.await
+                        }
+                        result = &mut connection => result,
+                    }
+                })
+                .await
+                .context("Docker two-jump test exceeded 60 seconds")?;
+                result?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
     fn docker_ssh_keyboard_interactive_authentication() {
         let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
         let port = env::var("DSHELL_DOCKER_SSH_PORT")
@@ -4632,7 +4815,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -4766,7 +4949,7 @@ abc	img	name"
                     columns: 80,
                     rows: 24,
                 },
-                jump: None,
+                jump: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
                 theme: TerminalTheme::Default,
@@ -4841,7 +5024,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -4995,7 +5178,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -5510,7 +5693,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -5706,7 +5889,7 @@ abc	img	name"
                         columns: 80,
                         rows: 24,
                     },
-                    jump: None,
+                    jump: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
