@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-06，Windows/MSVC：完成托盘面板。新增 `src/tray.rs`：`tray-icon` 0.25 原生托盘图标（程序化绘制 32×32 RGBA——圆角深蓝方块 + 浅色终端提示符箭头，无二进制资产），muda 上下文菜单（Open dshell / New session / Quit）。托盘事件在平台线程触发，通过 `std::sync::mpsc` 通道送入 GPUI 前台任务轮询（150 ms try_recv + timer），经 `TrayBridge` 全局（AnyWindowHandle + Entity<AppView>，AppView::new 所在窗口闭包内 set_global）执行：Open/左键单击激活主窗口（activate_window），New session 经 `window.root::<AppView>()` 打开会话编辑器，Quit 调用 `App::quit`。通道轮询循环在 Quit 后退出；托盘菜单文案为英文（GPUI 事件循环外无 i18n 上下文，v1 限制）。`tray-icon` 未列入禁止依赖（保持原生、无 WebView）。验证：`cargo fmt --all`、硬约束脚本通过（247 项通过、10 项 Docker 专项忽略），Docker SSH 10/10（SSH 路径未改动，回归基线）。托盘图标显示、菜单点击、窗口激活行为需用户人工验收（隔离桌面约束）。
+
 2026-11-06，Windows/MSVC：发布 v0.1.43。汇总自 v0.1.42 以来交付的全部功能：SFTP 文件编辑器、PublicKey BOM 修复与连接表单字段重排、身份文件文件选择器、主机密钥验证对话框、地址栏（Alt+D）、保存可见屏幕、内置关键词高亮、广播模式、多行粘贴确认、动态标签标题（OSC 0/2）、OSC 52 剪贴板/OSC 9 通知、搜索匹配高亮、主机发行版图标、主机备注、连接测试、命令面板（Ctrl+K）、十六进制查看、光标行高亮、屏幕锁（Ctrl+Shift+L）、CSV 导出、TOTP 键盘交互认证、存档快捷方式、脚本录制、会话跟踪、监控自动刷新、ZMODEM 接收、云同步（同步文件夹）、会话恢复、内联图片保存、Docker 容器面板。`cargo fmt --all`、`scriptserify-hard-constraints.ps1` 通过（238 项通过、10 项 Docker 专项忽略），`scripts	est-docker-ssh.ps1` 通过（10/10）。未在用户活动桌面启动 GUI；DPI/IME/字形检查、真实 sz/docker ps 远端联调与新建托盘图标行为仍需隔离 Windows 桌面人工验收。下一步：托盘面板人工验收，多窗口支持架构迭代评估。
 
 2026-11-06，Windows/MSVC：完成 Docker 容器面板。`ssh.rs` 新增 `ServerDockerContainer`（id/image/names/status/ports）、`SERVER_DOCKER_COMMAND`（docker ps --format 制表符分隔，3 秒超时 + 64 KiB 上限，与现有探针一致）、`parse_server_docker_containers` 纯解析函数（表头校验、50 条上限、畸形行拒绝）、`ServerData::Containers`/`ServerDataError::Containers` 事件、`TerminalRequest::RefreshDockerContainers` 请求。检查器新增 Docker 分组（折叠头 + 刷新按钮 + 容器卡片列表，空态与错误提示），跟随现有 Server health 模式。1 项解析测试。244 项 + Docker 10/10。

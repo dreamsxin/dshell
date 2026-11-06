@@ -15,6 +15,7 @@ mod ssh;
 mod terminal;
 mod terminal_compare;
 mod totp;
+mod tray;
 mod triggers;
 mod ui;
 mod zmodem;
@@ -24668,14 +24669,67 @@ impl Render for AppView {
 }
 
 fn main() {
-    Application::new().with_assets(AppAssets).run(|cx| {
+    let (tray_tx, tray_rx) = std::sync::mpsc::channel::<tray::TrayCommand>();
+    Application::new().with_assets(AppAssets).run(move |cx| {
         gpui_component::init(cx);
         ui::theme::install(cx, UiTheme::DEFAULT);
-        cx.open_window(WindowOptions::default(), |window, cx| {
-            let view = cx.new(|cx| AppView::new(window, cx));
-            cx.new(|cx| Root::new(view.into(), window, cx))
-        })
-        .expect("failed to open dshell window");
+        if let Err(error) = tray::install(tray_tx) {
+            eprintln!("System tray unavailable: {error}");
+        }
+        let window = cx
+            .open_window(WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| AppView::new(window, cx));
+                cx.set_global(tray::TrayBridge {
+                    window: window.window_handle(),
+                    app_view: view.clone(),
+                });
+                cx.new(|cx| Root::new(view.into(), window, cx))
+            })
+            .expect("failed to open dshell window");
         cx.activate(true);
+        cx.spawn(async move |cx| {
+            loop {
+                let mut quit = false;
+                while let Ok(command) = tray_rx.try_recv() {
+                    match command {
+                        tray::TrayCommand::Show => {
+                            cx.update(|app| {
+                                if let Some(bridge) = app.try_global::<tray::TrayBridge>() {
+                                    let _ = bridge.window.update(app, |_root, window, _| {
+                                        window.activate_window();
+                                    });
+                                }
+                            })
+                            .ok();
+                        }
+                        tray::TrayCommand::NewSession => {
+                            cx.update(|app| {
+                                if let Some(bridge) = app.try_global::<tray::TrayBridge>() {
+                                    let _ = bridge.window.update(app, |_root, window, app| {
+                                        if let Some(Some(view)) = window.root::<AppView>() {
+                                            view.update(app, |view, cx| {
+                                                view.new_profile(window, cx);
+                                            });
+                                        }
+                                    });
+                                }
+                            })
+                            .ok();
+                        }
+                        tray::TrayCommand::Quit => {
+                            cx.update(|app| app.quit()).ok();
+                            quit = true;
+                        }
+                    }
+                }
+                if quit {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+            }
+        })
+        .detach();
     });
 }

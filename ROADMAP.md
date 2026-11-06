@@ -237,6 +237,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 38. v0.1.43 发布：汇总 v0.1.42 后全部功能（见 CHANGELOG）。验证：238 项单测 + Docker 10/10。后续候选：托盘面板人工验收、多窗口架构迭代、内联图片渲染进终端网格。
 
+39. 托盘面板已交付：`tray-icon` 原生托盘 + muda 菜单（Open/New session/Quit），程序化 RGBA 图标，mpsc 通道桥接平台线程事件到 GPUI 前台轮询任务，`TrayBridge` 全局持窗口句柄。GUI 行为待人工验收。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。

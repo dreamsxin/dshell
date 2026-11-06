@@ -2,6 +2,15 @@
 
 All notable changes to dshell are documented here.
 
+## Unreleased
+
+### Added
+
+- Add a system tray panel: tray icon with a context menu (Open dshell,
+  New session, Quit) drawn programmatically in the app accent color.
+  Tray clicks activate the main window; New session opens the session
+  editor. GUI behavior requires manual verification.
+
 ## [0.1.43] - 2026-11-06
 
 Adds the first wave of Netcatty/Xshell-parity features: quick-connect
