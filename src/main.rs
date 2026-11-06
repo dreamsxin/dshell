@@ -11927,7 +11927,7 @@ impl AppView {
                     .child(
                         div()
                             .text_size(px(ui_tokens::FONT_BODY))
-                            .font_family("Consolas, monospace")
+                            .font_family(crate::settings::DEFAULT_FONT_FAMILY)
                             .child(key_fingerprint),
                     ),
             )
@@ -12063,7 +12063,7 @@ impl AppView {
                                     .overflow_y_scroll()
                                     .max_h(px(200.))
                                     .text_size(px(ui_tokens::FONT_BODY))
-                                    .font_family("Consolas, monospace")
+                                    .font_family(crate::settings::DEFAULT_FONT_FAMILY)
                                     .child(preview),
                             )
                             .child(if line_count > 10 {
@@ -12131,7 +12131,7 @@ impl AppView {
                             .p(px(ui_tokens::SPACE_3))
                             .bg(tokens.surface)
                             .text_size(px(ui_tokens::FONT_CAPTION))
-                            .font_family("Consolas, monospace")
+                            .font_family(crate::settings::DEFAULT_FONT_FAMILY)
                             .text_color(tokens.text_secondary)
                             .child(content),
                     ),

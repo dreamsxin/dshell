@@ -22,7 +22,17 @@ const DOCUMENT_VERSION: u8 = 1;
 pub const MIN_FONT_SIZE: f32 = 9.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+/// The default terminal font. Must be a real installed family name: the GDI
+/// generic alias "monospace" does not resolve in DirectWrite, which silently
+/// falls back to a proportional font and breaks cell alignment.
+#[cfg(windows)]
+pub const DEFAULT_FONT_FAMILY: &str = "Consolas";
+#[cfg(not(windows))]
 pub const DEFAULT_FONT_FAMILY: &str = "monospace";
+
+/// Family names that never resolve to a monospace font on Windows and must
+/// be migrated to the platform default on load.
+const LEGACY_FONT_FAMILIES: [&str; 2] = ["monospace", "Consolas, monospace"];
 pub const DEFAULT_ALERT_CPU_PERCENT: u8 = 80;
 pub const DEFAULT_ALERT_MEMORY_PERCENT: u8 = 80;
 pub const DEFAULT_ALERT_DISK_PERCENT: u8 = 90;
@@ -167,9 +177,12 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn normalized(self) -> Self {
         let font_family = self.font_family.trim();
+        let migrated = LEGACY_FONT_FAMILIES
+            .iter()
+            .any(|legacy| font_family.eq_ignore_ascii_case(legacy));
         Self {
             font_size: self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE),
-            font_family: if font_family.is_empty() {
+            font_family: if font_family.is_empty() || migrated {
                 DEFAULT_FONT_FAMILY.to_owned()
             } else {
                 font_family.chars().take(120).collect()
@@ -767,6 +780,9 @@ mod tests {
         .unwrap();
         let loaded = SettingsStore::at(path).load().unwrap();
         assert_eq!(loaded.font_size, 14.0);
+        // The GDI alias "monospace" never resolves in DirectWrite; it must
+        // migrate to the platform's real monospace default.
+        assert_eq!(loaded.font_family, DEFAULT_FONT_FAMILY);
         assert_eq!(loaded.ui_theme, UiTheme::Dark);
         assert_eq!(loaded.language, Language::English);
         assert!(!loaded.sidebar_collapsed);

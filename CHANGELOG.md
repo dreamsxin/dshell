@@ -6,6 +6,14 @@ All notable changes to dshell are documented here.
 
 ### Added
 
+- Fix the terminal rendering in a proportional font: the default font
+  family "monospace" is a GDI generic alias that DirectWrite does not
+  resolve, so the terminal silently fell back to a proportional font
+  and no cell grid could ever align. The default is now the real
+  installed "Consolas" family on Windows, saved settings using the
+  broken alias migrate to the platform default on load, and the key
+  panels' "Consolas, monospace" font stacks (also unresolvable) use
+  the same default.
 - Fix the terminal cursor drifting away from typed characters: cell
   metrics are now measured from the configured font's real advance
   width via the text system instead of a fixed ratio estimate, so the
