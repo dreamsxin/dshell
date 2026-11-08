@@ -813,6 +813,18 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Resume" => "续传",
         "Overwrite" => "覆盖",
         "Add tunnel" => "添加隧道",
+        "Remote Desktop host from SSH server" => "SSH 服务器可访问的远程桌面主机",
+        "Remote Desktop target host" => "远程桌面目标主机",
+        "Remote Desktop port" => "远程桌面端口",
+        "The RDP target is reached from the SSH server; the local tunnel only listens on 127.0.0.1." => {
+            "RDP 目标由 SSH 服务器访问；本地隧道仅监听 127.0.0.1。"
+        }
+        "Enter a valid Remote Desktop host and port." => "请输入有效的远程桌面主机和端口。",
+        "Remote Desktop port must be between 1 and 65535." => {
+            "远程桌面端口必须在 1 到 65535 之间。"
+        }
+        "Starting Remote Desktop..." => "正在启动远程桌面...",
+        "Open Remote Desktop" => "打开远程桌面",
         "Stop" => "停止",
         "Start" => "启动",
         "Open session log" => "打开会话日志",
@@ -1412,6 +1424,14 @@ mod tests {
         assert_eq!(
             translate(Language::SimplifiedChinese, "Add tunnel"),
             "添加隧道"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Open Remote Desktop"),
+            "打开远程桌面"
+        );
+        assert_eq!(
+            translate(Language::SimplifiedChinese, "Remote Desktop port"),
+            "远程桌面端口"
         );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Quick commands"),

@@ -32,6 +32,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use std::process::Command;
+
 use auth_profiles::{AuthProfile, AuthProfileStore};
 use forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec, ForwardRuleUiState};
 use gpui::{AnyElement, StatefulInteractiveElement as _, prelude::*, *};
@@ -2363,6 +2366,50 @@ fn session_tab_shortcut_target(visible_session_ids: &[u64], index: usize) -> Opt
     visible_session_ids.get(index).copied()
 }
 
+fn remote_desktop_forward_spec(
+    target_host: &str,
+    target_port: u16,
+) -> Result<ForwardRuleSpec, &'static str> {
+    let target_host = target_host.trim();
+    if target_host.is_empty()
+        || target_host.len() > 255
+        || target_host.chars().any(char::is_whitespace)
+        || target_host.chars().any(char::is_control)
+        || target_port == 0
+    {
+        return Err("Enter a valid Remote Desktop host and port.");
+    }
+    Ok(ForwardRuleSpec {
+        kind: ForwardKind::Local,
+        listen_host: "127.0.0.1".to_owned(),
+        listen_port: 0,
+        target_host: target_host.to_owned(),
+        target_port,
+    })
+}
+
+fn remote_desktop_address(local_port: u16) -> Option<String> {
+    (local_port > 0).then(|| format!("127.0.0.1:{local_port}"))
+}
+
+fn launch_remote_desktop_client(local_port: u16) -> Result<(), String> {
+    let address = remote_desktop_address(local_port)
+        .ok_or_else(|| "The SSH tunnel did not provide a valid local port.".to_owned())?;
+    #[cfg(windows)]
+    {
+        Command::new("mstsc.exe")
+            .arg(format!("/v:{address}"))
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Could not start Remote Desktop: {error}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = address;
+        Err("Remote Desktop launch is only available on Windows.".to_owned())
+    }
+}
+
 fn session_tab_group_choices(
     group_paths: impl IntoIterator<Item = String>,
 ) -> Vec<(String, usize)> {
@@ -2496,17 +2543,17 @@ mod session_tests {
         move_profile_to_group, mpsc, next_monitor_interval, next_session_switcher_index,
         palette_matching_commands, parse_alert_percent, parse_jump_chain, recall_compose_history,
         recent_sftp_directories_for_target, remember_compose_history, remember_stopped_forward,
-        remove_profile_group, remove_session, rename_profile_group, render_script_recording,
-        render_session_trace, reorder_group_order, reorder_session_ids, saved_profile_for_session,
-        search_result_message, server_alert_observations, session_accepts_requests,
-        session_editor_escape, session_editor_key, session_matches_tab_group,
-        session_matches_tab_group_selection, session_matches_target, session_switcher_matches_ids,
-        session_tab_group_choices, session_tab_group_filter_after_selection,
-        session_tab_shortcut_target, session_terminal_size_for_split, session_trace_push,
-        split_panel_terminal_size, sync_profile_path, synchronized_group_target_ids,
-        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
-        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
-        watch,
+        remote_desktop_address, remote_desktop_forward_spec, remove_profile_group, remove_session,
+        rename_profile_group, render_script_recording, render_session_trace, reorder_group_order,
+        reorder_session_ids, saved_profile_for_session, search_result_message,
+        server_alert_observations, session_accepts_requests, session_editor_escape,
+        session_editor_key, session_matches_tab_group, session_matches_tab_group_selection,
+        session_matches_target, session_switcher_matches_ids, session_tab_group_choices,
+        session_tab_group_filter_after_selection, session_tab_shortcut_target,
+        session_terminal_size_for_split, session_trace_push, split_panel_terminal_size,
+        sync_profile_path, synchronized_group_target_ids, synchronized_input_targets,
+        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
+        unique_duplicate_session_title, update_sessions_for_profile, watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -3439,6 +3486,24 @@ mod session_tests {
         assert_eq!(session_tab_shortcut_target(&visible_ids, 0), Some(42));
         assert_eq!(session_tab_shortcut_target(&visible_ids, 1), Some(7));
         assert_eq!(session_tab_shortcut_target(&visible_ids, 2), None);
+    }
+
+    #[test]
+    fn remote_desktop_uses_an_ephemeral_loopback_forward() {
+        let spec = remote_desktop_forward_spec("127.0.0.1", 3389).unwrap();
+        assert_eq!(spec.kind, ForwardKind::Local);
+        assert_eq!(spec.listen_host, "127.0.0.1");
+        assert_eq!(spec.listen_port, 0);
+        assert_eq!(spec.target_host, "127.0.0.1");
+        assert_eq!(spec.target_port, 3389);
+        assert!(remote_desktop_forward_spec("127.0.0.1", 0).is_err());
+        assert!(remote_desktop_forward_spec("", 3389).is_err());
+        assert!(remote_desktop_forward_spec("host name", 3389).is_err());
+        assert_eq!(remote_desktop_address(0), None);
+        assert_eq!(
+            remote_desktop_address(49152).as_deref(),
+            Some("127.0.0.1:49152")
+        );
     }
 
     #[test]
@@ -4513,6 +4578,10 @@ struct AppView {
     forward_listen_port: Entity<InputState>,
     forward_target_host: Entity<InputState>,
     forward_target_port: Entity<InputState>,
+    remote_desktop_target_host: Entity<InputState>,
+    remote_desktop_target_port: Entity<InputState>,
+    pending_remote_desktop: HashMap<u64, ForwardRuleSpec>,
+    ephemeral_forward_rules: HashSet<(u64, u64)>,
     sftp_name: Entity<InputState>,
     sftp_permissions: Entity<InputState>,
     sftp_atime: Entity<InputState>,
@@ -4720,6 +4789,13 @@ impl AppView {
         let forward_target_host =
             cx.new(|cx| InputState::new(window, cx).placeholder("target.internal"));
         let forward_target_port = cx.new(|cx| InputState::new(window, cx).default_value("22"));
+        let remote_desktop_target_host = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value("127.0.0.1")
+                .placeholder("127.0.0.1")
+        });
+        let remote_desktop_target_port =
+            cx.new(|cx| InputState::new(window, cx).default_value("3389"));
         let sftp_name = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
         let sftp_permissions = cx.new(|cx| InputState::new(window, cx).placeholder("0755"));
         let sftp_atime = cx.new(|cx| InputState::new(window, cx).placeholder("Unix seconds"));
@@ -4926,6 +5002,10 @@ impl AppView {
             forward_listen_port,
             forward_target_host,
             forward_target_port,
+            remote_desktop_target_host,
+            remote_desktop_target_port,
+            pending_remote_desktop: HashMap::new(),
+            ephemeral_forward_rules: HashSet::new(),
             sftp_name,
             sftp_permissions,
             sftp_atime,
@@ -5110,6 +5190,10 @@ impl AppView {
             (&self.jump_profile, "Saved jump host names, comma-separated"),
             (&self.jump_password, "Jump host password"),
             (&self.jump_passphrase, "Jump key passphrase"),
+            (
+                &self.remote_desktop_target_host,
+                "Remote Desktop target host",
+            ),
             (&self.snippet_name, "Snippet name"),
             (&self.keyword_input, "ERROR or timeout"),
             (&self.trigger_keyword_input, "ERROR or timeout"),
@@ -8971,6 +9055,15 @@ impl AppView {
                                 view.persist_session_restore();
                             }
                             if event_applied
+                                && view.session(id).is_some_and(|session| {
+                                    session.state == SessionState::Disconnected
+                                })
+                            {
+                                view.pending_remote_desktop.remove(&id);
+                                view.ephemeral_forward_rules
+                                    .retain(|(session_id, _)| *session_id != id);
+                            }
+                            if event_applied
                                 && let Some((status, message, forwards)) = reconnect_data
                                 && let Some(session) = view.session_mut(id)
                             {
@@ -9198,6 +9291,9 @@ impl AppView {
     }
 
     fn close_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_remote_desktop.remove(&id);
+        self.ephemeral_forward_rules
+            .retain(|(session_id, _)| *session_id != id);
         self.pending_credentials.remove(&id);
         self.pending_trigger_prompts
             .retain(|(session_id, _, _)| *session_id != id);
@@ -14217,12 +14313,32 @@ impl AppView {
     }
 
     fn apply_forward_event(&mut self, id: u64, event: ForwardEvent) -> bool {
+        let failed_remote_desktop = matches!(
+            &event,
+            ForwardEvent::RuleFailed { spec, .. }
+                if self.pending_remote_desktop.get(&id) == Some(spec)
+        );
+        let launch_remote_desktop = matches!(
+            &event,
+            ForwardEvent::RuleAdded { spec, .. }
+                if self.pending_remote_desktop.get(&id) == Some(spec)
+        );
+        let removed_ephemeral_rule = match &event {
+            ForwardEvent::RuleRemoved { id: rule_id }
+                if self.ephemeral_forward_rules.contains(&(id, *rule_id)) =>
+            {
+                Some(*rule_id)
+            }
+            _ => None,
+        };
         let Some(session) = self.session_mut(id) else {
             return false;
         };
         let profile_name = session.profile_name.clone();
         let mut persist_add = None;
         let mut persist_remove = None;
+        let mut remote_desktop_port = None;
+        let mut ephemeral_rule_added = None;
         match event {
             ForwardEvent::RuleAdded {
                 id: rule_id,
@@ -14258,7 +14374,12 @@ impl AppView {
                     )
                 };
                 session.forwards.visible = true;
-                persist_add = profile_name.clone().map(|name| (name, spec.clone()));
+                if launch_remote_desktop {
+                    remote_desktop_port = Some(bound_port);
+                    ephemeral_rule_added = Some(rule_id);
+                } else {
+                    persist_add = profile_name.clone().map(|name| (name, spec.clone()));
+                }
             }
             ForwardEvent::RuleRemoved { id: rule_id } => {
                 let removed = session
@@ -14273,7 +14394,9 @@ impl AppView {
                     .retain(|(existing, _)| *existing != rule_id);
                 if let Some(removed) = removed {
                     remember_stopped_forward(&mut session.forwards, removed.clone());
-                    persist_remove = profile_name.clone().zip(Some(removed));
+                    if removed_ephemeral_rule != Some(rule_id) {
+                        persist_remove = profile_name.clone().zip(Some(removed));
+                    }
                 }
                 session.forwards.message = "Forwarding rule stopped.".to_owned();
             }
@@ -14282,6 +14405,14 @@ impl AppView {
                     Some(rule_id) => format!("Forwarding rule {rule_id}: {error}"),
                     None => error,
                 };
+            }
+            ForwardEvent::RuleFailed { spec, error } => {
+                session.forwards.message = format!(
+                    "{} forward to {}:{} failed: {error}",
+                    spec.kind.label(),
+                    spec.target_host,
+                    spec.target_port
+                );
             }
             ForwardEvent::ConnectionOpened {
                 id: rule_id,
@@ -14316,6 +14447,24 @@ impl AppView {
         if let Some((name, spec)) = persist_remove {
             self.persist_forward_rule(&name, None, Some(&spec));
         }
+        if launch_remote_desktop {
+            self.pending_remote_desktop.remove(&id);
+            if let Some(rule_id) = ephemeral_rule_added {
+                self.ephemeral_forward_rules.insert((id, rule_id));
+            }
+        }
+        if let Some(rule_id) = removed_ephemeral_rule {
+            self.ephemeral_forward_rules.remove(&(id, rule_id));
+        }
+        if failed_remote_desktop {
+            self.pending_remote_desktop.remove(&id);
+        }
+        if let Some(local_port) = remote_desktop_port
+            && let Err(error) = launch_remote_desktop_client(local_port)
+            && let Some(session) = self.session_mut(id)
+        {
+            session.forwards.message = error;
+        }
         true
     }
 
@@ -14324,24 +14473,79 @@ impl AppView {
         session_id: u64,
         command: ForwardCommand,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(session) = self.session_mut(session_id) else {
-            return;
+            return false;
         };
         if !session_accepts_requests(session.state) {
             session.forwards.message = "SSH session is not accepting requests.".to_owned();
             cx.notify();
-            return;
+            return false;
         }
         let Some(forward_tx) = &session.forward_tx else {
             session.forwards.message =
                 "Port forwarding is not available for this session.".to_owned();
             cx.notify();
+            return false;
+        };
+        match forward_tx.try_send(command) {
+            Ok(()) => true,
+            Err(error) => {
+                session.forwards.message = format!("Port forwarding queue is unavailable: {error}");
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    fn start_remote_desktop(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let target_host = self.remote_desktop_target_host.read(cx).value().to_owned();
+        let target_port = self
+            .remote_desktop_target_port
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u16>();
+        let Ok(target_port) = target_port else {
+            self.set_forward_message(
+                session_id,
+                self.tr("Remote Desktop port must be between 1 and 65535."),
+                cx,
+            );
             return;
         };
-        if let Err(error) = forward_tx.try_send(command) {
-            session.forwards.message = format!("Port forwarding queue is unavailable: {error}");
-            cx.notify();
+        let spec = match remote_desktop_forward_spec(&target_host, target_port) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.set_forward_message(session_id, self.tr(error), cx);
+                return;
+            }
+        };
+        if let Some(local_port) = self.session(session_id).and_then(|session| {
+            session
+                .forwards
+                .rules
+                .iter()
+                .find(|(_, rule)| rule.spec == spec)
+                .map(|(_, rule)| rule.bound_port)
+        }) {
+            if let Err(error) = launch_remote_desktop_client(local_port) {
+                self.set_forward_message(session_id, error, cx);
+            }
+            return;
+        }
+        if self.pending_remote_desktop.contains_key(&session_id) {
+            return;
+        }
+        self.pending_remote_desktop.insert(session_id, spec.clone());
+        if !self.send_forward_command(session_id, ForwardCommand::Add(spec), cx) {
+            self.pending_remote_desktop.remove(&session_id);
+        } else {
+            self.set_forward_message(
+                session_id,
+                self.tr("Opening Remote Desktop through an SSH tunnel..."),
+                cx,
+            );
         }
     }
 
@@ -14445,6 +14649,8 @@ impl AppView {
         let kind = self.forward_kind;
         let rules = session.forwards.rules.clone();
         let message = session.forwards.message.clone();
+        #[cfg(windows)]
+        let remote_desktop_pending = self.pending_remote_desktop.contains_key(&session_id);
 
         let mut kind_buttons = div().flex().items_center().gap(px(4.));
         for (index, candidate) in ForwardKind::ALL.into_iter().enumerate() {
@@ -14508,6 +14714,38 @@ impl AppView {
                     this.add_forward_rule(session_id, cx);
                 })),
         );
+        #[cfg(windows)]
+        {
+            form = form
+                .child(components::field(
+                    &tokens,
+                    self.tr("Remote Desktop host from SSH server"),
+                    &self.remote_desktop_target_host,
+                    false,
+                ))
+                .child(components::field(
+                    &tokens,
+                    self.tr("Remote Desktop port"),
+                    &self.remote_desktop_target_port,
+                    false,
+                ))
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("The RDP target is reached from the SSH server; the local tunnel only listens on 127.0.0.1."),
+                ))
+                .child(
+                    Button::new("open-remote-desktop")
+                        .label(if remote_desktop_pending {
+                            self.tr("Starting Remote Desktop...")
+                        } else {
+                            self.tr("Open Remote Desktop")
+                        })
+                        .disabled(remote_desktop_pending)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_remote_desktop(session_id, cx);
+                        })),
+                );
+        }
 
         let mut rule_list = div()
             .id("forward-rules")

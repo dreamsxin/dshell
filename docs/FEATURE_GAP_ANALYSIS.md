@@ -2,6 +2,12 @@
 
 对比 Netcatty 和 Xshell 8 的功能与界面，分析 dshell 当前差距，列出待实现功能和 UI 优化建议。
 
+## Bitvise SSH Client 对标增量（2026-11-08）
+
+Bitvise 官方产品介绍将 Remote Desktop over SSH 列为集成能力。dshell 的 `v0.1.45` 增加 Windows 端等价工作流：从 Tunnels 面板设置 SSH 主机可达的 RDP host/port，使用 loopback-only 临时本地转发后启动 `mstsc.exe`；临时规则不写入主机资料，SSH session 生命周期负责清理。该功能不实现新的 RDP 协议栈，也不接管 Windows RDP 证书提示。参考：[Bitvise SSH Client](https://bitvise.com/ssh-client)。
+
+后续 Bitvise 对标继续分批评估 SFTP Drive 映射、CLI 工具和配置兼容性；每项先核对本地原生实现和凭据安全边界，再选可闭环功能，不把产品菜单清单直接复制为承诺。
+
 ## 零、实施状态审计（2026-11-06）
 
 基于代码级 grep 审计，每个功能在 `src/` 中的实际引用计数确认了实现状态：

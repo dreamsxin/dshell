@@ -72,6 +72,10 @@ pub enum ForwardEvent {
     RuleRemoved {
         id: u64,
     },
+    RuleFailed {
+        spec: ForwardRuleSpec,
+        error: String,
+    },
     Error {
         id: Option<u64>,
         error: String,

@@ -9,6 +9,7 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
     && apt-get install -o Acquire::Retries=5 -y --no-install-recommends \
         htop \
         openssh-server \
+        socat \
         tmux \
         vim \
     && rm /usr/sbin/policy-rc.d

@@ -6,7 +6,7 @@
 
 dshell 面向需要反复连接 Linux/Unix 主机的开发者和运维人员，优先做好一条完整、安全、可重复的 SSH 工作流：找到主机、建立可信连接、稳定操作终端、并行处理多个会话、传输文件，并在需要时通过跳板机或端口转发访问受限网络。
 
-优先覆盖高频 SSH 工作；Telnet、RDP、串口、专有脚本运行时等不属于当前路线。
+优先覆盖高频 SSH 工作；Telnet、Rlogin、Serial 等非 SSH 传输协议不属于当前路线。Windows Remote Desktop 可通过 SSH 本地转发接入，不改变协议范围。
 
 ## 用户工作流与 UI 方向
 
@@ -20,7 +20,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统托盘沿用同一终端标记。
 
-首次 Windows 安装包进入规划阶段，具体技术选型、向导页面、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)。当前建议使用 Inno Setup，签名凭据及首个安装包版本仍待确认；现有 `v0.1.43` 标签不重写。
+首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.45` 继续使用 Inno Setup per-user 安装。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
 
 界面语言支持 English 与简体中文，语言选择随外观设置持久化；主机资料、认证模板和布局反馈也会跟随语言切换，远端终端输出保持原样，避免把命令结果或 TUI 内容误翻译。
 
@@ -48,7 +48,8 @@ Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统�
 | 触发器、关键字高亮 | 有 | 有；受限规则可保存并默认关闭，支持高亮、通知、预设文本及掩码输入后发送响应；预设文本仅保存在内存 | 任意脚本自动化 |
 | 认证配置模板 | 有 | 有；保存方法/身份文件/跳板/keep-alive，不含秘密 | 模板与主机自动绑定 |
 | SFTP / 文件管理 | Xftp 集成 | 内置浏览、递归传输、续传、串行队列、重命名/删除、权限/时间戳编辑、远端容量、资源管理器拖放上传、内置文件编辑器（远端文件读取/编辑/写回，上限 1 MiB）；按主机/端口/用户记住最近本地与远端目录 | 终端/文件面板布局 |
-| 本地/远程/SOCKS 转发 | 有 | 有，规则持久化 | X11、UNIX socket |
+| 本地/远程/SOCKS 转发 | 有 | 有，规则持久化；Windows 可从 Tunnels 启动经 loopback SSH 隧道连接的 RDP 客户端，临时隧道不持久化 | X11、UNIX socket |
+| SSH 隧道远程桌面 | 集成 RDP over SSH | Windows Tunnels 面板支持可配置 SSH 侧可达的 RDP 主机/端口，临时 loopback 转发启动 `mstsc.exe`，SSH 会话关闭时清理 | 隧道重连恢复与 GUI 手工验收 |
 | 日志与回放 | 有 | 时间戳日志 + 时间轴跳转 | 搜索/导出 |
 | 主题与配色 | 有 | 深/浅 UI + 三套终端主题；保存的会话可独立选择配色或跟随全局主题 | 自定义调色板、高亮集 |
 | 密钥管理 | 有 | Ed25519/RSA/ECDSA 生成、已有身份发现与复用、修改口令、导入/导出/删除密钥对 | 硬件密钥、证书文件 |
@@ -244,6 +245,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 39. 托盘面板已交付：`tray-icon` 原生托盘 + muda 菜单（Open/New session/Quit），程序化 RGBA 图标，mpsc 通道桥接平台线程事件到 GPUI 前台轮询任务，`TrayBridge` 全局持窗口句柄。GUI 行为待人工验收。
 
 40. `v0.1.44` 首个 Windows 安装包候选已冻结：Inno Setup 6.7.3 per-user 安装脚本、品牌图标、静默安装/卸载 smoke test 与 SHA-256 清单已生成；单测 256 项、Docker SSH 11/11。安装包未签名，向导 GUI/DPI/IME 手工验收和 Authenticode 签名仍是公开发布前检查项，详见 `docs/INSTALLER_PLAN.md`。
+
+41. `v0.1.45` Bitvise 对标增量：Windows Tunnels 面板支持 Remote Desktop over SSH。用户指定从 SSH 主机可达的 RDP 地址；dshell 只在本机 loopback 临时监听，转发规则标记为临时、不写入主机配置，成功绑定后调用 `mstsc.exe`，会话断开时清理。RDP 证书提示由 Windows mstsc 管理。Docker 集成测试复用随机本地转发端口，将 RDP 目标端口 3389 的回显探针通过真实 SSH channel 往返。
 
 ## SSH 参考资料
 

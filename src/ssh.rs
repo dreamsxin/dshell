@@ -1311,8 +1311,8 @@ async fn run_connection_attempt_with_known_hosts(
                                     });
                                 }
                                 Err(error) => {
-                                    let _ = forward_events.send(ForwardEvent::Error {
-                                        id: Some(id),
+                                    let _ = forward_events.send(ForwardEvent::RuleFailed {
+                                        spec,
                                         error: format!("{error:#}"),
                                     });
                                 }
@@ -1332,8 +1332,8 @@ async fn run_connection_attempt_with_known_hosts(
                                         u16::try_from(port).unwrap_or(0)
                                     };
                                     if bound_port == 0 {
-                                        let _ = forward_events.send(ForwardEvent::Error {
-                                            id: Some(id),
+                                        let _ = forward_events.send(ForwardEvent::RuleFailed {
+                                            spec: spec.clone(),
                                             error: format!(
                                                 "The server did not provide a usable forwarding port (requested {}, returned {port})",
                                                 spec.listen_port
@@ -1365,8 +1365,8 @@ async fn run_connection_attempt_with_known_hosts(
                                     }
                                 }
                                 Err(error) => {
-                                    let _ = forward_events.send(ForwardEvent::Error {
-                                        id: Some(id),
+                                    let _ = forward_events.send(ForwardEvent::RuleFailed {
+                                        spec: spec.clone(),
                                         error: format!(
                                             "Could not request remote forwarding on {}:{}: {error}",
                                             spec.listen_host, spec.listen_port
@@ -6041,6 +6041,40 @@ abc	img	name"
                     assert!(
                         TcpStream::connect(("127.0.0.1", local_port)).await.is_err(),
                         "the local forwarding listener still accepts connections after removal"
+                    );
+
+                    forward_command_tx
+                        .send(ForwardCommand::Add(ForwardRuleSpec {
+                            kind: ForwardKind::Local,
+                            listen_host: "127.0.0.1".to_owned(),
+                            listen_port: 0,
+                            target_host: "127.0.0.1".to_owned(),
+                            target_port: 3389,
+                        }))
+                        .await?;
+                    let (remote_desktop_id, remote_desktop_port) =
+                        next_forward_rule(&mut forward_event_rx, ForwardKind::Local).await?;
+                    let mut remote_desktop_tunnel =
+                        TcpStream::connect(("127.0.0.1", remote_desktop_port)).await?;
+                    let rdp_probe = b"DSHELL_REMOTE_DESKTOP_TUNNEL";
+                    remote_desktop_tunnel.write_all(rdp_probe).await?;
+                    let mut echoed_probe = vec![0u8; rdp_probe.len()];
+                    timeout(
+                        Duration::from_secs(10),
+                        remote_desktop_tunnel.read_exact(&mut echoed_probe),
+                    )
+                    .await
+                    .context("timed out exercising the Remote Desktop tunnel")??;
+                    assert_eq!(echoed_probe, rdp_probe);
+                    forward_command_tx
+                        .send(ForwardCommand::Remove(remote_desktop_id))
+                        .await?;
+                    next_forward_removed(&mut forward_event_rx, remote_desktop_id).await?;
+                    assert!(
+                        TcpStream::connect(("127.0.0.1", remote_desktop_port))
+                            .await
+                            .is_err(),
+                        "the Remote Desktop local listener still accepts connections after removal"
                     );
 
                     forward_command_tx

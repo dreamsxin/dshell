@@ -6,6 +6,38 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.45] - 2026-11-08
+
+Adds Windows Remote Desktop over the active SSH tunnel, following the Bitvise
+SSH Client workflow.
+
+### Added
+
+- Add a Remote Desktop action in the Tunnels panel. Enter an RDP target host
+  and port reachable from the SSH server; the defaults are
+  `127.0.0.1:3389` on that server.
+- Create an ephemeral local forward on a random port bound only to
+  `127.0.0.1`, then start `mstsc.exe` after the forward listener is ready.
+  The temporary forward is not written to the host profile and is removed
+  with the SSH session. Windows Remote Desktop continues to handle RDP
+  certificate warnings.
+
+### Verification
+
+- `cargo fmt --all` and `scripts\\verify-hard-constraints.ps1` passed:
+  257 unit tests passed, 11 Docker-only tests skipped in that run.
+- `scripts\\test-docker-ssh.ps1` passed 11/11, including an echo test to
+  container loopback port 3389 through a dynamically allocated local SSH
+  forward and listener removal.
+- `cargo build --release --locked --bin dshell` and Inno Setup 6.7.3
+  installer compilation passed; silent per-user install/uninstall passed
+  with `scripts\\test-installer.ps1`.
+- Installer `dshell-setup-v0.1.45-x64.exe` SHA-256:
+  `F5865A91EA1DE471FC2D09B8BCA87A716C01327A5B9CB52F1DCCF77FAD5BD1F7`.
+- Installer and executable are unsigned. Remote Desktop GUI behavior,
+  installer visuals, DPI, IME and glyph checks remain manual work for an
+  isolated Windows desktop.
+
 ## [0.1.44] - 2026-11-08
 
 ### Changed
