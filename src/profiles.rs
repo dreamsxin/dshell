@@ -7,14 +7,14 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 
-use crate::forward::ForwardRuleSpec;
+use crate::forward::{ForwardKind, ForwardRuleSpec, validate_socket_path};
 use crate::groups::normalize_group_path;
 use crate::terminal::TerminalTheme;
 
-const DOCUMENT_VERSION: u8 = 10;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, DOCUMENT_VERSION];
-const EXPORT_DOCUMENT_VERSION: u8 = 6;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 6] = [1, 2, 3, 4, 5, EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 11;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DOCUMENT_VERSION];
+const EXPORT_DOCUMENT_VERSION: u8 = 7;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 7] = [1, 2, 3, 4, 5, 6, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 pub const MAX_TAB_LABEL_CHARS: usize = 80;
@@ -593,7 +593,9 @@ fn validate_forward_rules(profile: &HostProfile) -> Result<(), String> {
         ));
     }
     for rule in &profile.forwards {
-        if rule.listen_host.trim().is_empty() {
+        let needs_tcp_listener =
+            rule.kind.uses_local_tcp_listener() || rule.kind == ForwardKind::Remote;
+        if needs_tcp_listener && rule.listen_host.trim().is_empty() {
             return Err(format!(
                 "Host profile {} has a forwarding rule without a listen address.",
                 profile.name
@@ -603,6 +605,22 @@ fn validate_forward_rules(profile: &HostProfile) -> Result<(), String> {
         {
             return Err(format!(
                 "Host profile {} has a forwarding rule without a valid target.",
+                profile.name
+            ));
+        }
+        if matches!(
+            rule.kind,
+            ForwardKind::LocalSocket | ForwardKind::RemoteSocket
+        ) {
+            validate_socket_path(&rule.socket_path).map_err(|error| {
+                format!(
+                    "Host profile {} has an invalid socket path: {error}",
+                    profile.name
+                )
+            })?;
+        } else if !rule.socket_path.is_empty() {
+            return Err(format!(
+                "Host profile {} has a socket path on a TCP forwarding rule.",
                 profile.name
             ));
         }
@@ -783,6 +801,7 @@ mod tests {
                 listen_port: 15432,
                 target_host: "db.internal".to_owned(),
                 target_port: 5432,
+                socket_path: String::new(),
             }],
             keepalive_seconds: 30,
             ..profile("staging")
@@ -836,13 +855,32 @@ mod tests {
             group: "Production".to_owned(),
             favorite: true,
             proxy_jump: "bastion".to_owned(),
-            forwards: vec![ForwardRuleSpec {
-                kind: ForwardKind::Local,
-                listen_host: "127.0.0.1".to_owned(),
-                listen_port: 15432,
-                target_host: "db.internal".to_owned(),
-                target_port: 5432,
-            }],
+            forwards: vec![
+                ForwardRuleSpec {
+                    kind: ForwardKind::Local,
+                    listen_host: "127.0.0.1".to_owned(),
+                    listen_port: 15432,
+                    target_host: "db.internal".to_owned(),
+                    target_port: 5432,
+                    socket_path: String::new(),
+                },
+                ForwardRuleSpec {
+                    kind: ForwardKind::LocalSocket,
+                    listen_host: "127.0.0.1".to_owned(),
+                    listen_port: 8000,
+                    target_host: String::new(),
+                    target_port: 0,
+                    socket_path: "/run/api.sock".to_owned(),
+                },
+                ForwardRuleSpec {
+                    kind: ForwardKind::RemoteSocket,
+                    listen_host: String::new(),
+                    listen_port: 0,
+                    target_host: "127.0.0.1".to_owned(),
+                    target_port: 9090,
+                    socket_path: "/run/remote-api.sock".to_owned(),
+                },
+            ],
             keepalive_seconds: 30,
             login_commands: LoginCommandSettings {
                 enabled: true,
@@ -1281,6 +1319,7 @@ mod tests {
                 listen_port: 0,
                 target_host: "db.internal".to_owned(),
                 target_port: 5432,
+                socket_path: String::new(),
             }],
             ..profile("bad-forward")
         };
@@ -1293,11 +1332,51 @@ mod tests {
                 listen_port: 0,
                 target_host: String::new(),
                 target_port: 0,
+                socket_path: String::new(),
             }],
             keepalive_seconds: 30,
             ..profile("socks")
         };
         assert!(validate_profiles(&[dynamic]).is_ok());
+
+        let local_socket = HostProfile {
+            forwards: vec![ForwardRuleSpec {
+                kind: ForwardKind::LocalSocket,
+                listen_host: "127.0.0.1".to_owned(),
+                listen_port: 0,
+                target_host: String::new(),
+                target_port: 0,
+                socket_path: "/run/service.sock".to_owned(),
+            }],
+            ..profile("local-socket")
+        };
+        assert!(validate_profiles(&[local_socket]).is_ok());
+
+        let remote_socket = HostProfile {
+            forwards: vec![ForwardRuleSpec {
+                kind: ForwardKind::RemoteSocket,
+                listen_host: String::new(),
+                listen_port: 0,
+                target_host: "127.0.0.1".to_owned(),
+                target_port: 5432,
+                socket_path: "/run/service.sock".to_owned(),
+            }],
+            ..profile("remote-socket")
+        };
+        assert!(validate_profiles(&[remote_socket]).is_ok());
+
+        let invalid_socket = HostProfile {
+            forwards: vec![ForwardRuleSpec {
+                kind: ForwardKind::RemoteSocket,
+                listen_host: String::new(),
+                listen_port: 0,
+                target_host: "127.0.0.1".to_owned(),
+                target_port: 5432,
+                socket_path: "/run/service\n.sock".to_owned(),
+            }],
+            ..profile("invalid-socket")
+        };
+        assert!(validate_profiles(&[invalid_socket]).is_err());
     }
 
     #[test]

@@ -27,7 +27,7 @@ use zeroize::Zeroizing;
 
 use crate::forward::{
     self, AcceptedConnection, ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec,
-    RemoteTarget, RemoteTargetMap,
+    RemoteSocketTargetMap, RemoteTarget, RemoteTargetMap,
 };
 use crate::inline_image::InlineImageCollector;
 use crate::log;
@@ -317,6 +317,7 @@ struct KnownHostsHandler {
     port: u16,
     path: PathBuf,
     remote_forwards: RemoteTargetMap,
+    remote_socket_forwards: RemoteSocketTargetMap,
     forward_events: Option<mpsc::UnboundedSender<ForwardEvent>>,
     events: Option<mpsc::Sender<UiEvent>>,
 }
@@ -436,6 +437,64 @@ impl Handler for KnownHostsHandler {
                             id: Some(target.rule_id),
                             error: format!(
                                 "Remote forwarding could not reach {}:{}: {error}",
+                                target.host, target.port
+                            ),
+                        });
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        socket_path: &str,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        let target = {
+            let targets = self
+                .remote_socket_forwards
+                .lock()
+                .map_err(|_| anyhow!("The remote socket forwarding registry is poisoned"))?;
+            targets.get(socket_path).cloned()
+        };
+        let Some(target) = target else {
+            return Ok(());
+        };
+        reply.accept().await;
+        let peer = format!("unix:{socket_path}");
+        let events = self.forward_events.clone();
+        tokio::spawn(async move {
+            let mut remote = channel.into_stream();
+            match tokio::net::TcpStream::connect((target.host.as_str(), target.port)).await {
+                Ok(mut local) => {
+                    let connection_id = forward::next_connection_id();
+                    if let Some(events) = &events {
+                        let _ = events.send(ForwardEvent::ConnectionOpened {
+                            id: target.rule_id,
+                            connection_id,
+                            peer: peer.clone(),
+                            target: format!("{}:{}", target.host, target.port),
+                        });
+                    }
+                    let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+                    if let Some(events) = events {
+                        let _ = events.send(ForwardEvent::ConnectionClosed {
+                            id: target.rule_id,
+                            connection_id,
+                            peer,
+                        });
+                    }
+                }
+                Err(error) => {
+                    if let Some(events) = events {
+                        let _ = events.send(ForwardEvent::Error {
+                            id: Some(target.rule_id),
+                            error: format!(
+                                "Remote socket forwarding could not reach {}:{}: {error}",
                                 target.host, target.port
                             ),
                         });
@@ -881,9 +940,11 @@ async fn run_connection_attempt_with_known_hosts(
         ..
     } = spec;
     let remote_targets: RemoteTargetMap = Arc::new(Mutex::new(HashMap::new()));
+    let remote_socket_targets: RemoteSocketTargetMap = Arc::new(Mutex::new(HashMap::new()));
     let (accepted_tx, mut accepted_connections) = mpsc::unbounded_channel();
     let mut local_forwards: HashMap<u64, LocalForwardRuntime> = HashMap::new();
     let mut remote_forwards: HashMap<u64, RemoteForwardRuntime> = HashMap::new();
+    let mut remote_socket_forwards: HashMap<u64, ForwardRuleSpec> = HashMap::new();
     let mut next_forward_id = 1u64;
     let setup = async {
         let mut config = client::Config::default();
@@ -904,6 +965,7 @@ async fn run_connection_attempt_with_known_hosts(
                     port: hop.port,
                     path: known_hosts_path.clone(),
                     remote_forwards: Arc::new(Mutex::new(HashMap::new())),
+                    remote_socket_forwards: Arc::new(Mutex::new(HashMap::new())),
                     forward_events: None,
                     events: None,
                 };
@@ -942,6 +1004,7 @@ async fn run_connection_attempt_with_known_hosts(
                 port,
                 path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
+                remote_socket_forwards: Arc::clone(&remote_socket_targets),
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
@@ -962,6 +1025,7 @@ async fn run_connection_attempt_with_known_hosts(
                 port,
                 path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
+                remote_socket_forwards: Arc::clone(&remote_socket_targets),
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
@@ -1293,7 +1357,7 @@ async fn run_connection_attempt_with_known_hosts(
                     Some(ForwardCommand::Add(spec)) => {
                         let id = next_forward_id;
                         next_forward_id = next_forward_id.saturating_add(1);
-                        if spec.kind == ForwardKind::Local || spec.kind == ForwardKind::Dynamic {
+                        if spec.kind.uses_local_tcp_listener() {
                             match forward::bind_local_rule(
                                 id,
                                 spec.clone(),
@@ -1317,6 +1381,36 @@ async fn run_connection_attempt_with_known_hosts(
                                     let _ = forward_events.send(ForwardEvent::RuleFailed {
                                         spec,
                                         error: format!("{error:#}"),
+                                    });
+                                }
+                            }
+                        } else if spec.kind == ForwardKind::RemoteSocket {
+                            match session.streamlocal_forward(spec.socket_path.clone()).await {
+                                Ok(()) => {
+                                    if let Ok(mut targets) = remote_socket_targets.lock() {
+                                        targets.insert(
+                                            spec.socket_path.clone(),
+                                            RemoteTarget {
+                                                rule_id: id,
+                                                host: spec.target_host.clone(),
+                                                port: spec.target_port,
+                                            },
+                                        );
+                                    }
+                                    remote_socket_forwards.insert(id, spec.clone());
+                                    let _ = forward_events.send(ForwardEvent::RuleAdded {
+                                        id,
+                                        spec,
+                                        bound_port: 0,
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = forward_events.send(ForwardEvent::RuleFailed {
+                                        spec: spec.clone(),
+                                        error: format!(
+                                            "Could not request remote socket forwarding on {}: {error}",
+                                            spec.socket_path
+                                        ),
                                     });
                                 }
                             }
@@ -1397,6 +1491,14 @@ async fn run_connection_attempt_with_known_hosts(
                                 )
                                 .await;
                             let _ = forward_events.send(ForwardEvent::RuleRemoved { id });
+                        } else if let Some(spec) = remote_socket_forwards.remove(&id) {
+                            if let Ok(mut targets) = remote_socket_targets.lock() {
+                                targets.remove(&spec.socket_path);
+                            }
+                            let _ = session
+                                .cancel_streamlocal_forward(spec.socket_path)
+                                .await;
+                            let _ = forward_events.send(ForwardEvent::RuleRemoved { id });
                         } else {
                             let _ = forward_events.send(ForwardEvent::Error {
                                 id: Some(id),
@@ -1414,18 +1516,23 @@ async fn run_connection_attempt_with_known_hosts(
                     peer,
                     target_host,
                     target_port,
+                    target_socket_path,
                     socks5,
                 }) = accepted
                 {
-                    match session
-                        .channel_open_direct_tcpip(
-                            target_host.clone(),
-                            u32::from(target_port),
-                            peer.ip().to_string(),
-                            u32::from(peer.port()),
-                        )
-                        .await
-                    {
+                    let channel_result = if let Some(socket_path) = &target_socket_path {
+                        session.channel_open_direct_streamlocal(socket_path.clone()).await
+                    } else {
+                        session
+                            .channel_open_direct_tcpip(
+                                target_host.clone(),
+                                u32::from(target_port),
+                                peer.ip().to_string(),
+                                u32::from(peer.port()),
+                            )
+                            .await
+                    };
+                    match channel_result {
                         Ok(channel) => {
                             if socks5 {
                                 let _ = forward::socks5_accept(&mut stream).await;
@@ -1435,7 +1542,10 @@ async fn run_connection_attempt_with_known_hosts(
                                 id: rule_id,
                                 connection_id,
                                 peer: peer.to_string(),
-                                target: format!("{target_host}:{target_port}"),
+                                target: target_socket_path
+                                    .as_ref()
+                                    .map(|path| format!("unix:{path}"))
+                                    .unwrap_or_else(|| format!("{target_host}:{target_port}")),
                             });
                             let mut remote = channel.into_stream();
                             let events = forward_events.clone();
@@ -1457,7 +1567,11 @@ async fn run_connection_attempt_with_known_hosts(
                             let _ = forward_events.send(ForwardEvent::Error {
                                 id: Some(rule_id),
                                 error: format!(
-                                    "Could not open a forwarded connection to {target_host}:{target_port}: {error}"
+                                    "Could not open a forwarded connection to {}: {error}",
+                                    target_socket_path
+                                        .as_ref()
+                                        .map(|path| format!("unix:{path}"))
+                                        .unwrap_or_else(|| format!("{target_host}:{target_port}"))
                                 ),
                             });
                         }
@@ -1711,7 +1825,13 @@ async fn run_connection_attempt_with_known_hosts(
             .cancel_tcpip_forward(runtime.spec.listen_host, u32::from(runtime.bound_port))
             .await;
     }
+    for (_, spec) in remote_socket_forwards.drain() {
+        let _ = session.cancel_streamlocal_forward(spec.socket_path).await;
+    }
     if let Ok(mut targets) = remote_targets.lock() {
+        targets.clear();
+    }
+    if let Ok(mut targets) = remote_socket_targets.lock() {
         targets.clear();
     }
     let _ = session
@@ -6027,6 +6147,7 @@ abc	img	name"
                             listen_port: 0,
                             target_host: "127.0.0.1".to_owned(),
                             target_port: 22,
+                            socket_path: String::new(),
                         }))
                         .await?;
                     let (local_id, local_port) =
@@ -6051,11 +6172,56 @@ abc	img	name"
 
                     forward_command_tx
                         .send(ForwardCommand::Add(ForwardRuleSpec {
+                            kind: ForwardKind::LocalSocket,
+                            listen_host: "127.0.0.1".to_owned(),
+                            listen_port: 0,
+                            target_host: String::new(),
+                            target_port: 0,
+                            socket_path: "/run/dshell-forward.sock".to_owned(),
+                        }))
+                        .await?;
+                    let (local_socket_id, local_socket_port) =
+                        next_forward_rule(&mut forward_event_rx, ForwardKind::LocalSocket).await?;
+                    let mut local_socket_tunnel =
+                        TcpStream::connect(("127.0.0.1", local_socket_port)).await?;
+                    let uds_probe = b"DSHELL_LOCAL_SOCKET_FORWARD";
+                    local_socket_tunnel.write_all(uds_probe).await?;
+                    let mut uds_echo = vec![0u8; uds_probe.len()];
+                    timeout(
+                        Duration::from_secs(10),
+                        local_socket_tunnel.read_exact(&mut uds_echo),
+                    )
+                    .await
+                    .context("timed out exercising local TCP to server Unix socket forwarding")??;
+                    assert_eq!(uds_echo, uds_probe);
+                    local_socket_tunnel.shutdown().await?;
+                    let connection_id =
+                        next_forward_opened(&mut forward_event_rx, local_socket_id).await?;
+                    next_forward_closed(
+                        &mut forward_event_rx,
+                        local_socket_id,
+                        connection_id,
+                    )
+                    .await?;
+                    forward_command_tx
+                        .send(ForwardCommand::Remove(local_socket_id))
+                        .await?;
+                    next_forward_removed(&mut forward_event_rx, local_socket_id).await?;
+                    assert!(
+                        TcpStream::connect(("127.0.0.1", local_socket_port))
+                            .await
+                            .is_err(),
+                        "the local Unix socket forwarding listener remained active after removal"
+                    );
+
+                    forward_command_tx
+                        .send(ForwardCommand::Add(ForwardRuleSpec {
                             kind: ForwardKind::Local,
                             listen_host: "127.0.0.1".to_owned(),
                             listen_port: 0,
                             target_host: "127.0.0.1".to_owned(),
                             target_port: 3389,
+                            socket_path: String::new(),
                         }))
                         .await?;
                     let (remote_desktop_id, remote_desktop_port) =
@@ -6099,6 +6265,7 @@ abc	img	name"
                             listen_port: 0,
                             target_host: String::new(),
                             target_port: 0,
+                            socket_path: String::new(),
                         }))
                         .await?;
                     let (_, socks_port) =
@@ -6141,6 +6308,7 @@ abc	img	name"
                             listen_port: 0,
                             target_host: "127.0.0.1".to_owned(),
                             target_port: local_target_port,
+                            socket_path: String::new(),
                         }))
                         .await?;
                     let (remote_id, remote_port) =
@@ -6163,6 +6331,60 @@ abc	img	name"
                         .send(ForwardCommand::Remove(remote_id))
                         .await?;
                     next_forward_removed(&mut forward_event_rx, remote_id).await?;
+
+                    let remote_socket_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+                    let remote_socket_target_port = remote_socket_listener.local_addr()?.port();
+                    let (remote_socket_payload_tx, remote_socket_payload_rx) =
+                        tokio::sync::oneshot::channel();
+                    tokio::spawn(async move {
+                        if let Ok((mut stream, _)) = remote_socket_listener.accept().await {
+                            let mut buffer = [0u8; 64];
+                            let read = stream.read(&mut buffer).await.unwrap_or(0);
+                            let _ = remote_socket_payload_tx.send(
+                                String::from_utf8_lossy(&buffer[..read]).into_owned(),
+                            );
+                            let _ = stream.write_all(b"DSHELL_REMOTE_SOCKET_REPLY").await;
+                        }
+                    });
+                    let remote_socket_path = format!(
+                        "/tmp/dshell-remote-{}.sock",
+                        std::process::id()
+                    );
+                    forward_command_tx
+                        .send(ForwardCommand::Add(ForwardRuleSpec {
+                            kind: ForwardKind::RemoteSocket,
+                            listen_host: String::new(),
+                            listen_port: 0,
+                            target_host: "127.0.0.1".to_owned(),
+                            target_port: remote_socket_target_port,
+                            socket_path: remote_socket_path.clone(),
+                        }))
+                        .await?;
+                    let (remote_socket_id, _) =
+                        next_forward_rule(&mut forward_event_rx, ForwardKind::RemoteSocket)
+                            .await?;
+                    command_tx
+                        .send(TerminalRequest::Paste(format!(
+                            "reply=$(printf 'DSHELL_REMOTE_UDS' | socat - UNIX-CONNECT:{remote_socket_path}); test \"$reply\" = DSHELL_REMOTE_SOCKET_REPLY && echo DSHELL_REMOTE_UDS_OK"
+                        )))
+                        .await?;
+                    command_tx.send(TerminalRequest::Key(enter_key())).await?;
+                    let remote_socket_payload = timeout(
+                        Duration::from_secs(20),
+                        remote_socket_payload_rx,
+                    )
+                    .await
+                    .context("timed out waiting for the remote Unix socket forwarding payload")?
+                    .context("the remote Unix socket target closed")?;
+                    assert_eq!(remote_socket_payload, "DSHELL_REMOTE_UDS");
+                    next_screen(&mut event_rx, |frame| {
+                        frame_text(frame).contains("DSHELL_REMOTE_UDS_OK")
+                    })
+                    .await?;
+                    forward_command_tx
+                        .send(ForwardCommand::Remove(remote_socket_id))
+                        .await?;
+                    next_forward_removed(&mut forward_event_rx, remote_socket_id).await?;
 
                     cancel_tx.send_replace(true);
                     loop {

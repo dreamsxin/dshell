@@ -2385,6 +2385,7 @@ fn remote_desktop_forward_spec(
         listen_port: 0,
         target_host: target_host.to_owned(),
         target_port,
+        socket_path: String::new(),
     })
 }
 
@@ -2974,6 +2975,7 @@ mod session_tests {
                 listen_port: 15432,
                 target_host: "db.internal".to_owned(),
                 target_port: 5432,
+                socket_path: String::new(),
             }],
             login_commands: LoginCommandSettings {
                 enabled: true,
@@ -3716,6 +3718,7 @@ echo"
             listen_port: 15432,
             target_host: "db.internal".to_owned(),
             target_port: 5432,
+            socket_path: String::new(),
         };
         session.pending_forwards = vec![rule.clone()];
         let mut sessions = vec![session];
@@ -3853,6 +3856,7 @@ echo"
             listen_port: 0,
             target_host: "db.internal".to_owned(),
             target_port: 5432,
+            socket_path: String::new(),
         };
         let mut state = ForwardViewState::default();
         remember_stopped_forward(&mut state, spec.clone());
@@ -4578,6 +4582,7 @@ struct AppView {
     forward_listen_port: Entity<InputState>,
     forward_target_host: Entity<InputState>,
     forward_target_port: Entity<InputState>,
+    forward_socket_path: Entity<InputState>,
     remote_desktop_target_host: Entity<InputState>,
     remote_desktop_target_port: Entity<InputState>,
     pending_remote_desktop: HashMap<u64, ForwardRuleSpec>,
@@ -4789,6 +4794,8 @@ impl AppView {
         let forward_target_host =
             cx.new(|cx| InputState::new(window, cx).placeholder("target.internal"));
         let forward_target_port = cx.new(|cx| InputState::new(window, cx).default_value("22"));
+        let forward_socket_path =
+            cx.new(|cx| InputState::new(window, cx).placeholder("/run/service.sock"));
         let remote_desktop_target_host = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value("127.0.0.1")
@@ -5002,6 +5009,7 @@ impl AppView {
             forward_listen_port,
             forward_target_host,
             forward_target_port,
+            forward_socket_path,
             remote_desktop_target_host,
             remote_desktop_target_port,
             pending_remote_desktop: HashMap::new(),
@@ -14359,21 +14367,8 @@ impl AppView {
                         active_connections: Vec::new(),
                     },
                 ));
-                session.forwards.message = if spec.kind == ForwardKind::Dynamic {
-                    format!(
-                        "Dynamic SOCKS5 proxy listening on {}:{}",
-                        spec.listen_host, bound_port
-                    )
-                } else {
-                    format!(
-                        "{} forward {}:{} -> {}:{}",
-                        spec.kind.label(),
-                        spec.listen_host,
-                        bound_port,
-                        spec.target_host,
-                        spec.target_port
-                    )
-                };
+                session.forwards.message =
+                    format!("{} forwarding rule started.", spec.kind.label());
                 session.forwards.visible = true;
                 if launch_remote_desktop {
                     remote_desktop_port = Some(bound_port);
@@ -14408,11 +14403,17 @@ impl AppView {
                 };
             }
             ForwardEvent::RuleFailed { spec, error } => {
+                let endpoint = if matches!(
+                    spec.kind,
+                    ForwardKind::LocalSocket | ForwardKind::RemoteSocket
+                ) {
+                    format!("unix:{}", spec.socket_path)
+                } else {
+                    format!("{}:{}", spec.target_host, spec.target_port)
+                };
                 session.forwards.message = format!(
-                    "{} forward to {}:{} failed: {error}",
+                    "{} forward to {endpoint} failed: {error}",
                     spec.kind.label(),
-                    spec.target_host,
-                    spec.target_port
                 );
             }
             ForwardEvent::ConnectionOpened {
@@ -14575,18 +14576,29 @@ impl AppView {
     }
 
     fn add_forward_rule(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let kind = self.forward_kind;
         let listen_host = self.forward_listen_host.read(cx).value().trim().to_owned();
         let listen_port = self.forward_listen_port.read(cx).value().parse::<u16>();
         let target_host = self.forward_target_host.read(cx).value().trim().to_owned();
         let target_port = self.forward_target_port.read(cx).value().parse::<u16>();
-        let Ok(listen_port) = listen_port else {
-            self.set_forward_message(session_id, "Listen port must be between 0 and 65535.", cx);
-            return;
-        };
-        if listen_host.is_empty() {
-            self.set_forward_message(session_id, "A listen address is required.", cx);
-            return;
-        }
+        let (listen_host, listen_port) =
+            if kind.uses_local_tcp_listener() || kind == ForwardKind::Remote {
+                let Ok(listen_port) = listen_port else {
+                    self.set_forward_message(
+                        session_id,
+                        "Listen port must be between 0 and 65535.",
+                        cx,
+                    );
+                    return;
+                };
+                if listen_host.is_empty() {
+                    self.set_forward_message(session_id, "A listen address is required.", cx);
+                    return;
+                }
+                (listen_host, listen_port)
+            } else {
+                (String::new(), 0)
+            };
         let (target_host, target_port) = if self.forward_kind.needs_target() {
             let Ok(target_port) = target_port else {
                 self.set_forward_message(
@@ -14608,7 +14620,16 @@ impl AppView {
         } else {
             (String::new(), 0)
         };
-        let kind = self.forward_kind;
+        let socket_path = if matches!(kind, ForwardKind::LocalSocket | ForwardKind::RemoteSocket) {
+            let path = self.forward_socket_path.read(cx).value().trim().to_owned();
+            if let Err(error) = forward::validate_socket_path(&path) {
+                self.set_forward_message(session_id, error, cx);
+                return;
+            }
+            path
+        } else {
+            String::new()
+        };
         self.send_forward_command(
             session_id,
             ForwardCommand::Add(ForwardRuleSpec {
@@ -14617,6 +14638,7 @@ impl AppView {
                 listen_port,
                 target_host,
                 target_port,
+                socket_path,
             }),
             cx,
         );
@@ -14678,19 +14700,34 @@ impl AppView {
             .flex_col()
             .gap(px(6.))
             .p(px(8.))
-            .child(kind_buttons)
-            .child(components::field(
+            .child(kind_buttons);
+        if kind.uses_local_tcp_listener() || kind == ForwardKind::Remote {
+            form = form
+                .child(components::field(
+                    &tokens,
+                    self.tr("Listen host"),
+                    &self.forward_listen_host,
+                    false,
+                ))
+                .child(components::field(
+                    &tokens,
+                    self.tr("Listen port (0 = auto)"),
+                    &self.forward_listen_port,
+                    false,
+                ));
+        }
+        if matches!(kind, ForwardKind::LocalSocket | ForwardKind::RemoteSocket) {
+            form = form.child(components::field(
                 &tokens,
-                self.tr("Listen host"),
-                &self.forward_listen_host,
-                false,
-            ))
-            .child(components::field(
-                &tokens,
-                self.tr("Listen port (0 = auto)"),
-                &self.forward_listen_port,
+                self.tr(if kind == ForwardKind::LocalSocket {
+                    "Server socket path"
+                } else {
+                    "Server listen socket path"
+                }),
+                &self.forward_socket_path,
                 false,
             ));
+        }
         if kind.needs_target() {
             form = form
                 .child(components::field(
@@ -14710,8 +14747,18 @@ impl AppView {
                 div()
                     .text_size(px(10.))
                     .text_color(tokens.text_secondary)
-                    .child(self.tr("SOCKS5 clients choose the target host and port.")),
+                    .child(self.tr(if kind == ForwardKind::LocalSocket {
+                        "Local TCP clients are forwarded to the server-side Unix socket."
+                    } else {
+                        "SOCKS5 clients choose the target host and port."
+                    })),
             );
+        }
+        if kind == ForwardKind::RemoteSocket {
+            form = form.child(components::help_text(
+                &tokens,
+                self.tr("Server Unix socket clients connect to this machine's TCP target."),
+            ));
         }
         form = form.child(
             Button::new("forward-add")
@@ -14777,27 +14824,22 @@ impl AppView {
             } else {
                 self.tr("connections")
             };
-            let summary = if spec.kind == ForwardKind::Dynamic {
-                format!(
-                    "{} {}:{} · {} {}",
-                    self.tr(spec.kind.label()),
-                    spec.listen_host,
-                    rule.bound_port,
-                    rule.connections,
-                    connection_word,
-                )
+            let listen = if spec.kind == ForwardKind::RemoteSocket {
+                format!("unix:{}", spec.socket_path)
             } else {
-                format!(
-                    "{} {}:{} -> {}:{} · {} {}",
-                    self.tr(spec.kind.label()),
-                    spec.listen_host,
-                    rule.bound_port,
-                    spec.target_host,
-                    spec.target_port,
-                    rule.connections,
-                    connection_word,
-                )
+                format!("{}:{}", spec.listen_host, rule.bound_port)
             };
+            let target = match spec.kind {
+                ForwardKind::Dynamic => "SOCKS5".to_owned(),
+                ForwardKind::LocalSocket => format!("unix:{}", spec.socket_path),
+                _ => format!("{}:{}", spec.target_host, spec.target_port),
+            };
+            let summary = format!(
+                "{} {listen} -> {target} · {} {}",
+                self.tr(spec.kind.label()),
+                rule.connections,
+                connection_word,
+            );
             let mut rule_item = div().flex().flex_col().gap(px(ui_tokens::SPACE_1)).child(
                 div()
                     .flex()
@@ -23610,10 +23652,17 @@ impl AppView {
                 ));
             } else {
                 for (rule_id, rule) in rules {
-                    let target = if rule.spec.kind.needs_target() {
-                        format!("{}:{}", rule.spec.target_host, rule.spec.target_port)
+                    let listen = if rule.spec.kind == ForwardKind::RemoteSocket {
+                        format!("unix:{}", rule.spec.socket_path)
                     } else {
-                        "SOCKS5".to_owned()
+                        format!("{}:{}", rule.spec.listen_host, rule.bound_port)
+                    };
+                    let target = match rule.spec.kind {
+                        ForwardKind::Dynamic => "SOCKS5".to_owned(),
+                        ForwardKind::LocalSocket => {
+                            format!("unix:{}", rule.spec.socket_path)
+                        }
+                        _ => format!("{}:{}", rule.spec.target_host, rule.spec.target_port),
                     };
                     let mut rule_card = div()
                         .flex()
@@ -23635,10 +23684,8 @@ impl AppView {
                                         .text_size(px(ui_tokens::FONT_CAPTION))
                                         .text_color(tokens.text_primary)
                                         .child(format!(
-                                            "{} {}:{}",
+                                            "{} {listen}",
                                             self.tr(rule.spec.kind.label()),
-                                            rule.spec.listen_host,
-                                            rule.bound_port
                                         )),
                                 )
                                 .child(
@@ -23681,15 +23728,22 @@ impl AppView {
                     group = group.child(rule_card);
                 }
                 for (index, spec) in stopped_rules.iter().enumerate() {
-                    let target = if spec.kind.needs_target() {
-                        format!("{}:{}", spec.target_host, spec.target_port)
+                    let listen = if spec.kind == ForwardKind::RemoteSocket {
+                        format!("unix:{}", spec.socket_path)
                     } else {
-                        "SOCKS5".to_owned()
+                        let listen_port = if spec.listen_port == 0 {
+                            "auto".to_owned()
+                        } else {
+                            spec.listen_port.to_string()
+                        };
+                        format!("{}:{}", spec.listen_host, listen_port)
                     };
-                    let listen_port = if spec.listen_port == 0 {
-                        "auto".to_owned()
-                    } else {
-                        spec.listen_port.to_string()
+                    let target = match spec.kind {
+                        ForwardKind::Dynamic => "SOCKS5".to_owned(),
+                        ForwardKind::LocalSocket => {
+                            format!("unix:{}", spec.socket_path)
+                        }
+                        _ => format!("{}:{}", spec.target_host, spec.target_port),
                     };
                     group = group.child(
                         div()
@@ -23712,10 +23766,8 @@ impl AppView {
                                             .text_size(px(ui_tokens::FONT_CAPTION))
                                             .text_color(tokens.text_disabled)
                                             .child(format!(
-                                                "{} {}:{}",
+                                                "{} {listen}",
                                                 self.tr(spec.kind.label()),
-                                                spec.listen_host,
-                                                listen_port
                                             )),
                                     )
                                     .child(

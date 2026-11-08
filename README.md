@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.46`.
+`v0.1.47`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -250,6 +250,14 @@ only to `127.0.0.1`, then starts Windows Remote Desktop (`mstsc.exe`) after the
 listener is ready. This temporary tunnel is not saved to the host profile and
 ends with the SSH session. Remote Desktop certificate prompts remain managed
 by Windows.
+
+The Tunnels panel also supports server-side Unix socket forwarding. `Local Unix
+Socket` listens on a local TCP address and forwards connections through SSH to
+a socket path on the server. `Remote Unix Socket` asks the SSH server to listen
+at a socket path and forwards incoming connections to a TCP target on this
+machine. Socket paths are on the SSH server; the login account must be allowed
+to access the target socket or create the remote listener. Rules can be saved
+in a host profile and start with that SSH session.
 
 The session properties also accept a keep-alive interval in seconds (`0`
 disables it). A positive value makes the client send keepalive messages when

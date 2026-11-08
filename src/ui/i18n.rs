@@ -1010,12 +1010,22 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Local" => "本地",
         "Remote" => "远程",
         "Dynamic" => "动态",
+        "Local Unix Socket" => "本地 Unix 套接字",
+        "Remote Unix Socket" => "远程 Unix 套接字",
         "Listen host" => "监听主机",
         "Listen port (0 = auto)" => "监听端口（0 = 自动）",
         "Target host" => "目标主机",
         "Target port" => "目标端口",
+        "Server socket path" => "服务器套接字路径",
+        "Server listen socket path" => "服务器监听套接字路径",
         "SOCKS5 clients choose the target host and port." => {
             "SOCKS5 客户端自行选择目标主机和端口。"
+        }
+        "Local TCP clients are forwarded to the server-side Unix socket." => {
+            "本机 TCP 客户端将通过 SSH 转发到服务器端 Unix 套接字。"
+        }
+        "Server Unix socket clients connect to this machine's TCP target." => {
+            "连接服务器端 Unix 套接字的客户端将转发到本机 TCP 目标。"
         }
         "connection" => "个连接",
         "connections" => "个连接",

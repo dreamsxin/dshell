@@ -30,21 +30,39 @@ pub enum ForwardKind {
     Local,
     Remote,
     Dynamic,
+    LocalSocket,
+    RemoteSocket,
 }
 
 impl ForwardKind {
-    pub const ALL: [Self; 3] = [Self::Local, Self::Remote, Self::Dynamic];
+    pub const ALL: [Self; 5] = [
+        Self::Local,
+        Self::Remote,
+        Self::Dynamic,
+        Self::LocalSocket,
+        Self::RemoteSocket,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Local => "Local",
             Self::Remote => "Remote",
             Self::Dynamic => "Dynamic",
+            Self::LocalSocket => "Local Unix Socket",
+            Self::RemoteSocket => "Remote Unix Socket",
         }
     }
 
     pub const fn needs_target(self) -> bool {
-        !matches!(self, Self::Dynamic)
+        matches!(self, Self::Local | Self::Remote | Self::RemoteSocket)
+    }
+
+    pub const fn uses_local_tcp_listener(self) -> bool {
+        matches!(self, Self::Local | Self::Dynamic | Self::LocalSocket)
+    }
+
+    pub const fn uses_remote_tcp_listener(self) -> bool {
+        matches!(self, Self::Remote | Self::RemoteSocket)
     }
 }
 
@@ -56,6 +74,8 @@ pub struct ForwardRuleSpec {
     pub listen_port: u16,
     pub target_host: String,
     pub target_port: u16,
+    #[serde(default)]
+    pub socket_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +159,20 @@ pub struct RemoteTarget {
 }
 
 pub type RemoteTargetMap = Arc<Mutex<HashMap<u32, RemoteTarget>>>;
+pub type RemoteSocketTargetMap = Arc<Mutex<HashMap<String, RemoteTarget>>>;
+
+pub fn validate_socket_path(path: &str) -> Result<(), &'static str> {
+    if path.is_empty() {
+        return Err("A server-side Unix socket path is required.");
+    }
+    if path.len() > 100 {
+        return Err("The Unix socket path is too long (maximum 100 bytes).");
+    }
+    if path.chars().any(char::is_control) {
+        return Err("The Unix socket path cannot contain control characters.");
+    }
+    Ok(())
+}
 
 pub struct AcceptedConnection {
     pub rule_id: u64,
@@ -146,6 +180,7 @@ pub struct AcceptedConnection {
     pub peer: SocketAddr,
     pub target_host: String,
     pub target_port: u16,
+    pub target_socket_path: Option<String>,
     pub socks5: bool,
 }
 
@@ -184,11 +219,13 @@ pub async fn bind_local_rule(
                     break;
                 }
             };
-            let (target_host, target_port, socks5) = if spec.kind == ForwardKind::Dynamic {
+            let (target_host, target_port, target_socket_path, socks5) = if spec.kind
+                == ForwardKind::Dynamic
+            {
                 match tokio::time::timeout(Duration::from_secs(10), socks5_handshake(&mut stream))
                     .await
                 {
-                    Ok(Ok(target)) => (target.0, target.1, true),
+                    Ok(Ok(target)) => (target.0, target.1, None, true),
                     Ok(Err(error)) => {
                         let _ = socks5_reject(&mut stream, 1).await;
                         let _ = events.send(ForwardEvent::Error {
@@ -208,8 +245,10 @@ pub async fn bind_local_rule(
                         continue;
                     }
                 }
+            } else if spec.kind == ForwardKind::LocalSocket {
+                (String::new(), 0, Some(spec.socket_path.clone()), false)
             } else {
-                (spec.target_host.clone(), spec.target_port, false)
+                (spec.target_host.clone(), spec.target_port, None, false)
             };
             if accepted
                 .send(AcceptedConnection {
@@ -218,6 +257,7 @@ pub async fn bind_local_rule(
                     peer,
                     target_host,
                     target_port,
+                    target_socket_path,
                     socks5,
                 })
                 .is_err()
@@ -326,7 +366,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ForwardKind, ForwardRuleSpec, ForwardRuleUiState, socks5_handshake};
+    use super::{
+        ForwardKind, ForwardRuleSpec, ForwardRuleUiState, socks5_handshake, validate_socket_path,
+    };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[tokio::test]
@@ -368,7 +410,28 @@ mod tests {
         assert!(ForwardKind::Local.needs_target());
         assert!(ForwardKind::Remote.needs_target());
         assert!(!ForwardKind::Dynamic.needs_target());
+        assert!(!ForwardKind::LocalSocket.needs_target());
+        assert!(ForwardKind::RemoteSocket.needs_target());
+        assert!(ForwardKind::LocalSocket.uses_local_tcp_listener());
+        assert!(ForwardKind::RemoteSocket.uses_remote_tcp_listener());
         assert_eq!(ForwardKind::default(), ForwardKind::Local);
+    }
+
+    #[test]
+    fn server_socket_paths_are_bounded_and_reject_controls() {
+        assert!(validate_socket_path("/run/service.sock").is_ok());
+        assert!(validate_socket_path("").is_err());
+        assert!(validate_socket_path("/run/service\n.sock").is_err());
+        assert!(validate_socket_path(&"x".repeat(101)).is_err());
+    }
+
+    #[test]
+    fn older_forward_rules_default_to_no_socket_path() {
+        let rule: ForwardRuleSpec = serde_json::from_str(
+            r#"{"kind":"local","listen_host":"127.0.0.1","listen_port":8000,"target_host":"localhost","target_port":80}"#,
+        )
+        .unwrap();
+        assert!(rule.socket_path.is_empty());
     }
 
     #[test]
@@ -380,6 +443,7 @@ mod tests {
                 listen_port: 0,
                 target_host: "db.internal".to_owned(),
                 target_port: 5432,
+                socket_path: String::new(),
             },
             bound_port: 5432,
             connections: 0,

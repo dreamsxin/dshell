@@ -8,6 +8,8 @@ Bitvise 官方产品介绍将 Remote Desktop over SSH 列为集成能力。dshel
 
 `v0.1.46` 补充活动转发连接详情：Tunnels 面板与会话检查器逐连接展示 peer 和目标地址，通道关闭时按唯一连接 ID 移除对应项目。该可观测性适用于本地、远程和 SOCKS5 转发，不持久化客户端地址或连接历史。
 
+Bitvise 9.66 的官方版本记录增加了服务端 Unix socket 转发。`v0.1.47` 对齐该工作流：Local Unix Socket 将本机 TCP 转发到 SSH 服务端的 Unix socket；Remote Unix Socket 将服务端 socket listener 转发到本机 TCP 目标。规则与主机资料一起保存，socket 路径按非空、无控制字符且最多 100 字节校验；旧 JSON 缺少新字段时默认为空。参考：[Bitvise version history](https://bitvise.com/ssh-client-version-history)。
+
 后续 Bitvise 对标继续分批评估 SFTP Drive 映射、CLI 工具和配置兼容性；每项先核对本地原生实现和凭据安全边界，再选可闭环功能，不把产品菜单清单直接复制为承诺。
 
 ## 零、实施状态审计（2026-11-06）

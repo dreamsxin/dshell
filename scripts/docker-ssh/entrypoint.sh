@@ -19,4 +19,5 @@ PermitRootLogin no
 EOF
 sshd -t
 nohup socat TCP-LISTEN:3389,bind=127.0.0.1,reuseaddr,fork EXEC:/bin/cat >/dev/null 2>&1 &
+nohup socat UNIX-LISTEN:/run/dshell-forward.sock,fork,unlink-early,mode=777 EXEC:/bin/cat >/dev/null 2>&1 &
 exec /usr/sbin/sshd -D -e

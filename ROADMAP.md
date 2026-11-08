@@ -20,7 +20,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统托盘沿用同一终端标记。
 
-首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.46` 继续使用 Inno Setup per-user 安装。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
+首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.47` 继续使用 Inno Setup per-user 安装。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
 
 界面语言支持 English 与简体中文，语言选择随外观设置持久化；主机资料、认证模板和布局反馈也会跟随语言切换，远端终端输出保持原样，避免把命令结果或 TUI 内容误翻译。
 
@@ -48,7 +48,7 @@ Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统�
 | 触发器、关键字高亮 | 有 | 有；受限规则可保存并默认关闭，支持高亮、通知、预设文本及掩码输入后发送响应；预设文本仅保存在内存 | 任意脚本自动化 |
 | 认证配置模板 | 有 | 有；保存方法/身份文件/跳板/keep-alive，不含秘密 | 模板与主机自动绑定 |
 | SFTP / 文件管理 | Xftp 集成 | 内置浏览、递归传输、续传、串行队列、重命名/删除、权限/时间戳编辑、远端容量、资源管理器拖放上传、内置文件编辑器（远端文件读取/编辑/写回，上限 1 MiB）；按主机/端口/用户记住最近本地与远端目录 | 终端/文件面板布局 |
-| 本地/远程/SOCKS 转发 | 有 | 有，规则持久化；Windows 可从 Tunnels 启动经 loopback SSH 隧道连接的 RDP 客户端，临时隧道不持久化 | X11、UNIX socket |
+| 本地/远程/SOCKS/Unix socket 转发 | 有 | 有，规则持久化；Windows 可从 Tunnels 启动经 loopback SSH 隧道连接的 RDP 客户端，临时隧道不持久化 | X11 |
 | SSH 隧道远程桌面 | 集成 RDP over SSH | Windows Tunnels 面板支持可配置 SSH 侧可达的 RDP 主机/端口，临时 loopback 转发启动 `mstsc.exe`，SSH 会话关闭时清理 | 隧道重连恢复与 GUI 手工验收 |
 | 日志与回放 | 有 | 时间戳日志 + 时间轴跳转 | 搜索/导出 |
 | 主题与配色 | 有 | 深/浅 UI + 三套终端主题；保存的会话可独立选择配色或跟随全局主题 | 自定义调色板、高亮集 |
@@ -128,7 +128,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 **目标**：满足通过堡垒机访问目标主机，以及访问远端开发/管理服务的需求。
 
-**实施进度**：单层跳板机和本地/远程/动态 SOCKS5 端口转发已交付。目标 SSH 握手通过跳板会话的 `direct-tcpip` channel 建立，跳板和目标分别执行 known_hosts 校验与认证；跳板凭据只在当前运行的 Zeroizing 缓存中复用。Tunnels 面板支持自动分配端口、活动连接计数、逐连接 peer/目标详情和停止规则，规则写入主机资料并在连接后自动启动；主机资料还支持 keep-alive 间隔。尚未实现 UNIX socket 转发和离线规则编辑。
+**实施进度**：单层跳板机和本地/远程/动态 SOCKS5 端口转发已交付。目标 SSH 握手通过跳板会话的 `direct-tcpip` channel 建立，跳板和目标分别执行 known_hosts 校验与认证；跳板凭据只在当前运行的 Zeroizing 缓存中复用。Tunnels 面板支持自动分配端口、活动连接计数、逐连接 peer/目标详情、本地 TCP 到服务端 Unix socket、服务端 Unix socket 到本机 TCP，以及停止规则；规则写入主机资料并在连接后自动启动，主机资料还支持 keep-alive 间隔。尚未实现离线规则编辑。
 
 **验收条件**：跳板和目标主机分别验证主机密钥，不因代理路径绕过检查；监听端口冲突和远端拒绝有明确错误；停止会话或转发会清理监听器与转发通道；集成测试覆盖正常转发及失败清理。
 
@@ -248,6 +248,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 41. `v0.1.45` Bitvise 对标增量：Windows Tunnels 面板支持 Remote Desktop over SSH。用户指定从 SSH 主机可达的 RDP 地址；dshell 只在本机 loopback 临时监听，转发规则标记为临时、不写入主机配置，成功绑定后调用 `mstsc.exe`，会话断开时清理。RDP 证书提示由 Windows mstsc 管理。Docker 集成测试复用随机本地转发端口，将 RDP 目标端口 3389 的回显探针通过真实 SSH channel 往返。
 42. `v0.1.46` 增加活动转发连接可观测性：Tunnels 与会话检查器列出当前 peer 和目标地址；每条转发通道使用唯一连接 ID，关闭事件精确移除条目并同步活动数量。本机客户端连接信息仅驻留当前会话内存。
+43. `v0.1.47` 对标 Bitvise 9.66 服务端 Unix socket forwarding：本机 TCP listener 可通过 `direct-streamlocal@openssh.com` 到达 SSH 服务端 socket；服务端 `streamlocal-forward@openssh.com` listener 可通过 `forwarded-streamlocal@openssh.com` 回连本机 TCP target。两种规则均复用转发状态、连接详情和主机资料生命周期。
 
 ## SSH 参考资料
 

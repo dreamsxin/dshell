@@ -392,6 +392,7 @@ fn parse_forward_rule(kind: ForwardKind, value: &str) -> Result<ForwardRuleSpec,
             listen_port,
             target_host: String::new(),
             target_port: 0,
+            socket_path: String::new(),
         });
     }
     let target = tokens
@@ -404,6 +405,7 @@ fn parse_forward_rule(kind: ForwardKind, value: &str) -> Result<ForwardRuleSpec,
         listen_port,
         target_host,
         target_port,
+        socket_path: String::new(),
     })
 }
 
@@ -602,6 +604,7 @@ Host staging staging-alt
                     listen_port: 15432,
                     target_host: "db.internal".to_owned(),
                     target_port: 5432,
+                    socket_path: String::new(),
                 },
                 ForwardRuleSpec {
                     kind: ForwardKind::Dynamic,
@@ -609,6 +612,7 @@ Host staging staging-alt
                     listen_port: 1080,
                     target_host: String::new(),
                     target_port: 0,
+                    socket_path: String::new(),
                 },
             ]
         );

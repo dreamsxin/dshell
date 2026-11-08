@@ -6,6 +6,36 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.47] - 2026-11-08
+
+Adds server-side Unix domain socket forwarding over SSH.
+
+### Added
+
+- Add `Local Unix Socket`: accept a local TCP connection and open an SSH
+  `direct-streamlocal` channel to a Unix socket on the SSH server.
+- Add `Remote Unix Socket`: request a server-side socket listener and forward
+  accepted `forwarded-streamlocal` channels to a TCP target on this machine.
+- Save both rule types with host profiles. Older profile/export documents
+  default the new socket path field to empty and continue to load.
+
+### Verification
+
+- Verified on 2026-11-08 with `cargo fmt --all` and
+  `scripts\\verify-hard-constraints.ps1`: 260 unit tests passed and 11
+  Docker-only tests were skipped by that script.
+- `scripts\\test-docker-ssh.ps1` passed 11/11, including local TCP to server
+  Unix socket echo, server Unix socket to local TCP request/reply, and rule
+  removal.
+- `cargo build --release --locked --bin dshell` and Inno Setup 6.7.3
+  compilation passed; `scripts\\test-installer.ps1` passed silent per-user
+  installation and uninstall.
+- Installer `dshell-setup-v0.1.47-x64.exe` is 9,137,289 bytes. SHA-256:
+  `09B16BCE02E34D1DD7EE6397AB33A081E4CAADEACC36BE529DE86874D56A2DC7`.
+- Installer and executable are unsigned. Tunnel form and rule detail layout,
+  installer visuals, DPI, IME and glyph checks remain manual work for an
+  isolated Windows desktop.
+
 ## [0.1.46] - 2026-11-08
 
 Adds per-connection visibility to active SSH forwarding rules.
