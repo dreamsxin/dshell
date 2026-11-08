@@ -12167,36 +12167,46 @@ impl AppView {
         profile: &HostProfile,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let live_session = self.session_for_target(&profile.host, profile.port, &profile.username);
         let is_selected = self.selected_profile.as_deref() == Some(&profile.name)
-            || self
-                .session_for_target(&profile.host, profile.port, &profile.username)
-                .is_some_and(|id| self.active_session_id == Some(id));
+            || live_session.is_some_and(|id| self.active_session_id == Some(id));
         let favorite = profile.favorite;
         let preview_tokens = *tokens;
         let drag_name = profile.name.clone();
         let drag_title: SharedString = profile.name.clone().into();
         let favorite_name = profile.name.clone();
         let connect_profile = profile.clone();
-        let row_connect_profile = connect_profile.clone();
+        let row_profile = profile.clone();
         let edit_profile = profile.clone();
+        let disconnect_session = live_session;
+        // Primary hover action: connect, or disconnect when a session for
+        // this host is already live.
+        let (primary_icon, primary_label) = if disconnect_session.is_some() {
+            (IconName::CircleX, self.tr("Disconnect session"))
+        } else {
+            (IconName::ArrowRight, self.tr("Connect to host"))
+        };
+        let primary = components::icon_button(
+            tokens,
+            (ElementId::from((prefix, index)), "primary"),
+            primary_icon,
+            ButtonKind::Ghost,
+            ButtonSize::Small,
+            primary_label,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            if let Some(id) = disconnect_session {
+                this.close_session(id, window, cx);
+            } else {
+                this.connect_saved_profile(&connect_profile, window, cx);
+            }
+        }));
         let actions = div()
             .flex()
             .items_center()
             .gap(px(2.0))
-            .child(
-                components::icon_button(
-                    tokens,
-                    (ElementId::from((prefix, index)), "connect"),
-                    IconName::ArrowRight,
-                    ButtonKind::Ghost,
-                    ButtonSize::Small,
-                    self.tr("Connect to host"),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.connect_saved_profile(&connect_profile, window, cx);
-                })),
-            )
+            .child(primary)
             .child(
                 components::icon_button(
                     tokens,
@@ -12233,7 +12243,7 @@ impl AppView {
                     this.load_profile(&edit_profile, window, cx);
                 })),
             );
-        components::SidebarRow::new(
+        let mut row = components::SidebarRow::new(
             tokens,
             (prefix, index),
             profile.name.clone(),
@@ -12241,29 +12251,41 @@ impl AppView {
         )
         .selected(is_selected)
         .icon(host_icon(&profile.host))
-        .actions(actions)
-        .into_row()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.connect_saved_profile(&row_connect_profile, window, cx);
-        }))
-        .on_drag(
-            SidebarDragData::Host {
-                name: drag_name,
-                title: drag_title,
-            },
-            move |data: &SidebarDragData, _, _, cx| {
-                let title = match data {
-                    SidebarDragData::Host { title, .. } | SidebarDragData::Group { title, .. } => {
-                        title.clone()
+        .actions(actions);
+        if disconnect_session.is_some() {
+            row = row.status(self.tokens().success);
+        }
+        row.into_row()
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    // Xshell convention: a single click selects the host, a
+                    // double click connects (or focuses the live session).
+                    if event.click_count() >= 2 {
+                        cx.stop_propagation();
+                        this.connect_saved_profile(&row_profile, window, cx);
+                    } else {
+                        this.selected_profile = Some(row_profile.name.clone());
+                        cx.notify();
                     }
-                };
-                cx.new(|_| DragPreview {
-                    title: title.clone(),
-                    tokens: preview_tokens,
-                })
-            },
-        )
-        .into_any_element()
+                }),
+            )
+            .on_drag(
+                SidebarDragData::Host {
+                    name: drag_name,
+                    title: drag_title,
+                },
+                move |data: &SidebarDragData, _, _, cx| {
+                    let title = match data {
+                        SidebarDragData::Host { title, .. }
+                        | SidebarDragData::Group { title, .. } => title.clone(),
+                    };
+                    cx.new(|_| DragPreview {
+                        title: title.clone(),
+                        tokens: preview_tokens,
+                    })
+                },
+            )
+            .into_any_element()
     }
 
     fn recent_host_row(
@@ -12296,9 +12318,16 @@ impl AppView {
         .icon(host_icon(&entry.host))
         .actions(actions)
         .into_row()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.activate_recent_connection(&row_entry, window, cx);
-        }))
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                // Keep recent rows consistent with host rows: only a double
+                // click activates the entry.
+                if event.click_count() >= 2 {
+                    cx.stop_propagation();
+                    this.activate_recent_connection(&row_entry, window, cx);
+                }
+            }),
+        )
         .into_any_element()
     }
 

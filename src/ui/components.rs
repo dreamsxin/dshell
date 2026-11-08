@@ -290,10 +290,11 @@ pub fn section_header(tokens: &ThemeTokens, text: impl Into<SharedString>) -> Di
         .child(text.into())
 }
 
-/// Two-line list row: title, subtitle and always-visible row actions.
+/// Two-line list row: title, subtitle and hover-revealed row actions.
 ///
-/// Actions stay visible (rather than hover-only) so keyboard users can reach
-/// them with `Tab`; callers attach navigation handlers to the returned row.
+/// Actions fade in when the row is hovered (they stay in the element tree,
+/// so `Tab` still reaches them). Callers attach navigation handlers to the
+/// returned row.
 pub struct SidebarRow {
     tokens: ThemeTokens,
     id: ElementId,
@@ -302,6 +303,7 @@ pub struct SidebarRow {
     selected: bool,
     actions: Option<AnyElement>,
     icon: Option<IconName>,
+    status: Option<Hsla>,
 }
 
 impl SidebarRow {
@@ -319,6 +321,7 @@ impl SidebarRow {
             selected: false,
             actions: None,
             icon: None,
+            status: None,
         }
     }
 
@@ -337,10 +340,18 @@ impl SidebarRow {
         self
     }
 
+    /// Show a small status dot before the title (e.g. green for a live
+    /// session).
+    pub fn status(mut self, color: Hsla) -> Self {
+        self.status = Some(color);
+        self
+    }
+
     pub fn into_row(self) -> Stateful<Div> {
         let tokens = &self.tokens;
         let mut row = div()
             .id(self.id)
+            .group("sidebar-row")
             .flex()
             .items_center()
             .gap(px(tokens::SPACE_2))
@@ -369,6 +380,16 @@ impl SidebarRow {
             );
         }
 
+        if let Some(status) = self.status {
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(8.0))
+                    .rounded_full()
+                    .bg(status),
+            );
+        }
+
         row = row.child(
             div()
                 .flex()
@@ -393,7 +414,15 @@ impl SidebarRow {
         );
 
         if let Some(actions) = self.actions {
-            row = row.child(actions);
+            // Fade the row actions in on row hover; the elements stay in the
+            // tree so keyboard focus still reaches them.
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .opacity(0.0)
+                    .group_hover("sidebar-row", |style| style.opacity(1.0))
+                    .child(actions),
+            );
         }
         row
     }
@@ -495,6 +524,7 @@ pub fn collapsible_header_with_actions(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .group("sidebar-row")
         .flex()
         .items_center()
         .justify_between()
@@ -513,7 +543,15 @@ pub fn collapsible_header_with_actions(
                 .flex()
                 .items_center()
                 .gap(px(tokens::SPACE_1))
-                .child(actions)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(tokens::SPACE_1))
+                        .opacity(0.0)
+                        .group_hover("sidebar-row", |style| style.opacity(1.0))
+                        .child(actions),
+                )
                 .child(
                     Icon::new(if open {
                         IconName::ChevronDown

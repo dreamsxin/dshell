@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-08，Windows/MSVC：重构左侧主机/会话交互，降低混乱感。改动：①单击仅选中主机行（Xshell 惯例），双击才连接或聚焦已活会话——消除误点即弹连接的问题；RECENT 行同样双击激活（单击不再载入表单）。②行内操作图标（连接/收藏/编辑）与组头操作图标（批量启动/新建子组/重命名/删除）改为 hover 淡入（`group`/`group_hover`，元素保留在树中，键盘 Tab 仍可达），行与组头默认只显示内容本身。③已连接主机行显示绿色状态点（`SidebarRow.status`），hover 主操作从"连接"切换为"断开会话"（CircleX，直接 `close_session`，与标签页 × 行为一致）。`components.rs` 的 `SidebarRow`/`collapsible_header_with_actions` 支持状态点与 hover 淡入；两个组件仅侧栏使用。语义保持：主机行 ▶ 图标单击仍立即连接（显式入口）；拖拽移动主机/组排序不变；收藏/组树/最近三区结构不变（重复展示问题留待下一轮评估）。验证：`cargo fmt --all`、硬约束脚本通过（255 项通过、11 项 Docker 专项忽略）。侧栏手感需人工验收。
+
 2026-11-07，Windows/MSVC：修复终端以比例字体渲染的根本问题。用户截图放大确认：终端字形为比例字体（i/1/j/l/f 明显窄于 o/x/w），任何固定网格都无法对齐——此前的步进实测修复方向正确但前提不成立。根因：默认字体家族 `"monospace"` 是 GDI 通用别名，Windows DirectWrite 无法解析，静默回退到默认比例字体（Segoe UI）；密钥面板的 `"Consolas, monospace"` 字体栈同样不是合法家族名，同样回退。修复：`DEFAULT_FONT_FAMILY` 按平台取真实安装的家族名（Windows 为 `"Consolas"`，其他平台保留 `"monospace"`，fontconfig 可解析）；`normalized()` 迁移 `monospace`/`Consolas, monospace` 两种损坏值到平台默认（旧 settings.json 加载即修复，保存后持久化）；三处字体栈引用改为同一常量。步进实测（9349dbe）在真实等宽字体上生效：实测值 = 渲染值，光标与字符对齐。版本一旧文件测试补充迁移断言。验证：`cargo fmt --all`、硬约束脚本通过（255 项通过、11 项 Docker 专项忽略）、Docker SSH 11/11。Consolas 渲染与光标对齐需人工验收。
 
 2026-11-07，Windows/MSVC：修复终端光标与字符间距问题。根因：单元格宽度使用硬编码比例（`font_size × 8/14`），而 run 内文字由 GPUI 按真实字体步进排版，光标按 `column × cell_width` 定位——两者不一致时字符与光标之间随输入累积出现明显间距（所选字体实际步进小于估计值时尤甚）。修复：新增 `CellMetrics`（width/height）与 `measure_cell_metrics`——用 GPUI 文本系统对 64 个 "0" 探针串按配置字体/字号做 `layout_line`，取实测平均步进作为 `cell_width`（退化值回退比例估计）；启动、设置应用与重置时重新测量。全部 `cell_width()/cell_height()` 调用点（PTy 行列计算、分屏尺寸、滚动换算、鼠标命中、网格渲染、光标定位）统一改用实测值，光标、网格与字形三者一致。新增 1 项 `CellMetrics::measured` 单测（正常步进采用、NaN/0/∞/超界回退）。验证：`cargo fmt --all`、硬约束脚本通过（255 项通过、11 项 Docker 专项忽略）。不同字体/字号/DPI 下的实际对齐效果需人工验收。

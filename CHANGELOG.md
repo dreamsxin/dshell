@@ -4,6 +4,17 @@ All notable changes to dshell are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Cleaner sidebar host interactions, following Xshell conventions: a
+  single click now only selects a host row and a double click connects
+  (or focuses the live session), so a stray click no longer opens a
+  connection; recent entries activate on double click too. Row and
+  group-header action icons fade in on hover instead of always taking
+  space in every row, connected hosts show a green status dot, and the
+  hover action of a connected host disconnects it instead of
+  connecting again.
+
 ### Added
 
 - Fix the terminal rendering in a proportional font: the default font
