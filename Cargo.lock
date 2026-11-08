@@ -1819,6 +1819,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "data-encoding",
+ "embed-resource",
  "gpui",
  "gpui-component",
  "hmac 0.12.1",

@@ -3,13 +3,22 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.42`.
+`v0.1.43`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
+
+The Windows executable includes a native application icon. Its terminal mark
+is also used by the system tray; the SVG source and generated ICO are kept in
+`assets/`.
 
 The application shell supports English and Simplified Chinese. Open `Settings`,
 choose a language, and press `Apply`; the choice is saved in
 `%APPDATA%\dshell\settings.json` on Windows. Terminal content and remote
 command output remain unchanged.
+
+Screen lock passwords are set or cleared explicitly in `Settings`. They stay
+in zeroizing memory for the current run and are never written to settings or
+logs. Locking is disabled until a password is set; only entering that password
+unlocks the screen. SSH connections remain active while the screen is locked.
 
 Host groups in the sidebar support up to eight nested levels. Create a subgroup
 from a group header, drag hosts into nested groups, collapse levels, and reorder

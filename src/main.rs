@@ -2359,6 +2359,10 @@ fn session_ids_in_tab_group(
         .collect()
 }
 
+fn session_tab_shortcut_target(visible_session_ids: &[u64], index: usize) -> Option<u64> {
+    visible_session_ids.get(index).copied()
+}
+
 fn session_tab_group_choices(
     group_paths: impl IntoIterator<Item = String>,
 ) -> Vec<(String, usize)> {
@@ -2498,10 +2502,11 @@ mod session_tests {
         session_editor_escape, session_editor_key, session_matches_tab_group,
         session_matches_tab_group_selection, session_matches_target, session_switcher_matches_ids,
         session_tab_group_choices, session_tab_group_filter_after_selection,
-        session_terminal_size_for_split, session_trace_push, split_panel_terminal_size,
-        sync_profile_path, synchronized_group_target_ids, synchronized_input_targets,
-        synchronized_targets, take_next_sftp_transfer, terminal_size_for_viewport,
-        unique_duplicate_session_title, update_sessions_for_profile, watch,
+        session_tab_shortcut_target, session_terminal_size_for_split, session_trace_push,
+        split_panel_terminal_size, sync_profile_path, synchronized_group_target_ids,
+        synchronized_input_targets, synchronized_targets, take_next_sftp_transfer,
+        terminal_size_for_viewport, unique_duplicate_session_title, update_sessions_for_profile,
+        watch,
     };
     use crate::forward::{ForwardCommand, ForwardKind, ForwardRuleSpec};
     use crate::log;
@@ -3426,6 +3431,14 @@ mod session_tests {
         assert!(keyword_matches("request timed out", &["timed".to_owned()]));
         assert!(!keyword_matches("connected", &keywords));
         assert!(!keyword_matches("error", &[String::new()]));
+    }
+
+    #[test]
+    fn tab_shortcuts_follow_visible_tab_order_and_ignore_hidden_sessions() {
+        let visible_ids = [42, 7];
+        assert_eq!(session_tab_shortcut_target(&visible_ids, 0), Some(42));
+        assert_eq!(session_tab_shortcut_target(&visible_ids, 1), Some(7));
+        assert_eq!(session_tab_shortcut_target(&visible_ids, 2), None);
     }
 
     #[test]
@@ -4618,6 +4631,7 @@ struct AppView {
     log_replay: Option<LogReplayState>,
     search_input: Entity<InputState>,
     session_switcher_search: Entity<InputState>,
+    command_palette_search: Entity<InputState>,
     address_bar: Entity<InputState>,
     session_switcher_visible: bool,
     command_palette_visible: bool,
@@ -4639,7 +4653,7 @@ struct AppView {
     screen_locked: bool,
     lock_password: Entity<InputState>,
     lock_message: String,
-    lock_password_configured: String,
+    lock_password_configured: Zeroizing<String>,
     setting_lock_password: Entity<InputState>,
     setting_sync_directory: Entity<InputState>,
     pending_sync_directory: Option<String>,
@@ -4772,6 +4786,8 @@ impl AppView {
         let session_switcher_search = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search sessions by name, user, host or port")
         });
+        let command_palette_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search commands"));
         let address_bar = cx.new(|cx| InputState::new(window, cx).placeholder("user@host:port"));
         let lock_password =
             cx.new(|cx| InputState::new(window, cx).placeholder("Enter password to unlock"));
@@ -5024,6 +5040,7 @@ impl AppView {
             log_replay: None,
             search_input,
             session_switcher_search,
+            command_palette_search,
             address_bar,
             session_switcher_visible: false,
             command_palette_visible: false,
@@ -5044,7 +5061,7 @@ impl AppView {
             monitor_generation: 0,
             screen_locked: false,
             lock_message: String::new(),
-            lock_password_configured: String::new(),
+            lock_password_configured: Zeroizing::new(String::new()),
             session_switcher_selected: 0,
             session_switcher_scroll: ScrollHandle::new(),
             compose_input,
@@ -5101,6 +5118,7 @@ impl AppView {
                 &self.session_switcher_search,
                 "Search sessions by name, user, host or port",
             ),
+            (&self.command_palette_search, "Search commands"),
             (&self.key_path, "Path for the new private key"),
             (&self.new_key_passphrase, "Optional passphrase"),
             (&self.key_change_old_passphrase, "Current passphrase"),
@@ -9328,7 +9346,12 @@ impl AppView {
                 AppShortcut::FocusAddressBar => self.focus_address_bar(window, cx),
                 AppShortcut::ToggleScreenLock => self.toggle_screen_lock(window, cx),
                 AppShortcut::SelectSession(index) => {
-                    if let Some(target) = self.sessions.get(index).map(|session| session.id) {
+                    let visible_session_ids = session_ids_in_tab_group(
+                        &self.sessions,
+                        &self.profiles,
+                        self.session_tab_group_filter.as_deref(),
+                    );
+                    if let Some(target) = session_tab_shortcut_target(&visible_session_ids, index) {
                         self.select_session(target, window, cx);
                     }
                 }
@@ -9982,10 +10005,11 @@ impl AppView {
         if self.command_palette_visible {
             self.close_command_palette(window, cx);
         } else {
+            Self::set_input_value(&self.command_palette_search, "", window, cx);
             self.command_palette_visible = true;
             self.command_palette_selected = 0;
             self.session_switcher_visible = false;
-            self.session_switcher_search
+            self.command_palette_search
                 .update(cx, |state, cx| state.focus(window, cx));
             cx.notify();
         }
@@ -10000,7 +10024,7 @@ impl AppView {
     }
 
     fn move_command_palette_selection(&mut self, direction: i32, cx: &mut Context<Self>) {
-        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let query = self.command_palette_search.read(cx).value().to_owned();
         let count = palette_matching_commands(&query).len();
         if count == 0 {
             self.command_palette_selected = 0;
@@ -10018,7 +10042,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let query = self.command_palette_search.read(cx).value().to_owned();
         let commands = palette_matching_commands(&query);
         let Some(command) = commands
             .get(index.min(commands.len().saturating_sub(1)))
@@ -15797,9 +15821,6 @@ impl AppView {
                 if event.keystroke.key.eq_ignore_ascii_case("escape") {
                     cx.stop_propagation();
                     this.cancel_process_termination(window, cx);
-                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
-                    cx.stop_propagation();
-                    this.submit_process_termination(window, cx);
                 }
             }))
             .child(
@@ -16008,7 +16029,6 @@ impl AppView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key.eq_ignore_ascii_case("escape") {
                     cx.stop_propagation();
-                    this.toggle_screen_lock(window, cx);
                 } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
                     cx.stop_propagation();
                     this.unlock_screen(window, cx);
@@ -16074,9 +16094,6 @@ impl AppView {
                 if event.keystroke.key.eq_ignore_ascii_case("escape") {
                     cx.stop_propagation();
                     this.cancel_service_action(window, cx);
-                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
-                    cx.stop_propagation();
-                    this.submit_service_action(window, cx);
                 }
             }))
             .child(
@@ -16212,9 +16229,6 @@ impl AppView {
                 if event.keystroke.key.eq_ignore_ascii_case("escape") {
                     cx.stop_propagation();
                     this.cancel_power_action(window, cx);
-                } else if event.keystroke.key.eq_ignore_ascii_case("enter") {
-                    cx.stop_propagation();
-                    this.submit_power_action(window, cx);
                 }
             }))
             .child(
@@ -17603,31 +17617,26 @@ impl AppView {
 
     fn toggle_screen_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.screen_locked {
-            Self::set_input_value(&self.lock_password, "", window, cx);
-            self.lock_message = String::new();
-            self.screen_locked = false;
-            window.focus(&self.terminal_focus);
-            cx.notify();
-        } else {
-            Self::set_input_value(&self.lock_password, "", window, cx);
-            self.lock_message = String::new();
-            self.screen_locked = true;
-            self.request_overlay_focus();
-            cx.notify();
+            return;
         }
+        if self.lock_password_configured.is_empty() {
+            self.show_toast(
+                self.tr("Set a screen lock password in Settings before locking."),
+                Tone::Warning,
+                cx,
+            );
+            return;
+        }
+        Self::set_input_value(&self.lock_password, "", window, cx);
+        self.lock_message = String::new();
+        self.screen_locked = true;
+        self.request_overlay_focus();
+        cx.notify();
     }
 
     fn unlock_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let supplied = self.lock_password.read(cx).text().to_string();
-        let configured = self.lock_password_configured.clone();
-        if configured.is_empty() {
-            self.screen_locked = false;
-            self.lock_message = String::new();
-            window.focus(&self.terminal_focus);
-            cx.notify();
-            return;
-        }
-        if supplied == configured {
+        let supplied = Zeroizing::new(self.lock_password.read(cx).text().to_string());
+        if supplied.as_str() == self.lock_password_configured.as_str() {
             Self::set_input_value(&self.lock_password, "", window, cx);
             self.screen_locked = false;
             self.lock_message = String::new();
@@ -17663,9 +17672,25 @@ impl AppView {
     }
 
     fn store_lock_password_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let entered = self.setting_lock_password.read(cx).text().to_string();
+        let entered = Zeroizing::new(self.setting_lock_password.read(cx).text().to_string());
+        if entered.is_empty() {
+            self.show_toast(self.tr("Enter a non-empty password."), Tone::Warning, cx);
+            return;
+        }
         self.lock_password_configured = entered;
         Self::set_input_value(&self.setting_lock_password, "", window, cx);
+        self.show_toast(
+            self.tr("Screen lock password set for this run."),
+            Tone::Success,
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn clear_lock_password_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lock_password_configured = Zeroizing::new(String::new());
+        Self::set_input_value(&self.setting_lock_password, "", window, cx);
+        self.show_toast(self.tr("Screen lock password cleared."), Tone::Neutral, cx);
         cx.notify();
     }
 
@@ -19340,9 +19365,44 @@ impl AppView {
                                 &self.setting_lock_password,
                                 true,
                             ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui_tokens::SPACE_2))
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "save-lock-password",
+                                    if self.lock_password_configured.is_empty() {
+                                        self.tr("Set password")
+                                    } else {
+                                        self.tr("Update password")
+                                    },
+                                    ButtonKind::Primary,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.store_lock_password_setting(window, cx);
+                                })),
+                            )
+                            .child(
+                                components::button(
+                                    &tokens,
+                                    "clear-lock-password",
+                                    self.tr("Clear password"),
+                                    ButtonKind::Ghost,
+                                    ButtonSize::Small,
+                                )
+                                .disabled(self.lock_password_configured.is_empty())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.clear_lock_password_setting(window, cx);
+                                })),
+                            ),
+                    )
                             .child(components::help_text(
                                 &tokens,
-                                self.tr("Required when locking the screen. The password is kept only in this running session and is not written to settings or logs."),
+                                self.tr("Set a password before locking. It is kept only in this running session and is not written to settings or logs."),
                             )),
                     )
                     .child(
@@ -21663,7 +21723,7 @@ impl AppView {
         tokens: &ThemeTokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let query = self.session_switcher_search.read(cx).value().to_owned();
+        let query = self.command_palette_search.read(cx).value().to_owned();
         let commands = palette_matching_commands(&query);
         let selected_index = self
             .command_palette_selected
@@ -21756,7 +21816,7 @@ impl AppView {
                             .border_b_1()
                             .border_color(tokens.border_subtle)
                             .child(
-                                TextInput::new(&self.session_switcher_search)
+                                TextInput::new(&self.command_palette_search)
                                     .h(px(ui_tokens::CONTROL_HEIGHT_SM))
                                     .w_full(),
                             ),

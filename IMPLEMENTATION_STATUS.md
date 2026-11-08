@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-08，Windows/MSVC：修复上一轮 UI 交互审查中的高优先级问题并新增原生应用图标。进程终止、服务控制和服务器电源确认框不再将 Enter 直接绑定到危险操作；`Alt+1..9` 按当前筛选后可见标签顺序选择，并新增纯逻辑回归测试；命令面板使用独立搜索输入且每次打开清空查询。屏幕锁密码新增 Settings 的 Set/Update/Clear 操作，空密码拒绝锁屏，Esc 和锁屏快捷键不能绕过验证；密码及比较副本使用 `Zeroizing`，简体中文文案已补齐。新增 `assets/dshell-icon.svg`、多尺寸 `assets/dshell.ico`，通过已有 `embed-resource` 在 Windows 构建时嵌入 EXE，托盘图标复用相同终端标记。`cargo fmt --all` 和 `scripts\verify-hard-constraints.ps1` 通过：256 项通过、11 项 Docker 专项忽略；`cargo build --locked --bin dshell` 通过，ICO 含 16/24/32/48/64/128/256 px 尺寸。未运行 Docker SSH 测试（无 SSH/SFTP/转发/日志/PTY 数据路径修改），也未在活动桌面启动 GUI；Windows 资源嵌入已由 `rc.exe` 构建，任务栏/资源管理器显示与锁屏手感仍需隔离桌面人工验收。遮罩点击关闭规则仍需按每个弹层的安全取消语义逐一评估。下一步：隔离 Windows 桌面检查图标显示、锁屏键盘流程与弹层关闭行为。
+
 2026-11-08，Windows/MSVC：修正 Recent 行为语义。此前 Recent 行的箭头图标调用 `load_recent`——仅把主机/用户/端口填进连接表单并打开会话编辑器（提示"可另存为主机资料"），与箭头的连接预期不符。现在新增 `connect_recent_entry`：已活会话存在则聚焦该会话；存在匹配的已保存主机（host+port+username）则复用其完整设置连接；否则以条目构造草稿资料走标准连接流程（凭据未缓存时弹认证提示，认证方式默认密码）。Recent 行 hover 图标变为两个：连接（已连接时变为 SquareTerminal"显示会话"并带绿色状态点）与"载入连接表单"（保留原有能力，供改参数或另存资料）；双击行 = 连接，与主机行一致。中文文案新增"显示会话"。验证：`cargo fmt --all`、硬约束脚本通过（255 项通过、11 项 Docker 专项忽略）。
 
 2026-11-08，Windows/MSVC：重构左侧主机/会话交互，降低混乱感。改动：①单击仅选中主机行（Xshell 惯例），双击才连接或聚焦已活会话——消除误点即弹连接的问题；RECENT 行同样双击激活（单击不再载入表单）。②行内操作图标（连接/收藏/编辑）与组头操作图标（批量启动/新建子组/重命名/删除）改为 hover 淡入（`group`/`group_hover`，元素保留在树中，键盘 Tab 仍可达），行与组头默认只显示内容本身。③已连接主机行显示绿色状态点（`SidebarRow.status`），hover 主操作从"连接"切换为"断开会话"（CircleX，直接 `close_session`，与标签页 × 行为一致）。`components.rs` 的 `SidebarRow`/`collapsible_header_with_actions` 支持状态点与 hover 淡入；两个组件仅侧栏使用。语义保持：主机行 ▶ 图标单击仍立即连接（显式入口）；拖拽移动主机/组排序不变；收藏/组树/最近三区结构不变（重复展示问题留待下一轮评估）。验证：`cargo fmt --all`、硬约束脚本通过（255 项通过、11 项 Docker 专项忽略）。侧栏手感需人工验收。

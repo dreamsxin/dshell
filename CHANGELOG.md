@@ -17,6 +17,11 @@ All notable changes to dshell are documented here.
   target (focusing a live session, reusing a matching saved profile or
   asking for credentials) instead of only opening the connection
   form; loading the form stays available as the row's second action.
+- Make destructive confirmation dialogs keyboard-safe: pressing Enter no
+  longer invokes process termination, service control or server power actions.
+- Make Alt+1..9 follow the visible tab order when session tabs are filtered,
+  and give the command palette its own search field so its query cannot leak
+  into the session switcher.
 
 ### Added
 
@@ -56,6 +61,11 @@ All notable changes to dshell are documented here.
   New session, Quit) drawn programmatically in the app accent color.
   Tray clicks activate the main window; New session opens the session
   editor. GUI behavior requires manual verification.
+- Add explicit screen-lock password setup, update and clear controls. Locking
+  requires a password; the password stays in zeroizing process memory and
+  cannot be bypassed with Esc or the lock shortcut.
+- Add a multi-size Windows application icon, embed it into the executable,
+  and reuse its terminal mark in the system tray.
 
 ## [0.1.43] - 2026-11-06
 

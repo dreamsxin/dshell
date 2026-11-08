@@ -5,9 +5,8 @@
 //! they are routed into the GPUI event loop through a channel and polled by
 //! a foreground task in `main` — no static App access is required.
 //!
-//! The tray icon is drawn programmatically (no binary asset): a rounded
-//! dark square with a light terminal-prompt chevron, matching the app's
-//! accent color family.
+//! The tray icon is drawn programmatically from the same terminal mark as the
+//! Windows application icon.
 
 use std::sync::mpsc::Sender;
 
@@ -95,9 +94,14 @@ pub fn install(sender: Sender<TrayCommand>) -> Result<TrayIcon, String> {
 fn tray_icon_pixels() -> Vec<u8> {
     const SIZE: usize = TRAY_ICON_SIZE;
     const RADIUS: i32 = 7;
-    // Accent background (#2F80ED family) and light foreground.
-    const BG: [u8; 3] = [47, 128, 237];
-    const FG: [u8; 3] = [234, 244, 250];
+    const BG: [u8; 3] = [17, 24, 39];
+    const PANEL: [u8; 3] = [31, 41, 55];
+    const BORDER: [u8; 3] = [59, 130, 246];
+    const PROMPT: [u8; 3] = [103, 232, 249];
+    const CURSOR: [u8; 3] = [243, 244, 246];
+    const GREEN: [u8; 3] = [52, 211, 153];
+    const AMBER: [u8; 3] = [251, 191, 36];
+    const BLUE: [u8; 3] = [96, 165, 250];
 
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
     for y in 0..SIZE {
@@ -125,12 +129,32 @@ fn tray_icon_pixels() -> Vec<u8> {
             if !inside {
                 continue;
             }
-            // Terminal chevron: two diagonal bars forming ">".
-            let chevron = (6..=12).contains(&y_i)
-                && ((x_i - 8 - (y_i - 6)).abs() <= 1 || (x_i - 14 + (y_i - 6)).abs() <= 1);
-            // Terminal cursor bar.
-            let cursor = (17..=19).contains(&x_i) && (7..=13).contains(&y_i);
-            let [r, g, b] = if chevron || cursor { FG } else { BG };
+            let in_terminal = (4..=27).contains(&x_i) && (5..=26).contains(&y_i);
+            let terminal_border = in_terminal && (x_i == 4 || x_i == 27 || y_i == 5 || y_i == 26);
+            let title_dot = y_i == 9 && (x_i == 8 || x_i == 11 || x_i == 14);
+            let divider = y_i == 12 && (7..=24).contains(&x_i);
+            let prompt = ((16..=19).contains(&y_i) && (x_i - 9 - (y_i - 16)).abs() <= 1)
+                || ((19..=22).contains(&y_i) && (x_i - 15 + (y_i - 19)).abs() <= 1);
+            let cursor = (18..=21).contains(&x_i) && (21..=22).contains(&y_i);
+            let [r, g, b] = if terminal_border {
+                BORDER
+            } else if prompt {
+                PROMPT
+            } else if cursor {
+                CURSOR
+            } else if title_dot {
+                match x_i {
+                    8 => GREEN,
+                    11 => AMBER,
+                    _ => BLUE,
+                }
+            } else if divider {
+                [55, 65, 81]
+            } else if in_terminal {
+                PANEL
+            } else {
+                BG
+            };
             let index = (y * SIZE + x) * 4;
             rgba[index] = r;
             rgba[index + 1] = g;

@@ -1,6 +1,6 @@
 # dshell 界面设计方案
 
-> 状态：设计定稿，待实施
+> 状态：持续维护的界面规范；已实施范围以 `IMPLEMENTATION_STATUS.md` 为准
 > 适用范围：`dshell` 桌面客户端全部界面（会话、终端、文件传输、转发、设置）
 > 技术前提：Rust + GPUI + gpui-component，原生渲染，不使用 WebView
 
@@ -27,6 +27,7 @@
 - 原生 UI，禁止引入 WebView / Electron / Tauri / Wry。
 - 终端帧仍由 GPUI 按 16 ms 批次渲染，UI 改动不得改变 SSH 线程与终端状态机的职责边界。
 - 任何视觉改动都不得降低既有安全约束（不落盘密码、严格 `known_hosts` 校验）。
+- Windows 应用图标使用独立的 SVG 源稿和多尺寸 ICO 资源；托盘图标沿用同一终端标记。
 
 ---
 

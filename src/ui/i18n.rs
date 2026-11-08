@@ -706,6 +706,15 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Testing connection to {host}:{port}..." => "正在测试连接 {host}:{port}...",
         "View visible screen as hex" => "以十六进制查看可见屏幕",
         "Set lock password" => "设置屏幕锁密码",
+        "Set password" => "设置密码",
+        "Update password" => "更新密码",
+        "Clear password" => "清除密码",
+        "Enter a non-empty password." => "请输入非空密码。",
+        "Screen lock password set for this run." => "屏幕锁密码已为本次运行设置。",
+        "Screen lock password cleared." => "屏幕锁密码已清除。",
+        "Set a screen lock password in Settings before locking." => {
+            "请先在设置中设置屏幕锁密码，再锁定屏幕。"
+        }
         "Screen lock" => "屏幕锁",
         "Screen locked" => "屏幕已锁定",
         "Enter the password to unlock this screen. Connections stay alive." => {
@@ -713,8 +722,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         }
         "Unlock" => "解锁",
         "Incorrect password. The screen stays locked." => "密码不正确，屏幕保持锁定。",
-        "Required when locking the screen. The password is kept only in this running session and is not written to settings or logs." => {
-            "锁定屏幕时需要。密码仅保留在当前运行会话中，不写入设置或日志。"
+        "Set a password before locking. It is kept only in this running session and is not written to settings or logs." => {
+            "锁定前请先设置密码。密码仅保留在当前运行会话中，不写入设置或日志。"
         }
         "Hex view (visible screen)" => "十六进制视图（可见屏幕）",
         "No commands match your search" => "没有匹配的命令",
