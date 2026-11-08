@@ -13,7 +13,10 @@ All notable changes to dshell are documented here.
   group-header action icons fade in on hover instead of always taking
   space in every row, connected hosts show a green status dot, and the
   hover action of a connected host disconnects it instead of
-  connecting again.
+  connecting again. The recent-connections arrow now connects to the
+  target (focusing a live session, reusing a matching saved profile or
+  asking for credentials) instead of only opening the connection
+  form; loading the form stays available as the row's second action.
 
 ### Added
 
