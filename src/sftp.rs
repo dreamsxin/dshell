@@ -97,6 +97,8 @@ pub struct RemoteEntry {
     pub name: String,
     pub path: String,
     pub is_dir: bool,
+    pub is_file: bool,
+    pub is_symlink: bool,
     pub size: u64,
     pub permissions: Option<u32>,
     pub atime: Option<u32>,
@@ -134,9 +136,21 @@ pub enum SftpCommand {
         overwrite: bool,
         resume: bool,
     },
+    UploadGlob {
+        local_pattern: String,
+        remote_directory: String,
+        overwrite: bool,
+        resume: bool,
+    },
     DownloadDirectory {
         remote: String,
         local: PathBuf,
+        overwrite: bool,
+        resume: bool,
+    },
+    DownloadGlob {
+        remote_pattern: String,
+        local_directory: PathBuf,
         overwrite: bool,
         resume: bool,
     },
@@ -303,6 +317,14 @@ pub async fn run<S>(
                 )
                 .await;
             }
+            SftpCommand::UploadGlob { .. } => {
+                let _ = events
+                    .send(SftpEvent::Error(
+                        "Local upload patterns must be expanded by the SSH command runner."
+                            .to_owned(),
+                    ))
+                    .await;
+            }
             SftpCommand::DownloadDirectory {
                 remote,
                 local,
@@ -319,6 +341,14 @@ pub async fn run<S>(
                     &cancellation,
                 )
                 .await;
+            }
+            SftpCommand::DownloadGlob { .. } => {
+                let _ = events
+                    .send(SftpEvent::Error(
+                        "Remote download patterns must be expanded by the CLI command runner."
+                            .to_owned(),
+                    ))
+                    .await;
             }
             SftpCommand::Rename { from, to } => {
                 match session.rename(from.clone(), to.clone()).await {
@@ -512,6 +542,8 @@ async fn read_entries(session: &SftpSession, path: &str) -> Result<Vec<RemoteEnt
                 name: entry.file_name(),
                 path: entry.path(),
                 is_dir: entry.file_type().is_dir(),
+                is_file: entry.file_type().is_file(),
+                is_symlink: entry.file_type().is_symlink(),
                 size: metadata.size.unwrap_or(0),
                 permissions: metadata.permissions,
                 atime: metadata.atime,
@@ -1619,8 +1651,11 @@ async fn collect_download_plan(
     Ok(())
 }
 
-fn safe_local_component(name: &str) -> Option<String> {
+pub fn safe_local_component(name: &str) -> Option<String> {
     if name == "." || name == ".." {
+        return None;
+    }
+    if name.is_empty() || name.contains(['/', '\\']) || name.chars().any(char::is_control) {
         return None;
     }
     let component = Path::new(name).file_name()?.to_str()?;

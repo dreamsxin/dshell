@@ -74,6 +74,22 @@ enum SftpAction {
         #[arg(long, value_name = "JSON")]
         file: PathBuf,
     },
+    PutGlob {
+        local_pattern: String,
+        remote_directory: String,
+        #[arg(long, conflicts_with = "resume")]
+        overwrite: bool,
+        #[arg(long)]
+        resume: bool,
+    },
+    GetGlob {
+        remote_pattern: String,
+        local_directory: PathBuf,
+        #[arg(long, conflicts_with = "resume")]
+        overwrite: bool,
+        #[arg(long)]
+        resume: bool,
+    },
     Ls {
         #[arg(default_value = ".")]
         remote: String,
@@ -159,9 +175,25 @@ enum SftpBatchOperation {
         #[serde(default)]
         resume: bool,
     },
+    PutGlob {
+        local_pattern: String,
+        remote_directory: String,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        resume: bool,
+    },
     GetDir {
         remote: String,
         local: PathBuf,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        resume: bool,
+    },
+    GetGlob {
+        remote_pattern: String,
+        local_directory: PathBuf,
         #[serde(default)]
         overwrite: bool,
         #[serde(default)]
@@ -264,6 +296,28 @@ fn run_sftp(args: SftpArgs) -> Result<u8> {
     let authentication = build_authentication(&args.connection)?;
     let commands = match args.action {
         SftpAction::Batch { file } => load_sftp_batch(&file)?,
+        SftpAction::PutGlob {
+            local_pattern,
+            remote_directory,
+            overwrite,
+            resume,
+        } => vec![SftpCommand::UploadGlob {
+            local_pattern,
+            remote_directory,
+            overwrite,
+            resume,
+        }],
+        SftpAction::GetGlob {
+            remote_pattern,
+            local_directory,
+            overwrite,
+            resume,
+        } => vec![SftpCommand::DownloadGlob {
+            remote_pattern,
+            local_directory,
+            overwrite,
+            resume,
+        }],
         action => vec![match action {
             SftpAction::Ls { remote } => SftpCommand::List(remote),
             SftpAction::Put {
@@ -313,6 +367,9 @@ fn run_sftp(args: SftpArgs) -> Result<u8> {
             SftpAction::Mkdir { remote } => SftpCommand::CreateDirectory(remote),
             SftpAction::Rm { remote } => SftpCommand::RemoveFile(remote),
             SftpAction::Rmdir { remote } => SftpCommand::RemoveDirectory(remote),
+            SftpAction::PutGlob { .. } | SftpAction::GetGlob { .. } => {
+                unreachable!("glob actions are expanded before this match")
+            }
             SftpAction::Batch { .. } => unreachable!("batch file was handled above"),
         }],
     };
@@ -399,6 +456,20 @@ fn load_sftp_batch(path: &std::path::Path) -> Result<Vec<SftpCommand>> {
                         resume,
                     }
                 }
+                SftpBatchOperation::PutGlob {
+                    local_pattern,
+                    remote_directory,
+                    overwrite,
+                    resume,
+                } => {
+                    validate_batch_transfer_options(overwrite, resume, index)?;
+                    SftpCommand::UploadGlob {
+                        local_pattern,
+                        remote_directory,
+                        overwrite,
+                        resume,
+                    }
+                }
                 SftpBatchOperation::GetDir {
                     remote,
                     local,
@@ -409,6 +480,20 @@ fn load_sftp_batch(path: &std::path::Path) -> Result<Vec<SftpCommand>> {
                     SftpCommand::DownloadDirectory {
                         remote,
                         local,
+                        overwrite,
+                        resume,
+                    }
+                }
+                SftpBatchOperation::GetGlob {
+                    remote_pattern,
+                    local_directory,
+                    overwrite,
+                    resume,
+                } => {
+                    validate_batch_transfer_options(overwrite, resume, index)?;
+                    SftpCommand::DownloadGlob {
+                        remote_pattern,
+                        local_directory,
                         overwrite,
                         resume,
                     }
@@ -606,6 +691,28 @@ mod tests {
         assert!(matches!(
             &commands[2],
             SftpCommand::CreateDirectory(path) if path == "/tmp/new-dir"
+        ));
+    }
+
+    #[test]
+    fn sftp_batch_file_parses_final_segment_glob_transfers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("glob-batch.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"operations":[{"op":"put_glob","local_pattern":"dist/*.zip","remote_directory":"/srv/releases"},{"op":"get_glob","remote_pattern":"/var/log/*.log","local_directory":"logs","resume":true}]}"#,
+        )
+        .unwrap();
+        let commands = super::load_sftp_batch(&path).unwrap();
+        assert!(matches!(
+            &commands[0],
+            SftpCommand::UploadGlob { local_pattern, remote_directory, .. }
+                if local_pattern == "dist/*.zip" && remote_directory == "/srv/releases"
+        ));
+        assert!(matches!(
+            &commands[1],
+            SftpCommand::DownloadGlob { remote_pattern, resume: true, .. }
+                if remote_pattern == "/var/log/*.log"
         ));
     }
 

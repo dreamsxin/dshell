@@ -1909,7 +1909,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dshell"
-version = "0.1.50"
+version = "0.1.51"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1917,6 +1917,7 @@ dependencies = [
  "clap",
  "data-encoding",
  "embed-resource",
+ "glob",
  "gpui",
  "gpui-component",
  "hmac 0.12.1",

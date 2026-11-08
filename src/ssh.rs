@@ -725,10 +725,44 @@ pub async fn run_sftp_commands(
 
         let mut outputs = Vec::with_capacity(commands.len());
         for (index, command) in commands.into_iter().enumerate() {
-            let output = run_sftp_worker_command(&command_tx, &mut event_rx, command)
+            let operation_outputs = match command {
+                SftpCommand::UploadGlob {
+                    local_pattern,
+                    remote_directory,
+                    overwrite,
+                    resume,
+                } => run_local_upload_glob(
+                    &command_tx,
+                    &mut event_rx,
+                    &local_pattern,
+                    &remote_directory,
+                    overwrite,
+                    resume,
+                )
                 .await
-                .with_context(|| format!("SFTP batch operation {} failed", index + 1))?;
-            outputs.push(output);
+                .with_context(|| format!("SFTP batch operation {} failed", index + 1))?,
+                SftpCommand::DownloadGlob {
+                    remote_pattern,
+                    local_directory,
+                    overwrite,
+                    resume,
+                } => run_remote_download_glob(
+                    &command_tx,
+                    &mut event_rx,
+                    &remote_pattern,
+                    &local_directory,
+                    overwrite,
+                    resume,
+                )
+                .await
+                .with_context(|| format!("SFTP batch operation {} failed", index + 1))?,
+                command => vec![
+                    run_sftp_worker_command(&command_tx, &mut event_rx, command)
+                        .await
+                        .with_context(|| format!("SFTP batch operation {} failed", index + 1))?,
+                ],
+            };
+            outputs.extend(operation_outputs);
         }
         Ok::<Vec<RemoteSftpOutput>, anyhow::Error>(outputs)
     }
@@ -744,6 +778,180 @@ pub async fn run_sftp_commands(
         .disconnect(Disconnect::ByApplication, "SFTP operation completed", "en")
         .await;
     result
+}
+
+async fn run_local_upload_glob(
+    command_tx: &mpsc::Sender<SftpCommand>,
+    event_rx: &mut mpsc::Receiver<SftpEvent>,
+    local_pattern: &str,
+    remote_directory: &str,
+    overwrite: bool,
+    resume: bool,
+) -> Result<Vec<RemoteSftpOutput>> {
+    const MAX_GLOB_MATCHES: usize = 10_000;
+    let pattern_path = Path::new(local_pattern);
+    let file_pattern = pattern_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Local glob pattern must end with a UTF-8 path segment")?;
+    let local_directory = pattern_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    if file_pattern.is_empty()
+        || file_pattern.contains(['/', '\\'])
+        || remote_directory.contains(['*', '?', '['])
+    {
+        bail!(
+            "Local upload patterns are limited to the final path segment and require a literal remote directory."
+        );
+    }
+    let pattern = glob::Pattern::new(file_pattern).context("Invalid local glob pattern")?;
+    let metadata = std::fs::symlink_metadata(&local_directory).with_context(|| {
+        format!(
+            "Could not inspect local pattern directory {}",
+            local_directory.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("Local glob parent must be an existing, non-symlink directory.");
+    }
+    let entries = std::fs::read_dir(&local_directory).with_context(|| {
+        format!(
+            "Could not list local pattern directory {}",
+            local_directory.display()
+        )
+    })?;
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !pattern.matches(&name) || sftp::safe_local_component(&name).is_none() {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+            continue;
+        }
+        if matches.len() >= MAX_GLOB_MATCHES {
+            bail!("Local glob matched more than {MAX_GLOB_MATCHES} entries.");
+        }
+        matches.push((entry.path(), name, metadata.is_dir()));
+    }
+    matches.sort_by(|left, right| left.1.cmp(&right.1));
+    if matches.is_empty() {
+        bail!("Local pattern {local_pattern:?} matched no regular files or directories.");
+    }
+
+    let mut outputs = Vec::with_capacity(matches.len());
+    for (local, name, is_directory) in matches {
+        let remote = sftp::remote_join(remote_directory, &name);
+        let command = if is_directory {
+            SftpCommand::UploadDirectory {
+                local,
+                remote,
+                overwrite,
+                resume,
+            }
+        } else {
+            SftpCommand::Upload {
+                local,
+                remote,
+                overwrite,
+                resume,
+            }
+        };
+        outputs.push(run_sftp_worker_command(command_tx, event_rx, command).await?);
+    }
+    Ok(outputs)
+}
+
+async fn run_remote_download_glob(
+    command_tx: &mpsc::Sender<SftpCommand>,
+    event_rx: &mut mpsc::Receiver<SftpEvent>,
+    remote_pattern: &str,
+    local_directory: &std::path::Path,
+    overwrite: bool,
+    resume: bool,
+) -> Result<Vec<RemoteSftpOutput>> {
+    const MAX_GLOB_MATCHES: usize = 10_000;
+    let trimmed = remote_pattern.trim_end_matches('/');
+    let (remote_directory, file_pattern) = match trimmed.rsplit_once('/') {
+        Some(("", pattern)) => ("/", pattern),
+        Some((directory, pattern)) => (directory, pattern),
+        None => (".", trimmed),
+    };
+    if file_pattern.is_empty()
+        || remote_directory.contains(['*', '?', '['])
+        || file_pattern.contains(['/', '\\'])
+    {
+        bail!("Remote glob patterns are supported only in the final path segment.");
+    }
+    let pattern = glob::Pattern::new(file_pattern).context("Invalid remote glob pattern")?;
+    let local_metadata = tokio::fs::symlink_metadata(local_directory)
+        .await
+        .with_context(|| {
+            format!(
+                "Could not inspect local destination {}",
+                local_directory.display()
+            )
+        })?;
+    if local_metadata.file_type().is_symlink() || !local_metadata.is_dir() {
+        bail!("Remote glob downloads require an existing, non-symlink local directory.");
+    }
+    let entries = match run_sftp_worker_command(
+        command_tx,
+        event_rx,
+        SftpCommand::List(remote_directory.to_owned()),
+    )
+    .await?
+    {
+        RemoteSftpOutput::Listed { entries, .. } => entries,
+        RemoteSftpOutput::Completed { .. } => bail!("Remote glob listing returned no entries."),
+    };
+    let mut matches = entries
+        .into_iter()
+        .filter(|entry| {
+            !entry.is_symlink
+                && (entry.is_file || entry.is_dir)
+                && pattern.matches(&entry.name)
+                && sftp::safe_local_component(&entry.name).is_some()
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > MAX_GLOB_MATCHES {
+        bail!("Remote glob matched more than {MAX_GLOB_MATCHES} entries.");
+    }
+    matches.sort_by(|left, right| left.name.cmp(&right.name));
+    if matches.is_empty() {
+        bail!("Remote pattern {remote_pattern:?} matched no regular files or directories.");
+    }
+
+    let mut outputs = Vec::with_capacity(matches.len());
+    for entry in matches {
+        let remote = sftp::remote_join(remote_directory, &entry.name);
+        let local = local_directory.join(
+            sftp::safe_local_component(&entry.name)
+                .expect("matched remote names were checked for safe local components"),
+        );
+        let command = if entry.is_dir {
+            SftpCommand::DownloadDirectory {
+                remote,
+                local,
+                overwrite,
+                resume,
+            }
+        } else {
+            SftpCommand::Download {
+                remote,
+                local,
+                overwrite,
+                resume,
+            }
+        };
+        outputs.push(run_sftp_worker_command(command_tx, event_rx, command).await?);
+    }
+    Ok(outputs)
 }
 
 async fn run_sftp_worker_command(
@@ -5721,6 +5929,16 @@ abc	img	name"
                 Some(known_hosts.clone()),
             ))
         };
+        let run_many = |commands| {
+            runtime.block_on(run_sftp_commands(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::Password(Zeroizing::new(password.clone())),
+                commands,
+                Some(known_hosts.clone()),
+            ))
+        };
 
         assert!(matches!(
             run(SftpCommand::CreateDirectory(remote_root.clone())).unwrap(),
@@ -5792,6 +6010,56 @@ abc	img	name"
             std::fs::read(downloaded_tree.join("nested").join("item.txt")).unwrap(),
             b"recursive payload"
         );
+        let glob_source_a = local.path().join("glob-a.dat");
+        let glob_source_b = local.path().join("glob-b.dat");
+        std::fs::write(&glob_source_a, b"glob-a").unwrap();
+        std::fs::write(&glob_source_b, b"glob-b").unwrap();
+        let glob_uploads = run_many(vec![SftpCommand::UploadGlob {
+            local_pattern: format!("{}\\glob-?.dat", local.path().display()),
+            remote_directory: remote_root.clone(),
+            overwrite: false,
+            resume: false,
+        }])
+        .unwrap();
+        assert_eq!(glob_uploads.len(), 2);
+        let symlink_path = format!("{remote_root}/glob-link.dat");
+        runtime
+            .block_on(run_remote_command(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::Password(Zeroizing::new(password.clone())),
+                format!("ln -s glob-a.dat '{symlink_path}'"),
+                Some(known_hosts.clone()),
+            ))
+            .unwrap();
+        let glob_download_dir = local.path().join("glob-downloads");
+        std::fs::create_dir(&glob_download_dir).unwrap();
+        let glob_downloads = run_many(vec![SftpCommand::DownloadGlob {
+            remote_pattern: format!("{remote_root}/glob-*.dat"),
+            local_directory: glob_download_dir.clone(),
+            overwrite: false,
+            resume: false,
+        }])
+        .unwrap();
+        assert_eq!(glob_downloads.len(), 2);
+        assert_eq!(
+            std::fs::read(glob_download_dir.join("glob-a.dat")).unwrap(),
+            b"glob-a"
+        );
+        assert_eq!(
+            std::fs::read(glob_download_dir.join("glob-b.dat")).unwrap(),
+            b"glob-b"
+        );
+        assert!(
+            run_many(vec![SftpCommand::DownloadGlob {
+                remote_pattern: format!("{remote_root}/*/../*.dat"),
+                local_directory: glob_download_dir,
+                overwrite: false,
+                resume: false,
+            }])
+            .is_err()
+        );
         assert!(matches!(
             run(SftpCommand::List(remote_root.clone())).unwrap(),
             RemoteSftpOutput::Listed { entries, .. } if entries.iter().any(|entry| entry.name == "upload.txt") && entries.iter().any(|entry| entry.name == "tree")
@@ -5800,6 +6068,12 @@ abc	img	name"
             run(SftpCommand::RemoveFile(remote_file)).unwrap(),
             RemoteSftpOutput::Completed { .. }
         ));
+        for name in ["glob-a.dat", "glob-b.dat", "glob-link.dat"] {
+            assert!(matches!(
+                run(SftpCommand::RemoveFile(format!("{remote_root}/{name}"))).unwrap(),
+                RemoteSftpOutput::Completed { .. }
+            ));
+        }
         assert!(matches!(
             run(SftpCommand::RemoveFile(format!(
                 "{remote_tree}/nested/item.txt"
@@ -5823,7 +6097,6 @@ abc	img	name"
             RemoteSftpOutput::Completed { .. }
         ));
 
-        drop(run);
         let batch_root = format!("{remote_root}-batch");
         let batch_file = format!("{batch_root}/upload.txt");
         let batch_download = local.path().join("batch-download.txt");

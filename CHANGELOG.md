@@ -6,6 +6,33 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.51] - 2026-11-09
+
+Adds final-segment wildcard matching to CLI SFTP transfers.
+
+### Added
+
+- Add `put-glob` and `get-glob` CLI actions and `put_glob`/`get_glob` batch
+  operations. Support `*`, `?`, and bracket character classes in the final
+  path segment while requiring a literal parent path.
+- Skip symlinks and special files, preserve deterministic match ordering,
+  and require a literal destination directory.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all` and
+  `scripts\\verify-hard-constraints.ps1`: 268 unit tests passed and 13
+  Docker-only tests were skipped by that script.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including local and remote
+  final-segment glob transfers and remote symlink exclusion.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation/uninstall and verified both executables are handled.
+- Installer `dshell-setup-v0.1.51-x64.exe` is 11,078,600 bytes. SHA-256:
+  `ADCA35B8E1229ED03D2013022AE315CFD3EF05D1A5E1F36481FEC785EE03F25C`.
+- Installer and executables are unsigned. Desktop UI, installer visuals,
+  DPI, IME and glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.50] - 2026-11-08
 
 Adds versioned JSON SFTP batch execution to the command-line client.
