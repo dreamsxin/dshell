@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.49`.
+`v0.1.50`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -282,12 +282,34 @@ dshell-cli sftp --host server.example.com --user operator --agent ls /srv
 dshell-cli sftp --host server.example.com --user operator --agent put .\build.zip /srv/build.zip
 dshell-cli sftp --host server.example.com --user operator --agent get /srv/build.zip .\build.zip --resume
 dshell-cli sftp --host server.example.com --user operator --agent put-dir .\site /srv/site --resume
+dshell-cli sftp --host server.example.com --user operator --agent batch --file .\deploy.json
 ```
 
 Available actions are `ls`, `put`, `get`, `put-dir`, `get-dir`, `mkdir`, `rm`,
 and `rmdir`. Existing destinations are refused unless `--overwrite` or
 `--resume` is explicitly selected. Batch transfers reuse the desktop SFTP
 worker, including resume behavior and recursive path validation.
+
+The JSON batch file uses version 1 and runs its `operations` array in order
+over one SSH/SFTP session, with at most 256 operations and a 1 MiB file limit.
+Each item uses the same operation names and fields, for example:
+
+```json
+{
+  "version": 1,
+  "operations": [
+    { "op": "mkdir", "remote": "/srv/releases" },
+    { "op": "put", "local": ".\\build.zip", "remote": "/srv/releases/build.zip" },
+    { "op": "put_dir", "local": ".\\site", "remote": "/srv/www/site", "resume": true }
+  ]
+}
+```
+
+Batch operation objects use `list`, `put`, `get`, `put_dir`, `get_dir`, `mkdir`,
+`rm`, or `rmdir`. Transfers may set `overwrite` or `resume` to `true`; setting
+both is invalid. Batch files contain paths and options only, never credentials.
+Operations run in order and stop on the first failure; completed earlier
+operations are not rolled back. The error identifies the failed operation index.
 
 The session properties also accept a keep-alive interval in seconds (`0`
 disables it). A positive value makes the client send keepalive messages when

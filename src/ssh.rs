@@ -654,6 +654,31 @@ pub async fn run_sftp_command(
     command: SftpCommand,
     known_hosts_path: Option<PathBuf>,
 ) -> Result<RemoteSftpOutput> {
+    let mut outputs = run_sftp_commands(
+        host,
+        port,
+        username,
+        authentication,
+        vec![command],
+        known_hosts_path,
+    )
+    .await?;
+    outputs
+        .pop()
+        .context("The SFTP operation returned no result")
+}
+
+pub async fn run_sftp_commands(
+    host: String,
+    port: u16,
+    username: String,
+    authentication: Authentication,
+    commands: Vec<SftpCommand>,
+    known_hosts_path: Option<PathBuf>,
+) -> Result<Vec<RemoteSftpOutput>> {
+    if commands.is_empty() {
+        bail!("At least one SFTP operation is required.");
+    }
     let mut session =
         connect_command_session(host, port, username, authentication, known_hosts_path).await?;
     let channel = timeout(Duration::from_secs(15), async {
@@ -698,64 +723,14 @@ pub async fn run_sftp_command(
         })
         .await;
 
-        let requested_path = match &command {
-            SftpCommand::List(path) => Some(path.clone()),
-            _ => None,
-        };
-        command_tx
-            .send(command)
-            .await
-            .context("The SFTP worker stopped before accepting the operation")?;
-
-        let mut transfers = Vec::new();
-        let mut transfer_names = HashMap::<String, u64>::new();
-        let mut actions = Vec::new();
-        loop {
-            let event = timeout(Duration::from_secs(300), event_rx.recv())
+        let mut outputs = Vec::with_capacity(commands.len());
+        for (index, command) in commands.into_iter().enumerate() {
+            let output = run_sftp_worker_command(&command_tx, &mut event_rx, command)
                 .await
-                .context("No SFTP progress was received for 5 minutes")?
-                .context("SFTP connection closed before the operation completed")?;
-                match event {
-                    SftpEvent::Entries { path, entries }
-                        if requested_path.as_deref() == Some(path.as_str()) =>
-                    {
-                        if let Some(requested_path) = requested_path.as_deref() {
-                            if path == requested_path {
-                                break Ok(RemoteSftpOutput::Listed { path, entries });
-                            }
-                        }
-                    }
-                    SftpEvent::Entries { .. } | SftpEvent::Ready { .. } => {}
-                    SftpEvent::TransferStarted { name, total, .. } => {
-                        transfer_names.insert(name, total);
-                    }
-                    SftpEvent::TransferProgress { .. } => {}
-                    SftpEvent::TransferFinished { kind, name } => {
-                        let total = transfer_names.remove(&name).unwrap_or(0);
-                        transfers.push((format!("{} {name}", kind.label()), total));
-                        break Ok(RemoteSftpOutput::Completed { transfers, actions });
-                    }
-                    SftpEvent::OperationFinished { action } => {
-                        actions.push(action);
-                        break Ok(RemoteSftpOutput::Completed { transfers, actions });
-                    }
-                    SftpEvent::TransferFailed { name, error, .. } => {
-                        bail!("SFTP transfer {name} failed: {error}");
-                    }
-                    SftpEvent::TransferCancelled { name, .. } => {
-                        bail!("SFTP transfer {name} was cancelled.");
-                    }
-                    SftpEvent::NeedsOverwrite { remote, local, .. } => {
-                        bail!(
-                            "Destination already exists ({remote} or {}). Pass --overwrite or --resume explicitly.",
-                            local.display()
-                        );
-                    }
-                    SftpEvent::Error(error) => bail!("SFTP operation failed: {error}"),
-                    SftpEvent::FilesystemInfo(_) | SftpEvent::FilesystemUnavailable { .. }
-                    | SftpEvent::FileContent { .. } | SftpEvent::FileSaved { .. } => {}
-                }
-            }
+                .with_context(|| format!("SFTP batch operation {} failed", index + 1))?;
+            outputs.push(output);
+        }
+        Ok::<Vec<RemoteSftpOutput>, anyhow::Error>(outputs)
     }
     .await;
 
@@ -769,6 +744,69 @@ pub async fn run_sftp_command(
         .disconnect(Disconnect::ByApplication, "SFTP operation completed", "en")
         .await;
     result
+}
+
+async fn run_sftp_worker_command(
+    command_tx: &mpsc::Sender<SftpCommand>,
+    event_rx: &mut mpsc::Receiver<SftpEvent>,
+    command: SftpCommand,
+) -> Result<RemoteSftpOutput> {
+    let requested_path = match &command {
+        SftpCommand::List(path) => Some(path.clone()),
+        _ => None,
+    };
+    command_tx
+        .send(command)
+        .await
+        .context("The SFTP worker stopped before accepting the operation")?;
+
+    let mut transfers = Vec::new();
+    let mut transfer_names = HashMap::<String, u64>::new();
+    let mut actions = Vec::new();
+    loop {
+        let event = timeout(Duration::from_secs(300), event_rx.recv())
+            .await
+            .context("No SFTP progress was received for 5 minutes")?
+            .context("SFTP connection closed before the operation completed")?;
+        match event {
+            SftpEvent::Entries { path, entries } => {
+                if requested_path.as_deref() == Some(path.as_str()) {
+                    return Ok(RemoteSftpOutput::Listed { path, entries });
+                }
+            }
+            SftpEvent::Ready { .. } => {}
+            SftpEvent::TransferStarted { name, total, .. } => {
+                transfer_names.insert(name, total);
+            }
+            SftpEvent::TransferProgress { .. } => {}
+            SftpEvent::TransferFinished { kind, name } => {
+                let total = transfer_names.remove(&name).unwrap_or(0);
+                transfers.push((format!("{} {name}", kind.label()), total));
+                return Ok(RemoteSftpOutput::Completed { transfers, actions });
+            }
+            SftpEvent::OperationFinished { action } => {
+                actions.push(action);
+                return Ok(RemoteSftpOutput::Completed { transfers, actions });
+            }
+            SftpEvent::TransferFailed { name, error, .. } => {
+                bail!("SFTP transfer {name} failed: {error}");
+            }
+            SftpEvent::TransferCancelled { name, .. } => {
+                bail!("SFTP transfer {name} was cancelled.");
+            }
+            SftpEvent::NeedsOverwrite { remote, local, .. } => {
+                bail!(
+                    "Destination already exists ({remote} or {}). Pass --overwrite or --resume explicitly.",
+                    local.display()
+                );
+            }
+            SftpEvent::Error(error) => bail!("SFTP operation failed: {error}"),
+            SftpEvent::FilesystemInfo(_)
+            | SftpEvent::FilesystemUnavailable { .. }
+            | SftpEvent::FileContent { .. }
+            | SftpEvent::FileSaved { .. } => {}
+        }
+    }
 }
 
 /// Sanitize a remote ZMODEM filename: keep only the final path segment and
@@ -3637,8 +3675,8 @@ mod tests {
         parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
         parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
         process_termination_command, run_connection_with_known_hosts, run_remote_command,
-        run_sftp_command, sanitize_zmodem_name, service_action_command, service_logs_command,
-        valid_process_pid, valid_service_name, wait_before_reconnect,
+        run_sftp_command, run_sftp_commands, sanitize_zmodem_name, service_action_command,
+        service_logs_command, valid_process_pid, valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -5699,17 +5737,14 @@ abc	img	name"
             .unwrap(),
             RemoteSftpOutput::Completed { .. }
         ));
-        assert!(
-            run(SftpCommand::Upload {
-                local: source.clone(),
-                remote: remote_file.clone(),
-                overwrite: false,
-                resume: false,
-            })
-            .unwrap_err()
-            .to_string()
-            .contains("Pass --overwrite or --resume")
-        );
+        let overwrite_error = run(SftpCommand::Upload {
+            local: source.clone(),
+            remote: remote_file.clone(),
+            overwrite: false,
+            resume: false,
+        })
+        .unwrap_err();
+        assert!(format!("{overwrite_error:#}").contains("Pass --overwrite or --resume"));
         assert!(matches!(
             run(SftpCommand::Download {
                 remote: remote_file.clone(),
@@ -5784,7 +5819,79 @@ abc	img	name"
             RemoteSftpOutput::Completed { .. }
         ));
         assert!(matches!(
-            run(SftpCommand::RemoveDirectory(remote_root)).unwrap(),
+            run(SftpCommand::RemoveDirectory(remote_root.clone())).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+
+        drop(run);
+        let batch_root = format!("{remote_root}-batch");
+        let batch_file = format!("{batch_root}/upload.txt");
+        let batch_download = local.path().join("batch-download.txt");
+        let outputs = runtime
+            .block_on(run_sftp_commands(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::Password(Zeroizing::new(password.clone())),
+                vec![
+                    SftpCommand::CreateDirectory(batch_root.clone()),
+                    SftpCommand::Upload {
+                        local: source,
+                        remote: batch_file.clone(),
+                        overwrite: false,
+                        resume: false,
+                    },
+                    SftpCommand::List(batch_root.clone()),
+                    SftpCommand::Download {
+                        remote: batch_file.clone(),
+                        local: batch_download.clone(),
+                        overwrite: false,
+                        resume: false,
+                    },
+                    SftpCommand::RemoveFile(batch_file),
+                    SftpCommand::RemoveDirectory(batch_root),
+                ],
+                Some(known_hosts.clone()),
+            ))
+            .unwrap();
+        assert_eq!(outputs.len(), 6);
+        assert!(matches!(
+            &outputs[2],
+            RemoteSftpOutput::Listed { entries, .. }
+                if entries.iter().any(|entry| entry.name == "upload.txt")
+        ));
+        assert_eq!(
+            std::fs::read(batch_download).unwrap(),
+            b"dshell sftp cli round trip"
+        );
+
+        let failure_root = format!("{remote_root}-failure");
+        let batch_error = runtime
+            .block_on(run_sftp_commands(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::Password(Zeroizing::new(password.clone())),
+                vec![
+                    SftpCommand::CreateDirectory(failure_root.clone()),
+                    SftpCommand::CreateDirectory(failure_root.clone()),
+                    SftpCommand::CreateDirectory(format!("{failure_root}/not-run")),
+                ],
+                Some(known_hosts.clone()),
+            ))
+            .unwrap_err();
+        assert!(batch_error.to_string().contains("operation 2 failed"));
+        assert!(matches!(
+            runtime
+                .block_on(run_sftp_command(
+                    host,
+                    port,
+                    username,
+                    Authentication::Password(Zeroizing::new(password)),
+                    SftpCommand::RemoveDirectory(failure_root),
+                    Some(known_hosts),
+                ))
+                .unwrap(),
             RemoteSftpOutput::Completed { .. }
         ));
     }

@@ -11,6 +11,7 @@ use dshell::{
     sftp::SftpCommand,
     ssh::{self, Authentication, RemoteSftpOutput},
 };
+use serde::Deserialize;
 use tokio::runtime::Builder;
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -69,6 +70,10 @@ struct ConnectionArgs {
 
 #[derive(Subcommand)]
 enum SftpAction {
+    Batch {
+        #[arg(long, value_name = "JSON")]
+        file: PathBuf,
+    },
     Ls {
         #[arg(default_value = ".")]
         remote: String,
@@ -114,6 +119,70 @@ enum SftpAction {
     Rmdir {
         remote: String,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SftpBatchFile {
+    version: u8,
+    operations: Vec<SftpBatchOperation>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum SftpBatchOperation {
+    List {
+        #[serde(default = "default_remote_path")]
+        remote: String,
+    },
+    Put {
+        local: PathBuf,
+        remote: String,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        resume: bool,
+    },
+    Get {
+        remote: String,
+        local: PathBuf,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        resume: bool,
+    },
+    PutDir {
+        local: PathBuf,
+        remote: String,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        resume: bool,
+    },
+    GetDir {
+        remote: String,
+        local: PathBuf,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        resume: bool,
+    },
+    Mkdir {
+        remote: String,
+    },
+    Rm {
+        remote: String,
+    },
+    Rmdir {
+        remote: String,
+    },
+}
+
+const MAX_BATCH_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_BATCH_OPERATIONS: usize = 256;
+
+fn default_remote_path() -> String {
+    ".".to_owned()
 }
 
 fn main() -> ExitCode {
@@ -193,68 +262,177 @@ fn build_authentication(args: &ConnectionArgs) -> Result<Authentication> {
 
 fn run_sftp(args: SftpArgs) -> Result<u8> {
     let authentication = build_authentication(&args.connection)?;
-    let command = match args.action {
-        SftpAction::Ls { remote } => SftpCommand::List(remote),
-        SftpAction::Put {
-            local,
-            remote,
-            overwrite,
-            resume,
-        } => SftpCommand::Upload {
-            local,
-            remote,
-            overwrite,
-            resume,
-        },
-        SftpAction::Get {
-            remote,
-            local,
-            overwrite,
-            resume,
-        } => SftpCommand::Download {
-            remote,
-            local,
-            overwrite,
-            resume,
-        },
-        SftpAction::PutDir {
-            local,
-            remote,
-            overwrite,
-            resume,
-        } => SftpCommand::UploadDirectory {
-            local,
-            remote,
-            overwrite,
-            resume,
-        },
-        SftpAction::GetDir {
-            remote,
-            local,
-            overwrite,
-            resume,
-        } => SftpCommand::DownloadDirectory {
-            remote,
-            local,
-            overwrite,
-            resume,
-        },
-        SftpAction::Mkdir { remote } => SftpCommand::CreateDirectory(remote),
-        SftpAction::Rm { remote } => SftpCommand::RemoveFile(remote),
-        SftpAction::Rmdir { remote } => SftpCommand::RemoveDirectory(remote),
+    let commands = match args.action {
+        SftpAction::Batch { file } => load_sftp_batch(&file)?,
+        action => vec![match action {
+            SftpAction::Ls { remote } => SftpCommand::List(remote),
+            SftpAction::Put {
+                local,
+                remote,
+                overwrite,
+                resume,
+            } => SftpCommand::Upload {
+                local,
+                remote,
+                overwrite,
+                resume,
+            },
+            SftpAction::Get {
+                remote,
+                local,
+                overwrite,
+                resume,
+            } => SftpCommand::Download {
+                remote,
+                local,
+                overwrite,
+                resume,
+            },
+            SftpAction::PutDir {
+                local,
+                remote,
+                overwrite,
+                resume,
+            } => SftpCommand::UploadDirectory {
+                local,
+                remote,
+                overwrite,
+                resume,
+            },
+            SftpAction::GetDir {
+                remote,
+                local,
+                overwrite,
+                resume,
+            } => SftpCommand::DownloadDirectory {
+                remote,
+                local,
+                overwrite,
+                resume,
+            },
+            SftpAction::Mkdir { remote } => SftpCommand::CreateDirectory(remote),
+            SftpAction::Rm { remote } => SftpCommand::RemoveFile(remote),
+            SftpAction::Rmdir { remote } => SftpCommand::RemoveDirectory(remote),
+            SftpAction::Batch { .. } => unreachable!("batch file was handled above"),
+        }],
     };
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
         .context("could not start the SSH runtime")?;
-    let output = runtime.block_on(ssh::run_sftp_command(
+    let outputs = runtime.block_on(ssh::run_sftp_commands(
         args.connection.host,
         args.connection.port,
         args.connection.user,
         authentication,
-        command,
+        commands,
         args.connection.known_hosts,
     ))?;
+    for output in outputs {
+        print_sftp_output(output)?;
+    }
+    Ok(0)
+}
+
+fn load_sftp_batch(path: &std::path::Path) -> Result<Vec<SftpCommand>> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("could not inspect SFTP batch file {}", path.display()))?;
+    if metadata.len() > MAX_BATCH_FILE_BYTES {
+        bail!("SFTP batch file exceeds 1 MiB.");
+    }
+    let contents = std::fs::read(path)
+        .with_context(|| format!("could not read SFTP batch file {}", path.display()))?;
+    let document: SftpBatchFile = serde_json::from_slice(&contents)
+        .with_context(|| format!("could not parse SFTP batch file {}", path.display()))?;
+    if document.version != 1 {
+        bail!("SFTP batch version {} is not supported.", document.version);
+    }
+    if document.operations.is_empty() || document.operations.len() > MAX_BATCH_OPERATIONS {
+        bail!("SFTP batch must contain between 1 and 256 operations.");
+    }
+    document
+        .operations
+        .into_iter()
+        .enumerate()
+        .map(|(index, operation)| {
+            let command = match operation {
+                SftpBatchOperation::List { remote } => SftpCommand::List(remote),
+                SftpBatchOperation::Put {
+                    local,
+                    remote,
+                    overwrite,
+                    resume,
+                } => {
+                    validate_batch_transfer_options(overwrite, resume, index)?;
+                    SftpCommand::Upload {
+                        local,
+                        remote,
+                        overwrite,
+                        resume,
+                    }
+                }
+                SftpBatchOperation::Get {
+                    remote,
+                    local,
+                    overwrite,
+                    resume,
+                } => {
+                    validate_batch_transfer_options(overwrite, resume, index)?;
+                    SftpCommand::Download {
+                        remote,
+                        local,
+                        overwrite,
+                        resume,
+                    }
+                }
+                SftpBatchOperation::PutDir {
+                    local,
+                    remote,
+                    overwrite,
+                    resume,
+                } => {
+                    validate_batch_transfer_options(overwrite, resume, index)?;
+                    SftpCommand::UploadDirectory {
+                        local,
+                        remote,
+                        overwrite,
+                        resume,
+                    }
+                }
+                SftpBatchOperation::GetDir {
+                    remote,
+                    local,
+                    overwrite,
+                    resume,
+                } => {
+                    validate_batch_transfer_options(overwrite, resume, index)?;
+                    SftpCommand::DownloadDirectory {
+                        remote,
+                        local,
+                        overwrite,
+                        resume,
+                    }
+                }
+                SftpBatchOperation::Mkdir { remote } => SftpCommand::CreateDirectory(remote),
+                SftpBatchOperation::Rm { remote } => SftpCommand::RemoveFile(remote),
+                SftpBatchOperation::Rmdir { remote } => SftpCommand::RemoveDirectory(remote),
+            };
+            Ok(command)
+        })
+        .collect()
+}
+
+fn validate_batch_transfer_options(overwrite: bool, resume: bool, index: usize) -> Result<()> {
+    if overwrite && resume {
+        bail!(
+            "SFTP batch operation {} cannot set both overwrite and resume.",
+            index + 1
+        );
+    }
+    Ok(())
+}
+
+fn print_sftp_output(output: RemoteSftpOutput) -> Result<()> {
     match output {
         RemoteSftpOutput::Listed { path, entries } => {
             let mut stdout = std::io::stdout().lock();
@@ -281,7 +459,7 @@ fn run_sftp(args: SftpArgs) -> Result<u8> {
             stderr.flush()?;
         }
     }
-    Ok(0)
+    Ok(())
 }
 
 fn escape_terminal_controls(value: &str) -> String {
@@ -320,6 +498,7 @@ fn read_secret_stdin(label: &str) -> Result<Zeroizing<String>> {
 mod tests {
     use super::Cli;
     use clap::Parser;
+    use dshell::sftp::SftpCommand;
 
     #[test]
     fn exec_parses_authentication_and_command_after_separator() {
@@ -404,6 +583,52 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn sftp_batch_file_preserves_order_and_transfer_modes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("batch.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"operations":[{"op":"list"},{"op":"put","local":"file.bin","remote":"/tmp/file.bin","resume":true},{"op":"mkdir","remote":"/tmp/new-dir"}]}"#,
+        )
+        .unwrap();
+
+        let commands = super::load_sftp_batch(&path).unwrap();
+        assert_eq!(commands.len(), 3);
+        assert!(matches!(&commands[0], SftpCommand::List(path) if path == "."));
+        assert!(matches!(
+            &commands[1],
+            SftpCommand::Upload { remote, resume: true, overwrite: false, .. }
+                if remote == "/tmp/file.bin"
+        ));
+        assert!(matches!(
+            &commands[2],
+            SftpCommand::CreateDirectory(path) if path == "/tmp/new-dir"
+        ));
+    }
+
+    #[test]
+    fn sftp_batch_file_rejects_secrets_unknown_fields_and_oversized_batches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("batch.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"operations":[{"op":"list","remote":"/tmp","password":"secret"}]}"#,
+        )
+        .unwrap();
+        assert!(super::load_sftp_batch(&path).is_err());
+
+        let operations = std::iter::repeat_n(r#"{"op":"list"}"#, 257)
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(
+            &path,
+            format!(r#"{{"version":1,"operations":[{operations}]}}"#),
+        )
+        .unwrap();
+        assert!(super::load_sftp_batch(&path).is_err());
     }
 
     #[test]

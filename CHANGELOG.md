@@ -6,9 +6,40 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.50] - 2026-11-08
+
+Adds versioned JSON SFTP batch execution to the command-line client.
+
+### Added
+
+- Execute an ordered batch of SFTP operations in one authenticated
+  SSH/SFTP session from a version 1 JSON file.
+- Limit batch files to 1 MiB and 256 operations; reject unknown fields and
+  prevent batch files from supplying credentials.
+- Keep existing destination refusal, explicit `--overwrite`/`--resume`,
+  recursive path checks, and terminal-control escaping from `v0.1.49`.
+- Stop a batch on its first failed operation and report its one-based index;
+  earlier completed operations are not rolled back.
+
+### Verification
+
+- Verified on 2026-11-08 with `cargo fmt --all` and
+  `scripts\\verify-hard-constraints.ps1`: 267 unit tests passed and 13
+  Docker-only tests were skipped by that script.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including ordered batch
+  operations over one SFTP session and a failure test that identifies the
+  operation index without rolling back earlier completed operations.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; silent install/uninstall passed and verified
+  that both executables are installed and removed.
+- Installer `dshell-setup-v0.1.50-x64.exe` is 11,057,222 bytes. SHA-256:
+  `7DB77B99A0ACFEEF377098E72C4FB4364BA7F142F9A83A47D8992C8663465FDE`.
+- Installer and executables are unsigned. Desktop UI, installer visuals,
+  DPI, IME and glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.49] - 2026-11-08
 
-Extends the command-line SSH client with SFTP batch operations.
+Adds batch SFTP actions to the command-line client.
 
 ### Added
 
@@ -20,19 +51,13 @@ Extends the command-line SSH client with SFTP batch operations.
 
 ### Verification
 
-- Verified on 2026-11-08 with `cargo fmt --all` and
-  `scripts\\verify-hard-constraints.ps1`: 265 unit tests passed and 13
-  Docker-only tests were skipped by that script.
-- `scripts\\test-docker-ssh.ps1` passed 13/13, including CLI SFTP file
-  upload/download, recursive directory round-trip, listing, overwrite refusal,
-  and remote cleanup.
-- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
-  Setup 6.7.3 compilation passed; silent per-user install/uninstall passed
-  and verified that both executables are installed.
+- `cargo fmt --all`, the hard-constraint checks, Docker SSH 13/13, dual-binary
+  release build, CLI help, Inno Setup 6.7.3 compilation, and silent installer
+  install/uninstall passed.
 - Installer `dshell-setup-v0.1.49-x64.exe` is 11,006,630 bytes. SHA-256:
   `173729EAF75D02898873EB6A78D018C231FA48AA59351E3E93095768323C074F`.
-- Installer and executables are unsigned. Desktop UI, installer visuals,
-  DPI, IME and glyph checks remain manual work for an isolated Windows desktop.
+- Installer and executables are unsigned. GUI, installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
 
 ## [0.1.48] - 2026-11-08
 
