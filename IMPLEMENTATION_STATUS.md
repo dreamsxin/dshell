@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-09，Windows/MSVC：`v0.1.61` 扩展 CLI 和 GUI 保存主机的无认证出站代理至 SOCKS4/SOCKS4A。SOCKS4 在本机解析 IPv4 目标，SOCKS4A 将域名交由代理解析。验证：单测（126 library + 141 GUI + 13 CLI passed；14 Docker 专项 ignored）、硬约束脚本通过；Docker SSH 14/14，GUI 连接测试与 CLI SFTP 均经 SOCKS4、SOCKS4A、SOCKS5 和 HTTP CONNECT 完成握手/请求。双二进制 Release 构建、Inno Setup 6.7.3 编译和静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.61-x64.exe` 大小 11,223,900 字节，SHA-256 `5344EB55DCEF3AFD3CF8195113B0BB1A3F9E773EFCBBB80CD83981DAB52D6AD1`；应用和 CLI 未签名。GUI/安装向导、DPI、IME、字形仍需隔离 Windows 桌面人工验收；GitHub Release 由用户手工上传。
+
 `v0.1.60` 的最终安装包重建结果：11,216,984 字节，SHA-256 `B8DD171B0115B20630EB2369D10388433E7100C8D093A15AC709DCF336C11D98`（取代下方早先候选构建值）。
 
 2026-11-09，Windows/MSVC：`v0.1.60` 为 GUI 主机资料增加可选无认证 SOCKS5/HTTP CONNECT 代理。设置保存在版本化 `hosts.json` 与 profile export 中，老资料缺省直连；没有跳板时代理到目标 SSH 主机，有跳板时代理只用于本机到首个跳板的 TCP 拨号，后续 hop 走 SSH channel。连接测试和重复会话共用该设置；profile 密钥校验与 known_hosts 目标校验保持不变。验证：`cargo fmt --all`、锁定全目标检查、单测（126 library + 141 GUI + 13 CLI passed；14 Docker 专项 ignored）、硬约束脚本通过；Docker SSH 14/14，覆盖 GUI 连接 runner 的 SOCKS5 隧道和 CLI 的 SOCKS5/HTTP CONNECT。双二进制 Release 构建、Inno Setup 6.7.3 编译和静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.60-x64.exe` 大小 11,222,850 字节，SHA-256 `FB5892F98213AC7CE238CBB10A8AD3B865482CE6DA35549AE252BCD696C9353E`；应用与 CLI 未签名。GUI/安装向导、DPI、IME、字形仍需隔离 Windows 桌面人工验收；GitHub Release 由用户手工上传。

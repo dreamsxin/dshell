@@ -714,6 +714,52 @@ async fn connect_proxy_stream(
                 bail!("HTTP CONNECT proxy rejected the tunnel (status {status}).");
             }
         }
+        ProxyType::Socks4 | ProxyType::Socks4a => {
+            let mut request = Vec::with_capacity(target_host.len() + 10);
+            request.extend_from_slice(&[0x04, 0x01]);
+            request.extend_from_slice(&target_port.to_be_bytes());
+            match proxy.proxy_type {
+                ProxyType::Socks4 => {
+                    let mut addresses = tokio::net::lookup_host((target_host, target_port))
+                        .await
+                        .with_context(|| {
+                        format!("Could not resolve SOCKS4 target {target_host}")
+                    })?;
+                    let address = addresses
+                        .find_map(|address| match address.ip() {
+                            std::net::IpAddr::V4(address) => Some(address),
+                            std::net::IpAddr::V6(_) => None,
+                        })
+                        .context("SOCKS4 requires a locally resolved IPv4 target.")?;
+                    request.extend_from_slice(&address.octets());
+                    request.push(0);
+                }
+                ProxyType::Socks4a => {
+                    if target_host.is_empty()
+                        || target_host.len() > 255
+                        || target_host.bytes().any(|byte| byte.is_ascii_control())
+                    {
+                        bail!("Target host is not valid for SOCKS4A domain forwarding.");
+                    }
+                    request.extend_from_slice(&[0, 0, 0, 1, 0]);
+                    request.extend_from_slice(target_host.as_bytes());
+                    request.push(0);
+                }
+                _ => unreachable!("SOCKS4 branch requires a SOCKS4 proxy type"),
+            }
+            stream
+                .write_all(&request)
+                .await
+                .context("Could not send SOCKS4 connect request")?;
+            let mut response = [0u8; 8];
+            stream
+                .read_exact(&mut response)
+                .await
+                .context("Could not read SOCKS4 connect response")?;
+            if response[0] != 0x00 || response[1] != 0x5a {
+                bail!("SOCKS4 proxy rejected the tunnel (status {}).", response[1]);
+            }
+        }
         ProxyType::Socks5 => {
             stream
                 .write_all(&[0x05, 0x01, 0x00])
@@ -4297,6 +4343,42 @@ mod tests {
                     let request = String::from_utf8_lossy(&request);
                     request.starts_with(&format!("CONNECT {target_host}:{target_port} HTTP/1."))
                 }
+                ProxyType::Socks4 => {
+                    let mut request = [0u8; 9];
+                    if downstream.read_exact(&mut request).await.is_err() {
+                        return;
+                    }
+                    request[..2] == [0x04, 0x01]
+                        && request[2..4] == target_port.to_be_bytes()
+                        && request[4..8] == [127, 0, 0, 1]
+                        && request[8] == 0
+                }
+                ProxyType::Socks4a => {
+                    let mut request = [0u8; 9];
+                    if downstream.read_exact(&mut request).await.is_err()
+                        || request[..2] != [0x04, 0x01]
+                        || request[2..4] != target_port.to_be_bytes()
+                        || request[4..8] != [0, 0, 0, 1]
+                        || request[8] != 0
+                    {
+                        return;
+                    }
+                    let mut domain = Vec::new();
+                    let mut byte = [0u8; 1];
+                    loop {
+                        if downstream.read_exact(&mut byte).await.is_err() {
+                            return;
+                        }
+                        if byte[0] == 0 {
+                            break;
+                        }
+                        domain.push(byte[0]);
+                        if domain.len() > 255 {
+                            return;
+                        }
+                    }
+                    domain == target_host.as_bytes()
+                }
                 ProxyType::Socks5 => {
                     let mut greeting = [0u8; 3];
                     if downstream.read_exact(&mut greeting).await.is_err()
@@ -4331,6 +4413,12 @@ mod tests {
             };
             let response = match proxy_type {
                 ProxyType::HttpConnect => b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec(),
+                ProxyType::Socks4 | ProxyType::Socks4a => [
+                    &[0x00, 0x5a][..],
+                    &target_port.to_be_bytes(),
+                    &[127, 0, 0, 1],
+                ]
+                .concat(),
                 ProxyType::Socks5 => [
                     &[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1][..],
                     &target_port.to_be_bytes(),
@@ -6506,7 +6594,12 @@ abc	img	name"
             .enable_all()
             .build()
             .unwrap();
-        for proxy_type in [ProxyType::Socks5, ProxyType::HttpConnect] {
+        for proxy_type in [
+            ProxyType::Socks4,
+            ProxyType::Socks4a,
+            ProxyType::Socks5,
+            ProxyType::HttpConnect,
+        ] {
             let (proxy, proxy_task) =
                 runtime.block_on(start_test_proxy(proxy_type, host.clone(), port));
             let spec = ConnectionSpec {
@@ -6656,7 +6749,12 @@ abc	img	name"
             Some(known_hosts.clone()),
         ));
         assert!(rejected_certificate.is_err());
-        for proxy_type in [ProxyType::HttpConnect, ProxyType::Socks5] {
+        for proxy_type in [
+            ProxyType::Socks4,
+            ProxyType::Socks4a,
+            ProxyType::Socks5,
+            ProxyType::HttpConnect,
+        ] {
             let (proxy, proxy_task) =
                 runtime.block_on(start_test_proxy(proxy_type, host.clone(), port));
             let proxied_result = runtime.block_on(run_sftp_command(

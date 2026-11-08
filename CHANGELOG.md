@@ -6,6 +6,32 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.61] - 2026-11-09
+
+Adds SOCKS4 and SOCKS4A outbound proxy protocols.
+
+### Added
+
+- Add SOCKS4 and SOCKS4A choices to CLI and saved GUI host proxy settings.
+- Resolve IPv4 destinations locally for SOCKS4 and send domain names through
+  the proxy for SOCKS4A.
+- Keep SSH target host-key verification and jump-host routing unchanged.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (280 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 14/14, covering GUI and CLI sessions
+  through SOCKS4, SOCKS4A, SOCKS5 and HTTP CONNECT.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.61-x64.exe` is 11,223,900 bytes. SHA-256:
+  `5344EB55DCEF3AFD3CF8195113B0BB1A3F9E773EFCBBB80CD83981DAB52D6AD1`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.60] - 2026-11-09
 
 Adds per-host outbound proxy settings to the GUI.

@@ -38,6 +38,8 @@ Bitvise 支持经 SOCKS 和 HTTP CONNECT 代理建立出站 SSH 连接。`v0.1.5
 
 `v0.1.60` 将无认证代理扩展到 GUI 主机资料：可选直连、SOCKS5 或 HTTP CONNECT；使用跳板时，代理仅用于本机到首个跳板的 TCP 拨号，后续链路继续由 SSH jump channel 承载。代理认证不支持。
 
+`v0.1.61` 扩展 GUI 与 CLI 出站代理到 SOCKS4 和 SOCKS4A：SOCKS4 在本机解析 IPv4 目标，SOCKS4A 将域名交给代理解析；两者均不支持代理认证。
+
 ## 零、实施状态审计（2026-11-06）
 
 基于代码级 grep 审计，每个功能在 `src/` 中的实际引用计数确认了实现状态：

@@ -84,6 +84,8 @@ struct ConnectionArgs {
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum ProxyTypeArg {
     HttpConnect,
+    Socks4,
+    Socks4a,
     Socks5,
 }
 
@@ -388,10 +390,13 @@ fn build_authentication(args: &ConnectionArgs) -> Result<Authentication> {
         (Some(proxy_type), Some(host)) => {
             let proxy_type = match proxy_type {
                 ProxyTypeArg::HttpConnect => ProxyType::HttpConnect,
+                ProxyTypeArg::Socks4 => ProxyType::Socks4,
+                ProxyTypeArg::Socks4a => ProxyType::Socks4a,
                 ProxyTypeArg::Socks5 => ProxyType::Socks5,
             };
             let default_port = match proxy_type {
                 ProxyType::HttpConnect => 8080,
+                ProxyType::Socks4 | ProxyType::Socks4a => 1080,
                 ProxyType::Socks5 => 1080,
             };
             let port = args.proxy_port.unwrap_or(default_port);
@@ -885,7 +890,12 @@ mod tests {
 
     #[test]
     fn connection_parses_http_and_socks_proxy_settings() {
-        for (proxy_type, port) in [("http-connect", "8080"), ("socks5", "1088")] {
+        for (proxy_type, port) in [
+            ("http-connect", "8080"),
+            ("socks4", "1088"),
+            ("socks4a", "1088"),
+            ("socks5", "1088"),
+        ] {
             let parsed = Cli::try_parse_from([
                 "dshell-cli",
                 "exec",

@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.60`.
+`v0.1.61`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -282,13 +282,14 @@ including OTP prompts, are not supported in this command mode. The command is
 visible in local process arguments and may be logged by the remote shell; do
 not put secrets in the command text.
 
-CLI `exec` and SFTP operations can connect through an unauthenticated SOCKS5 or
-HTTP CONNECT proxy. Use `--proxy-type socks5|http-connect` and `--proxy-host`;
-the default ports are 1080 and 8080, or set `--proxy-port`. The proxy resolves
-the target hostname. Proxy authentication is not supported; SSH host-key
+CLI `exec` and SFTP operations can connect through an unauthenticated SOCKS4,
+SOCKS4A, SOCKS5 or HTTP CONNECT proxy. Use `--proxy-type socks4|socks4a|socks5|http-connect` and `--proxy-host`;
+the default ports are 1080 for SOCKS and 8080 for HTTP CONNECT, or set `--proxy-port`.
+SOCKS4 resolves IPv4 targets locally; SOCKS4A, SOCKS5 and HTTP CONNECT resolve
+the target hostname through the proxy. Proxy authentication is not supported; SSH host-key
 verification still applies to the target server.
 
-Saved GUI host profiles can also select Direct, SOCKS5 or HTTP CONNECT under
+Saved GUI host profiles can also select Direct, SOCKS4, SOCKS4A, SOCKS5 or HTTP CONNECT under
 Outbound proxy. When a jump chain is configured, the proxy carries the initial
 connection to the first jump host; the remaining hops use SSH channels.
 

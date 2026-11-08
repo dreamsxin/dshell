@@ -5597,6 +5597,7 @@ impl AppView {
         let host = self.profile_proxy_host.read(cx).value().trim().to_owned();
         let port_text = self.profile_proxy_port.read(cx).value().trim().to_owned();
         let default_port = match proxy_type {
+            ProxyType::Socks4 | ProxyType::Socks4a => 1080,
             ProxyType::Socks5 => 1080,
             ProxyType::HttpConnect => 8080,
         };
@@ -11272,6 +11273,8 @@ impl AppView {
         let mut proxy_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
         for (index, (proxy_type, label)) in [
             (None, "Direct"),
+            (Some(ProxyType::Socks4), "SOCKS4"),
+            (Some(ProxyType::Socks4a), "SOCKS4A"),
             (Some(ProxyType::Socks5), "SOCKS5"),
             (Some(ProxyType::HttpConnect), "HTTP CONNECT"),
         ]
@@ -11294,6 +11297,7 @@ impl AppView {
                     this.profile_proxy_type = proxy_type;
                     if let Some(proxy_type) = proxy_type {
                         let default_port = match proxy_type {
+                            ProxyType::Socks4 | ProxyType::Socks4a => "1080",
                             ProxyType::Socks5 => "1080",
                             ProxyType::HttpConnect => "8080",
                         };

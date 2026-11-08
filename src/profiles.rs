@@ -43,6 +43,8 @@ pub enum AuthMethod {
 #[serde(rename_all = "snake_case")]
 pub enum ProxyType {
     HttpConnect,
+    Socks4,
+    Socks4a,
     Socks5,
 }
 

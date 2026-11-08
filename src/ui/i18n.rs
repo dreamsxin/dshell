@@ -492,6 +492,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         }
         "Outbound proxy" => "出站代理",
         "Direct" => "直连",
+        "SOCKS4" => "SOCKS4",
+        "SOCKS4A" => "SOCKS4A",
         "SOCKS5" => "SOCKS5",
         "HTTP CONNECT" => "HTTP CONNECT",
         "Proxy host" => "代理主机",
