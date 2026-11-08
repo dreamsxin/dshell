@@ -6,6 +6,34 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.54] - 2026-11-09
+
+Adds remote SFTP metadata and canonical-path queries to the CLI.
+
+### Added
+
+- Add `dshell-cli sftp stat` to report remote file type, size, mode and
+  modification time.
+- Add `dshell-cli sftp realpath` to resolve a remote path through the SFTP
+  subsystem.
+- Support both read-only queries in version 1 JSON SFTP batch files.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (272 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including remote metadata,
+  canonical path resolution and missing-path failure.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.54-x64.exe` is 11,131,536 bytes. SHA-256:
+  `DA21994FAEDBCBDCE4F9F34677D64525A32E3684710D627E9CF1B21DA5619DA9`.
+- Installer and executables are unsigned.
+- GUI, installer visuals, DPI, IME and glyph checks remain manual work for an
+  isolated Windows desktop.
+
 ## [0.1.53] - 2026-11-09
 
 Adds opt-in SSH agent forwarding to GUI host profiles.

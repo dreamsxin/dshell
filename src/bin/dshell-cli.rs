@@ -99,6 +99,13 @@ enum SftpAction {
         #[arg(default_value = ".")]
         remote: String,
     },
+    Stat {
+        remote: String,
+    },
+    #[command(name = "realpath")]
+    RealPath {
+        remote: String,
+    },
     Put {
         local: PathBuf,
         remote: String,
@@ -154,6 +161,12 @@ struct SftpBatchFile {
 enum SftpBatchOperation {
     List {
         #[serde(default = "default_remote_path")]
+        remote: String,
+    },
+    Stat {
+        remote: String,
+    },
+    RealPath {
         remote: String,
     },
     Put {
@@ -326,6 +339,8 @@ fn run_sftp(args: SftpArgs) -> Result<u8> {
         }],
         action => vec![match action {
             SftpAction::Ls { remote } => SftpCommand::List(remote),
+            SftpAction::Stat { remote } => SftpCommand::Stat(remote),
+            SftpAction::RealPath { remote } => SftpCommand::RealPath(remote),
             SftpAction::Put {
                 local,
                 remote,
@@ -420,6 +435,8 @@ fn load_sftp_batch(path: &std::path::Path) -> Result<Vec<SftpCommand>> {
         .map(|(index, operation)| {
             let command = match operation {
                 SftpBatchOperation::List { remote } => SftpCommand::List(remote),
+                SftpBatchOperation::Stat { remote } => SftpCommand::Stat(remote),
+                SftpBatchOperation::RealPath { remote } => SftpCommand::RealPath(remote),
                 SftpBatchOperation::Put {
                     local,
                     remote,
@@ -537,6 +554,36 @@ fn print_sftp_output(output: RemoteSftpOutput) -> Result<()> {
                     escape_terminal_controls(&entry.name)
                 )?;
             }
+            stdout.flush()?;
+        }
+        RemoteSftpOutput::Stat(entry) => {
+            let kind = if entry.is_dir {
+                "directory"
+            } else if entry.is_symlink {
+                "symlink"
+            } else if entry.is_file {
+                "file"
+            } else {
+                "other"
+            };
+            let permissions = entry
+                .permissions
+                .map_or_else(|| "unknown".to_owned(), |mode| format!("{mode:o}"));
+            let mtime = entry
+                .mtime
+                .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
+            let mut stdout = std::io::stdout().lock();
+            writeln!(
+                stdout,
+                "path={}\ttype={kind}\tsize={}\tmode={permissions}\tmtime={mtime}",
+                escape_terminal_controls(&entry.path),
+                entry.size
+            )?;
+            stdout.flush()?;
+        }
+        RemoteSftpOutput::RealPath { resolved_path, .. } => {
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{}", escape_terminal_controls(&resolved_path))?;
             stdout.flush()?;
         }
         RemoteSftpOutput::Completed { transfers, actions } => {
@@ -658,6 +705,34 @@ mod tests {
     }
 
     #[test]
+    fn sftp_parses_read_only_path_queries() {
+        for (action, expected) in [("stat", "Stat"), ("realpath", "RealPath")] {
+            let parsed = Cli::try_parse_from([
+                "dshell-cli",
+                "sftp",
+                "--host",
+                "server.example.com",
+                "--user",
+                "operator",
+                "--agent",
+                action,
+                "/srv/app/file.txt",
+            ])
+            .unwrap();
+            let super::Command::Sftp(args) = parsed.command else {
+                panic!("expected SFTP command");
+            };
+            match (expected, args.action) {
+                ("Stat", super::SftpAction::Stat { remote })
+                | ("RealPath", super::SftpAction::RealPath { remote }) => {
+                    assert_eq!(remote, "/srv/app/file.txt");
+                }
+                _ => panic!("unexpected SFTP action"),
+            }
+        }
+    }
+
+    #[test]
     fn sftp_overwrite_and_resume_are_mutually_exclusive() {
         assert!(
             Cli::try_parse_from([
@@ -684,20 +759,28 @@ mod tests {
         let path = directory.path().join("batch.json");
         std::fs::write(
             &path,
-            r#"{"version":1,"operations":[{"op":"list"},{"op":"put","local":"file.bin","remote":"/tmp/file.bin","resume":true},{"op":"mkdir","remote":"/tmp/new-dir"}]}"#,
+            r#"{"version":1,"operations":[{"op":"list"},{"op":"stat","remote":"/tmp/file.bin"},{"op":"real_path","remote":"/tmp"},{"op":"put","local":"file.bin","remote":"/tmp/file.bin","resume":true},{"op":"mkdir","remote":"/tmp/new-dir"}]}"#,
         )
         .unwrap();
 
         let commands = super::load_sftp_batch(&path).unwrap();
-        assert_eq!(commands.len(), 3);
+        assert_eq!(commands.len(), 5);
         assert!(matches!(&commands[0], SftpCommand::List(path) if path == "."));
         assert!(matches!(
             &commands[1],
+            SftpCommand::Stat(path) if path == "/tmp/file.bin"
+        ));
+        assert!(matches!(
+            &commands[2],
+            SftpCommand::RealPath(path) if path == "/tmp"
+        ));
+        assert!(matches!(
+            &commands[3],
             SftpCommand::Upload { remote, resume: true, overwrite: false, .. }
                 if remote == "/tmp/file.bin"
         ));
         assert!(matches!(
-            &commands[2],
+            &commands[4],
             SftpCommand::CreateDirectory(path) if path == "/tmp/new-dir"
         ));
     }

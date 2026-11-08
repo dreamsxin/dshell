@@ -22,6 +22,10 @@ Bitvise 提供 `sexec` 命令行远程执行客户端。`v0.1.48` 增加原生 `
 
 `v0.1.52` 为 `dshell-cli exec` 增加显式 `--forward-agent`。默认关闭；开启后只在本次 SSH 会话接受 agent-forward channel，并通过本机 agent 协议流转发签名请求，不复制私钥文件。
 
+`v0.1.53` 为 GUI 主机资料增加可选 agent forwarding；默认关闭，仅对最终目标交互 shell 请求转发，跳板会话不启用。
+
+Bitvise 的 SFTP 命令行工作流提供远端文件属性和规范化路径查询。`v0.1.54` 为 `dshell-cli sftp` 及 JSON batch 增加 `stat` 与 `realpath`，通过 SSH SFTP subsystem 执行，不依赖远端 shell。
+
 ## 零、实施状态审计（2026-11-06）
 
 基于代码级 grep 审计，每个功能在 `src/` 中的实际引用计数确认了实现状态：

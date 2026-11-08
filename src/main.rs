@@ -12763,7 +12763,10 @@ impl AppView {
                         let _ = sftp_tx.try_send(SftpCommand::List(path));
                     }
                 }
-                SftpEvent::FileContent { .. } | SftpEvent::FileSaved { .. } => {}
+                SftpEvent::FileContent { .. }
+                | SftpEvent::FileSaved { .. }
+                | SftpEvent::Stat { .. }
+                | SftpEvent::RealPath { .. } => {}
             }
         }
         if let Some(path) = remembered_remote_path {

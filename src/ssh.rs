@@ -115,6 +115,11 @@ pub enum RemoteSftpOutput {
         path: String,
         entries: Vec<sftp::RemoteEntry>,
     },
+    Stat(sftp::RemoteEntry),
+    RealPath {
+        requested_path: String,
+        resolved_path: String,
+    },
     Completed {
         transfers: Vec<(String, u64)>,
         actions: Vec<String>,
@@ -983,6 +988,9 @@ async fn run_remote_download_glob(
     .await?
     {
         RemoteSftpOutput::Listed { entries, .. } => entries,
+        RemoteSftpOutput::Stat(_) | RemoteSftpOutput::RealPath { .. } => {
+            bail!("Remote glob listing returned an unexpected result.")
+        }
         RemoteSftpOutput::Completed { .. } => bail!("Remote glob listing returned no entries."),
     };
     let mut matches = entries
@@ -1038,6 +1046,14 @@ async fn run_sftp_worker_command(
         SftpCommand::List(path) => Some(path.clone()),
         _ => None,
     };
+    let expected_stat_path = match &command {
+        SftpCommand::Stat(path) => Some(path.clone()),
+        _ => None,
+    };
+    let expected_real_path = match &command {
+        SftpCommand::RealPath(path) => Some(path.clone()),
+        _ => None,
+    };
     command_tx
         .send(command)
         .await
@@ -1056,6 +1072,20 @@ async fn run_sftp_worker_command(
                 if requested_path.as_deref() == Some(path.as_str()) {
                     return Ok(RemoteSftpOutput::Listed { path, entries });
                 }
+            }
+            SftpEvent::Stat { entry }
+                if expected_stat_path.as_deref() == Some(entry.path.as_str()) =>
+            {
+                return Ok(RemoteSftpOutput::Stat(entry));
+            }
+            SftpEvent::RealPath {
+                requested_path,
+                resolved_path,
+            } if expected_real_path.as_deref() == Some(requested_path.as_str()) => {
+                return Ok(RemoteSftpOutput::RealPath {
+                    requested_path,
+                    resolved_path,
+                });
             }
             SftpEvent::Ready { .. } => {}
             SftpEvent::TransferStarted { name, total, .. } => {
@@ -1087,7 +1117,9 @@ async fn run_sftp_worker_command(
             SftpEvent::FilesystemInfo(_)
             | SftpEvent::FilesystemUnavailable { .. }
             | SftpEvent::FileContent { .. }
-            | SftpEvent::FileSaved { .. } => {}
+            | SftpEvent::FileSaved { .. }
+            | SftpEvent::Stat { .. }
+            | SftpEvent::RealPath { .. } => {}
         }
     }
 }
@@ -6144,6 +6176,17 @@ abc	img	name"
             .unwrap(),
             RemoteSftpOutput::Completed { .. }
         ));
+        assert!(matches!(
+            run(SftpCommand::Stat(remote_file.clone())).unwrap(),
+            RemoteSftpOutput::Stat(entry)
+                if entry.is_file && entry.size == b"dshell sftp cli round trip".len() as u64
+        ));
+        assert!(matches!(
+            run(SftpCommand::RealPath(remote_file.clone())).unwrap(),
+            RemoteSftpOutput::RealPath { resolved_path, .. }
+                if resolved_path.ends_with("/upload.txt")
+        ));
+        assert!(run(SftpCommand::Stat(format!("{remote_root}/missing"))).is_err());
         let overwrite_error = run(SftpCommand::Upload {
             local: source.clone(),
             remote: remote_file.clone(),

@@ -118,6 +118,8 @@ pub struct RemoteFilesystemInfo {
 #[derive(Clone, Debug)]
 pub enum SftpCommand {
     List(String),
+    Stat(String),
+    RealPath(String),
     Upload {
         local: PathBuf,
         remote: String,
@@ -183,6 +185,13 @@ pub enum SftpEvent {
     Entries {
         path: String,
         entries: Vec<RemoteEntry>,
+    },
+    Stat {
+        entry: RemoteEntry,
+    },
+    RealPath {
+        requested_path: String,
+        resolved_path: String,
     },
     FilesystemInfo(RemoteFilesystemInfo),
     FilesystemUnavailable {
@@ -266,6 +275,52 @@ pub async fn run<S>(
     while let Some(command) = commands.recv().await {
         match command {
             SftpCommand::List(path) => list(&session, &path, &events).await,
+            SftpCommand::Stat(path) => match session.metadata(path.clone()).await {
+                Ok(metadata) => {
+                    let name = path
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or("/")
+                        .to_owned();
+                    let file_type = metadata.file_type();
+                    let entry = RemoteEntry {
+                        name,
+                        path: path.clone(),
+                        is_dir: file_type.is_dir(),
+                        is_file: file_type.is_file(),
+                        is_symlink: file_type.is_symlink(),
+                        size: metadata.size.unwrap_or(0),
+                        permissions: metadata.permissions,
+                        atime: metadata.atime,
+                        mtime: metadata.mtime,
+                    };
+                    let _ = events.send(SftpEvent::Stat { entry }).await;
+                }
+                Err(error) => {
+                    let _ = events
+                        .send(SftpEvent::Error(format!("Could not stat {path}: {error}")))
+                        .await;
+                }
+            },
+            SftpCommand::RealPath(path) => match session.canonicalize(path.clone()).await {
+                Ok(resolved_path) => {
+                    let _ = events
+                        .send(SftpEvent::RealPath {
+                            requested_path: path,
+                            resolved_path,
+                        })
+                        .await;
+                }
+                Err(error) => {
+                    let _ = events
+                        .send(SftpEvent::Error(format!(
+                            "Could not resolve remote path {path}: {error}"
+                        )))
+                        .await;
+                }
+            },
             SftpCommand::Upload {
                 local,
                 remote,
