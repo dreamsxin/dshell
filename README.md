@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.45`.
+`v0.1.46`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -236,7 +236,10 @@ Local forwards listen on this machine and connect through the SSH server;
 remote forwards listen on the server and connect back to a target reachable from
 this machine; Dynamic exposes a SOCKS5 proxy whose clients choose the target.
 Listen port `0` asks the operating system or SSH server to choose a port. Each
-rule shows its active connection count and can be stopped independently.
+rule shows its active connection count and the current peer-to-target details
+in the Tunnels panel and session inspector. Details are removed when the SSH
+channel closes and are not saved as connection history. Rules can be stopped
+independently.
 Forwarding rules added for a saved host are stored in that host profile and
 started automatically the next time it connects.
 

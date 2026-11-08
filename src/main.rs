@@ -14356,6 +14356,7 @@ impl AppView {
                         spec: spec.clone(),
                         bound_port,
                         connections: 0,
+                        active_connections: Vec::new(),
                     },
                 ));
                 session.forwards.message = if spec.kind == ForwardKind::Dynamic {
@@ -14416,6 +14417,7 @@ impl AppView {
             }
             ForwardEvent::ConnectionOpened {
                 id: rule_id,
+                connection_id,
                 peer,
                 target,
             } => {
@@ -14425,18 +14427,22 @@ impl AppView {
                     .iter_mut()
                     .find(|(existing, _)| *existing == rule_id)
                 {
-                    rule.connections = rule.connections.saturating_add(1);
+                    rule.connection_opened(connection_id, peer.clone(), target.clone());
                 }
                 session.forwards.message = format!("Tunnel {peer} -> {target} opened.");
             }
-            ForwardEvent::ConnectionClosed { id: rule_id, peer } => {
+            ForwardEvent::ConnectionClosed {
+                id: rule_id,
+                connection_id,
+                peer,
+            } => {
                 if let Some((_, rule)) = session
                     .forwards
                     .rules
                     .iter_mut()
                     .find(|(existing, _)| *existing == rule_id)
                 {
-                    rule.connections = rule.connections.saturating_sub(1);
+                    rule.connection_closed(connection_id);
                 }
                 session.forwards.message = format!("Tunnel {peer} closed.");
             }
@@ -14792,7 +14798,7 @@ impl AppView {
                     connection_word,
                 )
             };
-            rule_list = rule_list.child(
+            let mut rule_item = div().flex().flex_col().gap(px(ui_tokens::SPACE_1)).child(
                 div()
                     .flex()
                     .items_center()
@@ -14806,6 +14812,16 @@ impl AppView {
                             })),
                     ),
             );
+            for connection in &rule.active_connections {
+                rule_item = rule_item.child(
+                    div()
+                        .pl(px(ui_tokens::SPACE_2))
+                        .text_size(px(ui_tokens::FONT_CAPTION))
+                        .text_color(tokens.text_secondary)
+                        .child(format!("{} -> {}", connection.peer, connection.target)),
+                );
+            }
+            rule_list = rule_list.child(rule_item);
         }
 
         div()
@@ -23599,60 +23615,70 @@ impl AppView {
                     } else {
                         "SOCKS5".to_owned()
                     };
-                    group = group.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .p(px(ui_tokens::SPACE_2))
-                            .rounded(px(ui_tokens::RADIUS_CONTROL))
-                            .bg(tokens.surface)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap(px(ui_tokens::SPACE_2))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_size(px(ui_tokens::FONT_CAPTION))
-                                            .text_color(tokens.text_primary)
-                                            .child(format!(
-                                                "{} {}:{}",
-                                                self.tr(rule.spec.kind.label()),
-                                                rule.spec.listen_host,
-                                                rule.bound_port
-                                            )),
+                    let mut rule_card = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .p(px(ui_tokens::SPACE_2))
+                        .rounded(px(ui_tokens::RADIUS_CONTROL))
+                        .bg(tokens.surface)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(ui_tokens::SPACE_2))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_size(px(ui_tokens::FONT_CAPTION))
+                                        .text_color(tokens.text_primary)
+                                        .child(format!(
+                                            "{} {}:{}",
+                                            self.tr(rule.spec.kind.label()),
+                                            rule.spec.listen_host,
+                                            rule.bound_port
+                                        )),
+                                )
+                                .child(
+                                    components::icon_button(
+                                        tokens,
+                                        ("inspector-stop-forward", rule_id),
+                                        IconName::Close,
+                                        ButtonKind::Ghost,
+                                        ButtonSize::Small,
+                                        self.tr("Stop rule"),
                                     )
-                                    .child(
-                                        components::icon_button(
-                                            tokens,
-                                            ("inspector-stop-forward", rule_id),
-                                            IconName::Close,
-                                            ButtonKind::Ghost,
-                                            ButtonSize::Small,
-                                            self.tr("Stop rule"),
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.remove_forward_rule(session_id, rule_id, cx);
-                                            }),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .text_size(px(ui_tokens::FONT_CAPTION))
-                                    .text_color(tokens.text_secondary)
-                                    .child(target)
-                                    .child(format!("{} {}", rule.connections, self.tr("active"))),
-                            ),
-                    );
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.remove_forward_rule(session_id, rule_id, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
+                                .child(target)
+                                .child(format!("{} {}", rule.connections, self.tr("active"))),
+                        );
+                    for connection in &rule.active_connections {
+                        rule_card = rule_card.child(
+                            div()
+                                .pl(px(ui_tokens::SPACE_2))
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_size(px(ui_tokens::FONT_CAPTION))
+                                .text_color(tokens.text_secondary)
+                                .child(format!("{} -> {}", connection.peer, connection.target)),
+                        );
+                    }
+                    group = group.child(rule_card);
                 }
                 for (index, spec) in stopped_rules.iter().enumerate() {
                     let target = if spec.kind.needs_target() {

@@ -1,9 +1,18 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
+
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_connection_id() -> u64 {
+    NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -54,6 +63,35 @@ pub struct ForwardRuleUiState {
     pub spec: ForwardRuleSpec,
     pub bound_port: u16,
     pub connections: u32,
+    pub active_connections: Vec<ForwardConnectionUiState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForwardConnectionUiState {
+    pub id: u64,
+    pub peer: String,
+    pub target: String,
+}
+
+impl ForwardRuleUiState {
+    pub fn connection_opened(&mut self, id: u64, peer: String, target: String) {
+        if self
+            .active_connections
+            .iter()
+            .any(|connection| connection.id == id)
+        {
+            return;
+        }
+        self.active_connections
+            .push(ForwardConnectionUiState { id, peer, target });
+        self.connections = self.active_connections.len().min(u32::MAX as usize) as u32;
+    }
+
+    pub fn connection_closed(&mut self, id: u64) {
+        self.active_connections
+            .retain(|connection| connection.id != id);
+        self.connections = self.active_connections.len().min(u32::MAX as usize) as u32;
+    }
 }
 
 #[derive(Debug)]
@@ -82,11 +120,13 @@ pub enum ForwardEvent {
     },
     ConnectionOpened {
         id: u64,
+        connection_id: u64,
         peer: String,
         target: String,
     },
     ConnectionClosed {
         id: u64,
+        connection_id: u64,
         peer: String,
     },
 }
@@ -286,7 +326,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ForwardKind, socks5_handshake};
+    use super::{ForwardKind, ForwardRuleSpec, ForwardRuleUiState, socks5_handshake};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[tokio::test]
@@ -329,5 +369,49 @@ mod tests {
         assert!(ForwardKind::Remote.needs_target());
         assert!(!ForwardKind::Dynamic.needs_target());
         assert_eq!(ForwardKind::default(), ForwardKind::Local);
+    }
+
+    #[test]
+    fn active_connections_are_tracked_by_unique_id() {
+        let mut rule = ForwardRuleUiState {
+            spec: ForwardRuleSpec {
+                kind: ForwardKind::Local,
+                listen_host: "127.0.0.1".to_owned(),
+                listen_port: 0,
+                target_host: "db.internal".to_owned(),
+                target_port: 5432,
+            },
+            bound_port: 5432,
+            connections: 0,
+            active_connections: Vec::new(),
+        };
+
+        rule.connection_opened(
+            7,
+            "127.0.0.1:50000".to_owned(),
+            "db.internal:5432".to_owned(),
+        );
+        rule.connection_opened(
+            8,
+            "127.0.0.1:50001".to_owned(),
+            "db.internal:5432".to_owned(),
+        );
+        rule.connection_opened(
+            8,
+            "127.0.0.1:50001".to_owned(),
+            "db.internal:5432".to_owned(),
+        );
+        assert_eq!(rule.connections, 2);
+        assert_eq!(rule.active_connections.len(), 2);
+
+        rule.connection_closed(7);
+        assert_eq!(rule.connections, 1);
+        assert_eq!(rule.active_connections[0].id, 8);
+
+        rule.connection_closed(99);
+        assert_eq!(rule.connections, 1);
+        rule.connection_closed(8);
+        assert_eq!(rule.connections, 0);
+        assert!(rule.active_connections.is_empty());
     }
 }

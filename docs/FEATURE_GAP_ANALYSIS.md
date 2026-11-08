@@ -6,6 +6,8 @@
 
 Bitvise 官方产品介绍将 Remote Desktop over SSH 列为集成能力。dshell 的 `v0.1.45` 增加 Windows 端等价工作流：从 Tunnels 面板设置 SSH 主机可达的 RDP host/port，使用 loopback-only 临时本地转发后启动 `mstsc.exe`；临时规则不写入主机资料，SSH session 生命周期负责清理。该功能不实现新的 RDP 协议栈，也不接管 Windows RDP 证书提示。参考：[Bitvise SSH Client](https://bitvise.com/ssh-client)。
 
+`v0.1.46` 补充活动转发连接详情：Tunnels 面板与会话检查器逐连接展示 peer 和目标地址，通道关闭时按唯一连接 ID 移除对应项目。该可观测性适用于本地、远程和 SOCKS5 转发，不持久化客户端地址或连接历史。
+
 后续 Bitvise 对标继续分批评估 SFTP Drive 映射、CLI 工具和配置兼容性；每项先核对本地原生实现和凭据安全边界，再选可闭环功能，不把产品菜单清单直接复制为承诺。
 
 ## 零、实施状态审计（2026-11-06）

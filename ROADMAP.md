@@ -20,7 +20,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统托盘沿用同一终端标记。
 
-首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.45` 继续使用 Inno Setup per-user 安装。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
+首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.46` 继续使用 Inno Setup per-user 安装。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
 
 界面语言支持 English 与简体中文，语言选择随外观设置持久化；主机资料、认证模板和布局反馈也会跟随语言切换，远端终端输出保持原样，避免把命令结果或 TUI 内容误翻译。
 
@@ -128,7 +128,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 **目标**：满足通过堡垒机访问目标主机，以及访问远端开发/管理服务的需求。
 
-**实施进度**：单层跳板机和本地/远程/动态 SOCKS5 端口转发已交付。目标 SSH 握手通过跳板会话的 `direct-tcpip` channel 建立，跳板和目标分别执行 known_hosts 校验与认证；跳板凭据只在当前运行的 Zeroizing 缓存中复用。Tunnels 面板支持自动分配端口、活动连接计数和停止规则，规则写入主机资料并在连接后自动启动；主机资料还支持 keep-alive 间隔。尚未实现 UNIX socket 转发、离线规则编辑和独立活动连接详情。
+**实施进度**：单层跳板机和本地/远程/动态 SOCKS5 端口转发已交付。目标 SSH 握手通过跳板会话的 `direct-tcpip` channel 建立，跳板和目标分别执行 known_hosts 校验与认证；跳板凭据只在当前运行的 Zeroizing 缓存中复用。Tunnels 面板支持自动分配端口、活动连接计数、逐连接 peer/目标详情和停止规则，规则写入主机资料并在连接后自动启动；主机资料还支持 keep-alive 间隔。尚未实现 UNIX socket 转发和离线规则编辑。
 
 **验收条件**：跳板和目标主机分别验证主机密钥，不因代理路径绕过检查；监听端口冲突和远端拒绝有明确错误；停止会话或转发会清理监听器与转发通道；集成测试覆盖正常转发及失败清理。
 
@@ -247,6 +247,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 40. `v0.1.44` 首个 Windows 安装包候选已冻结：Inno Setup 6.7.3 per-user 安装脚本、品牌图标、静默安装/卸载 smoke test 与 SHA-256 清单已生成；单测 256 项、Docker SSH 11/11。安装包未签名，向导 GUI/DPI/IME 手工验收和 Authenticode 签名仍是公开发布前检查项，详见 `docs/INSTALLER_PLAN.md`。
 
 41. `v0.1.45` Bitvise 对标增量：Windows Tunnels 面板支持 Remote Desktop over SSH。用户指定从 SSH 主机可达的 RDP 地址；dshell 只在本机 loopback 临时监听，转发规则标记为临时、不写入主机配置，成功绑定后调用 `mstsc.exe`，会话断开时清理。RDP 证书提示由 Windows mstsc 管理。Docker 集成测试复用随机本地转发端口，将 RDP 目标端口 3389 的回显探针通过真实 SSH channel 往返。
+42. `v0.1.46` 增加活动转发连接可观测性：Tunnels 与会话检查器列出当前 peer 和目标地址；每条转发通道使用唯一连接 ID，关闭事件精确移除条目并同步活动数量。本机客户端连接信息仅驻留当前会话内存。
 
 ## SSH 参考资料
 

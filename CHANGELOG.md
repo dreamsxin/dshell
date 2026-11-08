@@ -6,6 +6,32 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.46] - 2026-11-08
+
+Adds per-connection visibility to active SSH forwarding rules.
+
+### Added
+
+- Show each active tunnel's connected peer and destination in both the Tunnels
+  panel and the session inspector. Connection entries are removed by unique
+  channel ID when the forwarded channel closes, including when peers reuse the
+  same local address.
+
+### Verification
+
+- Verified on 2026-11-08 with `cargo fmt --all` and
+  `scripts\\verify-hard-constraints.ps1`: 258 unit tests passed and 11
+  Docker-only tests were skipped by that script.
+- `scripts\\test-docker-ssh.ps1` passed 11/11, including a real SSH tunnel
+  echo test that verifies matching connection IDs on channel open and close.
+- `cargo build --release --locked --bin dshell` and Inno Setup 6.7.3
+  compilation passed; `scripts\\test-installer.ps1` passed silent per-user
+  installation and uninstall.
+- Installer `dshell-setup-v0.1.46-x64.exe` is 9,119,811 bytes. SHA-256:
+  `BE0FED80C26A39D20144D27D541BB3A2E9FDC907B8DB8509E2D32BFE0FB4205F`.
+- Installer and executable are unsigned. Tunnel detail UI, installer visuals,
+  DPI, IME and glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.45] - 2026-11-08
 
 Adds Windows Remote Desktop over the active SSH tunnel, following the Bitvise

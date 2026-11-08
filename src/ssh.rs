@@ -412,9 +412,11 @@ impl Handler for KnownHostsHandler {
             let mut remote = channel.into_stream();
             match tokio::net::TcpStream::connect((target.host.as_str(), target.port)).await {
                 Ok(mut local) => {
+                    let connection_id = forward::next_connection_id();
                     if let Some(events) = &events {
                         let _ = events.send(ForwardEvent::ConnectionOpened {
                             id: target.rule_id,
+                            connection_id,
                             peer: peer.clone(),
                             target: format!("{}:{}", target.host, target.port),
                         });
@@ -423,6 +425,7 @@ impl Handler for KnownHostsHandler {
                     if let Some(events) = events {
                         let _ = events.send(ForwardEvent::ConnectionClosed {
                             id: target.rule_id,
+                            connection_id: connection_id,
                             peer,
                         });
                     }
@@ -1427,8 +1430,10 @@ async fn run_connection_attempt_with_known_hosts(
                             if socks5 {
                                 let _ = forward::socks5_accept(&mut stream).await;
                             }
+                            let connection_id = forward::next_connection_id();
                             let _ = forward_events.send(ForwardEvent::ConnectionOpened {
                                 id: rule_id,
+                                connection_id,
                                 peer: peer.to_string(),
                                 target: format!("{target_host}:{target_port}"),
                             });
@@ -1440,6 +1445,7 @@ async fn run_connection_attempt_with_known_hosts(
                                     tokio::io::copy_bidirectional(&mut stream, &mut remote).await;
                                 let _ = events.send(ForwardEvent::ConnectionClosed {
                                     id: rule_id,
+                                    connection_id,
                                     peer: peer_label,
                                 });
                             });
@@ -6066,6 +6072,15 @@ abc	img	name"
                     .await
                     .context("timed out exercising the Remote Desktop tunnel")??;
                     assert_eq!(echoed_probe, rdp_probe);
+                    remote_desktop_tunnel.shutdown().await?;
+                    let connection_id =
+                        next_forward_opened(&mut forward_event_rx, remote_desktop_id).await?;
+                    next_forward_closed(
+                        &mut forward_event_rx,
+                        remote_desktop_id,
+                        connection_id,
+                    )
+                    .await?;
                     forward_command_tx
                         .send(ForwardCommand::Remove(remote_desktop_id))
                         .await?;
@@ -6144,7 +6159,6 @@ abc	img	name"
                         payload.contains("DSHELL_REMOTE_TUNNEL"),
                         "remote forwarding delivered unexpected payload: {payload:?}"
                     );
-                    next_forward_opened(&mut forward_event_rx, remote_id).await?;
                     forward_command_tx
                         .send(ForwardCommand::Remove(remote_id))
                         .await?;
@@ -6215,10 +6229,28 @@ abc	img	name"
     async fn next_forward_opened(
         events: &mut mpsc::UnboundedReceiver<ForwardEvent>,
         rule_id: u64,
+    ) -> Result<u64> {
+        loop {
+            let event = forward_event_timeout(events).await?;
+            if let ForwardEvent::ConnectionOpened {
+                id, connection_id, ..
+            } = event
+                && id == rule_id
+            {
+                return Ok(connection_id);
+            }
+        }
+    }
+
+    async fn next_forward_closed(
+        events: &mut mpsc::UnboundedReceiver<ForwardEvent>,
+        rule_id: u64,
+        connection_id: u64,
     ) -> Result<()> {
         loop {
             let event = forward_event_timeout(events).await?;
-            if matches!(event, ForwardEvent::ConnectionOpened { id, .. } if id == rule_id) {
+            if matches!(event, ForwardEvent::ConnectionClosed { id, connection_id: closed_id, .. } if id == rule_id && closed_id == connection_id)
+            {
                 return Ok(());
             }
         }
