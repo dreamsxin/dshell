@@ -10,6 +10,8 @@ Initial target: x64 Windows on MSVC. Keep the installer native and install the a
 
 Use Inno Setup for the first installer. The current product is a single native desktop application and needs a compact setup flow, per-user installation, Start Menu shortcuts, upgrade handling, and uninstall behavior. Inno Setup provides a script-controlled Windows Setup executable, configurable wizard appearance and icons, shortcuts, and uninstall support.
 
+Before adopting it, review the current Inno Setup license against the project's distribution and commercial-use context. Its official site identifies it as open source and also requests a commercial license for commercial users.
+
 Keep MSIX as a later option for Microsoft Store or managed enterprise distribution. MSIX offers package identity and clean package lifecycle behavior, but it requires a valid trusted package signature; the signing and publisher identity are not currently configured. Do not build both formats for the first installer milestone.
 
 ## Icon and Visual Treatment
