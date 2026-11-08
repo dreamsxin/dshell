@@ -20,6 +20,8 @@ Bitvise 提供 `sexec` 命令行远程执行客户端。`v0.1.48` 增加原生 `
 
 `v0.1.51` 在 CLI 和 batch file 中增加本地/远端最终路径段通配符传输。父目录保持 literal，匹配 symlink 和 special files 会跳过；通配符结果按名称排序后稳定执行。
 
+`v0.1.52` 为 `dshell-cli exec` 增加显式 `--forward-agent`。默认关闭；开启后只在本次 SSH 会话接受 agent-forward channel，并通过本机 agent 协议流转发签名请求，不复制私钥文件。
+
 ## 零、实施状态审计（2026-11-06）
 
 基于代码级 grep 审计，每个功能在 `src/` 中的实际引用计数确认了实现状态：

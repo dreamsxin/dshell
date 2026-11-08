@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.51`.
+`v0.1.52`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -263,6 +263,7 @@ The installer includes `dshell-cli.exe` for non-interactive remote commands:
 
 ```powershell
 dshell-cli exec --host server.example.com --user operator --agent -- "uname -a"
+dshell-cli exec --host server.example.com --user operator --agent --forward-agent -- "ssh-add -L"
 ```
 
 Choose exactly one authentication method: `--agent`, `--identity-file PATH`,
@@ -274,6 +275,13 @@ returns the remote exit status. Interactive keyboard-interactive prompts,
 including OTP prompts, are not supported in this command mode. The command is
 visible in local process arguments and may be logged by the remote shell; do
 not put secrets in the command text.
+
+Agent forwarding is off by default. Add `--forward-agent` only when the remote
+command needs the local agent, such as running `git` against another SSH host.
+The remote host can request signatures from identities available through the
+local agent for the duration of the SSH session; private key files are not
+copied to the remote host. Only enable this for hosts and remote accounts you
+trust with agent signing access.
 
 The CLI also supports batch SFTP operations:
 

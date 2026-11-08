@@ -6,6 +6,39 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.52] - 2026-11-09
+
+Adds opt-in SSH agent forwarding for command-line remote execution.
+
+### Added
+
+- Add `--forward-agent` to `dshell-cli exec`. Agent forwarding stays off unless
+  explicitly enabled and is limited to the command's SSH session.
+- Proxy agent protocol channels to the existing local OpenSSH agent or Pageant;
+  private key material is not copied to the remote host.
+- Refuse forwarded agent channels unless the CLI option was explicitly set.
+
+### Security Note
+
+An enabled remote account can request signatures from identities available in
+the local agent. Use `--forward-agent` only with trusted remote hosts/accounts.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all` and
+  `scripts\\verify-hard-constraints.ps1`: 270 unit tests passed and 13
+  Docker-only tests were skipped by that script.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including agent forwarding
+  disabled by default, available only when explicitly enabled, and protocol
+  frames relayed unchanged.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation/uninstall and verified both executables are handled.
+- Installer `dshell-setup-v0.1.52-x64.exe` is 11,123,186 bytes. SHA-256:
+  `2099E274F13D0DCBEF7E85AB7DA2EACF62A702C720373E08C401D5416714E476`.
+- Installer and executables are unsigned. Desktop UI, installer visuals,
+  DPI, IME and glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.51] - 2026-11-09
 
 Adds final-segment wildcard matching to CLI SFTP transfers.

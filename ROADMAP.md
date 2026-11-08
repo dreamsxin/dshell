@@ -20,7 +20,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统托盘沿用同一终端标记。
 
-首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.51` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
+首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.52` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
 
 界面语言支持 English 与简体中文，语言选择随外观设置持久化；主机资料、认证模板和布局反馈也会跟随语言切换，远端终端输出保持原样，避免把命令结果或 TUI 内容误翻译。
 
@@ -56,6 +56,7 @@ Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统�
 | 脚本/自动化 | VB/JScript/Python 与登录脚本 | 有限；主机资料可选保存最多 16 条单行命令，仅首次交互式 shell 建立后在可见终端执行；导入的资料默认关闭自动运行 | Expect/Send 提示匹配、任意脚本引擎 |
 | 本地 Shell | 有 | 无 | 后续评估 |
 | 命令行远程执行 | `sexec` | `dshell-cli exec`；复用主机密钥校验与现有认证 | 交互式 keyboard-interactive/OTP |
+| SSH Agent Forwarding | 有 | `dshell-cli exec --forward-agent`，默认关闭并仅限该会话 | GUI 会话属性开关 |
 | CLI 批处理 SFTP | `sftpc` | `dshell-cli sftp`；列表、文件/目录传输、续传、显式覆盖、单会话 JSON 批处理、最终路径段 glob | 父目录 glob、条件/变量脚本 |
 | 协议范围 | SSH/Telnet/Rlogin/Serial/RDP | SSH（含 SFTP、转发） | 不计划扩展非 SSH 协议 |
 | 凭据安全 | 主密码保护 | 严格 known_hosts；秘密仅在 Zeroizing 运行时缓存，绝不写入资料或导出；加载旧资料时清理遗留凭据字段 | 系统密钥环集成 |
@@ -255,6 +256,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 45. `v0.1.49` 扩展 `dshell-cli sftp`：支持 ls、put/get、put-dir/get-dir、mkdir、rm、rmdir；复用桌面传输 worker，覆盖需显式选择，支持续传并保留递归路径安全限制。
 46. `v0.1.50` 增加版本化 JSON SFTP batch file：最多 1 MiB、256 个操作，单一已认证 SSH/SFTP 会话中顺序执行，拒绝未知字段且不接受凭据字段。通配符匹配与条件/变量脚本仍未实现。
 47. `v0.1.51` 为 `dshell-cli sftp` 与 JSON batch 增加 `put-glob`/`get-glob`，支持最终路径段 `*`、`?`、`[class]` 匹配，父目录保持 literal，匹配项排序执行并过滤 symlink/special files。
+48. `v0.1.52` 为 CLI exec 增加显式 agent forwarding 请求：仅当传入 `--forward-agent` 才请求服务器打开 agent channel，并将协议流桥接到本机 agent；未授权 channel 明确拒绝。
 
 ## SSH 参考资料
 

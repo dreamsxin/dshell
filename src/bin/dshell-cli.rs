@@ -36,6 +36,11 @@ enum Command {
 struct ExecArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
+    #[arg(
+        long,
+        help = "Temporarily expose the local SSH agent to the remote command"
+    )]
+    forward_agent: bool,
     #[arg(last = true, required = true)]
     command: OsString,
 }
@@ -252,6 +257,7 @@ fn run_exec(args: ExecArgs) -> Result<u8> {
         authentication,
         command,
         args.connection.known_hosts,
+        args.forward_agent,
     ))?;
 
     let mut stdout = std::io::stdout().lock();
@@ -595,6 +601,7 @@ mod tests {
             "--user",
             "operator",
             "--agent",
+            "--forward-agent",
             "--",
             "uname -a",
         ])
@@ -605,6 +612,7 @@ mod tests {
         assert_eq!(args.connection.host, "server.example.com");
         assert_eq!(args.connection.user, "operator");
         assert!(args.connection.agent);
+        assert!(args.forward_agent);
         assert_eq!(args.command, "uname -a");
     }
 

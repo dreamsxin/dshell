@@ -339,6 +339,7 @@ struct KnownHostsHandler {
     path: PathBuf,
     remote_forwards: RemoteTargetMap,
     remote_socket_forwards: RemoteSocketTargetMap,
+    agent_forward_allowed: bool,
     forward_events: Option<mpsc::UnboundedSender<ForwardEvent>>,
     events: Option<mpsc::Sender<UiEvent>>,
 }
@@ -525,6 +526,48 @@ impl Handler for KnownHostsHandler {
         });
         Ok(())
     }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        if !self.agent_forward_allowed {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
+        let agent = match timeout(Duration::from_secs(5), connect_agent()).await {
+            Ok(Ok(agent)) => agent,
+            Ok(Err(_error)) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+            Err(_) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+        };
+        let mut agent_stream = agent.into_inner();
+        reply.accept().await;
+        tokio::spawn(async move {
+            let forwarded = channel.into_stream();
+            let _ = relay_agent_stream(forwarded, agent_stream).await;
+        });
+        Ok(())
+    }
+}
+
+async fn relay_agent_stream<C, A>(mut forwarded: C, mut agent: A) -> Result<(u64, u64)>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::io::copy_bidirectional(&mut forwarded, &mut agent)
+        .await
+        .context("SSH agent forwarding channel closed with an I/O error")
 }
 
 fn default_known_hosts_path() -> Result<PathBuf> {
@@ -540,6 +583,7 @@ async fn connect_command_session(
     username: String,
     authentication: Authentication,
     known_hosts_path: Option<PathBuf>,
+    agent_forward_allowed: bool,
 ) -> Result<client::Handle<KnownHostsHandler>> {
     if host.trim().is_empty() || username.trim().is_empty() || port == 0 {
         bail!("A host, username, and valid port are required.");
@@ -559,6 +603,7 @@ async fn connect_command_session(
         path: known_hosts_path.unwrap_or(default_known_hosts_path()?),
         remote_forwards: Arc::new(Mutex::new(HashMap::new())),
         remote_socket_forwards: Arc::new(Mutex::new(HashMap::new())),
+        agent_forward_allowed,
         forward_events: None,
         events: None,
     };
@@ -587,17 +632,39 @@ pub async fn run_remote_command(
     authentication: Authentication,
     command: String,
     known_hosts_path: Option<PathBuf>,
+    agent_forward_allowed: bool,
 ) -> Result<RemoteCommandOutput> {
     if command.is_empty() {
         bail!("A remote command is required.");
     }
-    let session =
-        connect_command_session(host, port, username, authentication, known_hosts_path).await?;
+    let session = connect_command_session(
+        host,
+        port,
+        username,
+        authentication,
+        known_hosts_path,
+        agent_forward_allowed,
+    )
+    .await?;
 
     let mut channel = session
         .channel_open_session()
         .await
         .context("Could not open an SSH command channel")?;
+    if agent_forward_allowed {
+        channel
+            .agent_forward(true)
+            .await
+            .context("Could not request SSH agent forwarding")?;
+        match timeout(Duration::from_secs(5), channel.wait())
+            .await
+            .context("Timed out waiting for SSH agent forwarding confirmation")?
+        {
+            Some(ChannelMsg::Success) => {}
+            Some(ChannelMsg::Failure) => bail!("The SSH server denied agent forwarding."),
+            _ => bail!("The SSH server returned an invalid agent forwarding response."),
+        }
+    }
     channel
         .exec(true, command)
         .await
@@ -679,8 +746,15 @@ pub async fn run_sftp_commands(
     if commands.is_empty() {
         bail!("At least one SFTP operation is required.");
     }
-    let mut session =
-        connect_command_session(host, port, username, authentication, known_hosts_path).await?;
+    let mut session = connect_command_session(
+        host,
+        port,
+        username,
+        authentication,
+        known_hosts_path,
+        false,
+    )
+    .await?;
     let channel = timeout(Duration::from_secs(15), async {
         let channel = session.channel_open_session().await?;
         channel.request_subsystem(true, "sftp").await?;
@@ -1470,6 +1544,7 @@ async fn run_connection_attempt_with_known_hosts(
                     path: known_hosts_path.clone(),
                     remote_forwards: Arc::new(Mutex::new(HashMap::new())),
                     remote_socket_forwards: Arc::new(Mutex::new(HashMap::new())),
+                    agent_forward_allowed: false,
                     forward_events: None,
                     events: None,
                 };
@@ -1509,6 +1584,7 @@ async fn run_connection_attempt_with_known_hosts(
                 path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
                 remote_socket_forwards: Arc::clone(&remote_socket_targets),
+                agent_forward_allowed: false,
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
@@ -1530,6 +1606,7 @@ async fn run_connection_attempt_with_known_hosts(
                 path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
                 remote_socket_forwards: Arc::clone(&remote_socket_targets),
+                agent_forward_allowed: false,
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
@@ -3882,9 +3959,10 @@ mod tests {
         parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
         parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
         parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
-        process_termination_command, run_connection_with_known_hosts, run_remote_command,
-        run_sftp_command, run_sftp_commands, sanitize_zmodem_name, service_action_command,
-        service_logs_command, valid_process_pid, valid_service_name, wait_before_reconnect,
+        process_termination_command, relay_agent_stream, run_connection_with_known_hosts,
+        run_remote_command, run_sftp_command, run_sftp_commands, sanitize_zmodem_name,
+        service_action_command, service_logs_command, valid_process_pid, valid_service_name,
+        wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -3902,12 +3980,63 @@ mod tests {
         time::Duration,
     };
     use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        io::{AsyncReadExt as _, AsyncWriteExt as _, duplex},
         net::{TcpListener, TcpStream},
         sync::{mpsc, watch},
         time::timeout,
     };
     use zeroize::Zeroizing;
+
+    #[tokio::test]
+    async fn forwarded_agent_channel_relays_agent_protocol_bytes() {
+        let (mut remote, forwarded) = duplex(64);
+        let (agent, mut agent_side) = duplex(64);
+        let relay = tokio::spawn(relay_agent_stream(forwarded, agent));
+        let request = [0u8, 0, 0, 1, 11];
+        let response = [0u8, 0, 0, 1, 12];
+        let remote_task = async {
+            remote.write_all(&request).await.unwrap();
+            let mut response_buffer = [0u8; 5];
+            remote.read_exact(&mut response_buffer).await.unwrap();
+            assert_eq!(response_buffer, response);
+            remote.shutdown().await.unwrap();
+        };
+        let agent_task = async {
+            let mut request_buffer = [0u8; 5];
+            agent_side.read_exact(&mut request_buffer).await.unwrap();
+            assert_eq!(request_buffer, request);
+            agent_side.write_all(&response).await.unwrap();
+            agent_side.shutdown().await.unwrap();
+        };
+        tokio::join!(remote_task, agent_task);
+        relay.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn forwarded_agent_channel_relays_protocol_frames_unchanged() {
+        let (mut remote, forwarded) = duplex(64);
+        let (agent, mut agent_server) = duplex(64);
+        let relay = tokio::spawn(relay_agent_stream(forwarded, agent));
+        let request = [0, 0, 0, 1, 11];
+        let response = [0, 0, 0, 1, 12];
+
+        let remote_task = async {
+            remote.write_all(&request).await.unwrap();
+            let mut received = [0; 5];
+            remote.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, response);
+            remote.shutdown().await.unwrap();
+        };
+        let agent_task = async {
+            let mut received = [0; 5];
+            agent_server.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, request);
+            agent_server.write_all(&response).await.unwrap();
+            agent_server.shutdown().await.unwrap();
+        };
+        tokio::join!(remote_task, agent_task);
+        relay.await.unwrap().unwrap();
+    }
 
     #[test]
     fn reconnect_retries_only_transport_failures() {
@@ -4879,11 +5008,48 @@ abc	img	name"
                 Authentication::Password(Zeroizing::new(password)),
                 "printf 'DSHELL_STDOUT'; printf 'DSHELL_STDERR' >&2; exit 7".to_owned(),
                 Some(known_hosts),
+                false,
             ))
             .unwrap();
         assert_eq!(output.stdout, b"DSHELL_STDOUT");
         assert_eq!(output.stderr, b"DSHELL_STDERR");
         assert_eq!(output.exit_status, Some(7));
+
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").unwrap();
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        let username = env::var("DSHELL_DOCKER_SSH_USER").unwrap();
+        let password = env::var("DSHELL_DOCKER_SSH_PASSWORD").unwrap();
+        let known_hosts = PathBuf::from(env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS").unwrap());
+        let agent_disabled = runtime
+            .block_on(run_remote_command(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::Password(Zeroizing::new(password.clone())),
+                "test -z \"${SSH_AUTH_SOCK:-}\" && printf DSHELL_AGENT_FORWARD_DISABLED".to_owned(),
+                Some(known_hosts.clone()),
+                false,
+            ))
+            .unwrap();
+        assert_eq!(agent_disabled.exit_status, Some(0));
+        assert_eq!(agent_disabled.stdout, b"DSHELL_AGENT_FORWARD_DISABLED");
+
+        let agent_enabled = runtime
+            .block_on(run_remote_command(
+                host,
+                port,
+                username,
+                Authentication::Password(Zeroizing::new(password)),
+                "test -n \"${SSH_AUTH_SOCK:-}\" && printf DSHELL_AGENT_FORWARD_ENABLED".to_owned(),
+                Some(known_hosts),
+                true,
+            ))
+            .unwrap();
+        assert_eq!(agent_enabled.exit_status, Some(0));
+        assert_eq!(agent_enabled.stdout, b"DSHELL_AGENT_FORWARD_ENABLED");
 
         let unknown_hosts = env::temp_dir().join(format!(
             "dshell-cli-empty-known-hosts-{}.txt",
@@ -4902,6 +5068,7 @@ abc	img	name"
             )),
             "printf should-not-run".to_owned(),
             Some(unknown_hosts.clone()),
+            false,
         ));
         let _ = std::fs::remove_file(unknown_hosts);
         assert!(rejected.is_err(), "unknown host keys must fail closed");
@@ -6031,6 +6198,7 @@ abc	img	name"
                 Authentication::Password(Zeroizing::new(password.clone())),
                 format!("ln -s glob-a.dat '{symlink_path}'"),
                 Some(known_hosts.clone()),
+                false,
             ))
             .unwrap();
         let glob_download_dir = local.path().join("glob-downloads");
