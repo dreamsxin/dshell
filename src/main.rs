@@ -5546,7 +5546,11 @@ impl AppView {
         cx.notify();
     }
 
-    fn activate_recent_connection(
+    /// Connect to a recent target: focus the live session when one exists,
+    /// reuse a matching saved profile when possible, otherwise fill the
+    /// form from the entry and run the normal connect flow (which asks for
+    /// credentials when they are not cached).
+    fn connect_recent_entry(
         &mut self,
         entry: &RecentConnection,
         window: &mut Window,
@@ -5555,9 +5559,45 @@ impl AppView {
         if let Some(id) = self.session_for_target(&entry.host, entry.port, &entry.username) {
             self.session_editor_open = false;
             self.select_session(id, window, cx);
-        } else {
-            self.load_recent(entry, window, cx);
+            return;
         }
+        if let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| {
+                profile.host.eq_ignore_ascii_case(&entry.host)
+                    && profile.port == entry.port
+                    && profile.username == entry.username
+            })
+            .cloned()
+        {
+            self.connect_saved_profile(&profile, window, cx);
+            return;
+        }
+        let draft = HostProfile {
+            name: entry.name.clone(),
+            host: entry.host.clone(),
+            port: entry.port,
+            username: entry.username.clone(),
+            tab_label: String::new(),
+            tab_color: TabColor::Default,
+            terminal_theme: None,
+            group: String::new(),
+            favorite: false,
+            auth_method: AuthMethod::Password,
+            identity_file: String::new(),
+            proxy_jump: String::new(),
+            forwards: Vec::new(),
+            keepalive_seconds: 0,
+            reconnect: ReconnectSettings::default(),
+            login_commands: LoginCommandSettings::default(),
+            notes: String::new(),
+            password: String::new(),
+            passphrase: String::new(),
+            jump_password: String::new(),
+            jump_passphrase: String::new(),
+        };
+        self.start_saved_profile_connection(&draft, None, window, cx);
     }
 
     fn connect_saved_profile(
@@ -12295,40 +12335,72 @@ impl AppView {
         entry: &RecentConnection,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected_entry = entry.clone();
+        let connect_entry = entry.clone();
         let row_entry = entry.clone();
-        let actions = components::icon_button(
+        let form_entry = entry.clone();
+        let live_session = self.session_for_target(&entry.host, entry.port, &entry.username);
+        let primary = components::icon_button(
             tokens,
             ("recent-host-action", index),
-            IconName::ArrowRight,
+            if live_session.is_some() {
+                IconName::SquareTerminal
+            } else {
+                IconName::ArrowRight
+            },
             ButtonKind::Ghost,
             ButtonSize::Small,
-            self.tr("Load into the connection form"),
+            if live_session.is_some() {
+                self.tr("Show session")
+            } else {
+                self.tr("Connect to host")
+            },
         )
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
-            this.load_recent(&selected_entry, window, cx);
+            this.connect_recent_entry(&connect_entry, window, cx);
         }));
-        components::SidebarRow::new(
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(primary)
+            .child(
+                components::icon_button(
+                    tokens,
+                    ("recent-host-form", index),
+                    IconName::Settings2,
+                    ButtonKind::Ghost,
+                    ButtonSize::Small,
+                    self.tr("Load into the connection form"),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.load_recent(&form_entry, window, cx);
+                })),
+            );
+        let mut row = components::SidebarRow::new(
             tokens,
             ("recent-host", index),
             entry.name.clone(),
             format!("{}@{}:{}", entry.username, entry.host, entry.port),
         )
         .icon(host_icon(&entry.host))
-        .actions(actions)
-        .into_row()
-        .on_click(
-            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                // Keep recent rows consistent with host rows: only a double
-                // click activates the entry.
-                if event.click_count() >= 2 {
-                    cx.stop_propagation();
-                    this.activate_recent_connection(&row_entry, window, cx);
-                }
-            }),
-        )
-        .into_any_element()
+        .actions(actions);
+        if live_session.is_some() {
+            row = row.status(self.tokens().success);
+        }
+        row.into_row()
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    // Keep recent rows consistent with host rows: only a
+                    // double click connects (or focuses the live session).
+                    if event.click_count() >= 2 {
+                        cx.stop_propagation();
+                        this.connect_recent_entry(&row_entry, window, cx);
+                    }
+                }),
+            )
+            .into_any_element()
     }
 
     fn apply_sftp_event(&mut self, id: u64, event: SftpEvent, cx: &mut Context<Self>) -> bool {

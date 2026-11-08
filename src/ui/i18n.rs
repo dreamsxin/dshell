@@ -541,6 +541,7 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Delete" => "删除",
         "Edit host" => "编辑主机",
         "Connect to host" => "连接主机",
+        "Show session" => "显示会话",
         "Remove favorite" => "取消收藏",
         "Add favorite" => "加入收藏",
         "Load into the connection form" => "载入连接表单",
