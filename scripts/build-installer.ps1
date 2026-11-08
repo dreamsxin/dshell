@@ -18,7 +18,7 @@ if ($null -eq $compilerCommand) {
 
 Push-Location $repoRoot
 try {
-    cargo build --release --locked --bin dshell
+    cargo build --release --locked --bin dshell --bin dshell-cli
     if ($LASTEXITCODE -ne 0) {
         throw "Cargo release build failed."
     }
@@ -28,7 +28,7 @@ try {
         throw "Inno Setup compilation failed."
     }
 
-    $installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.47-x64.exe"
+    $installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.48-x64.exe"
     if (-not (Test-Path -LiteralPath $installerPath)) {
         throw "The expected installer output was not created: $installerPath"
     }

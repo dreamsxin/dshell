@@ -6,6 +6,34 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.48] - 2026-11-08
+
+Adds a native command-line SSH client for non-interactive remote commands.
+
+### Added
+
+- Add `dshell-cli exec` with SSH agent, private-key, and stdin password
+  authentication; forward stdout/stderr and preserve the remote exit status.
+- Reuse the desktop client's strict `known_hosts` verification. Bound
+  connection time, command time, and combined output size.
+- Install `dshell-cli.exe` beside the Windows desktop application.
+
+### Verification
+
+- Verified on 2026-11-08 with `cargo fmt --all` and
+  `scripts\\verify-hard-constraints.ps1`: 262 unit tests passed and 12
+  Docker-only tests were skipped by that script.
+- `scripts\\test-docker-ssh.ps1` passed 12/12, including remote command
+  stdout/stderr separation, exit status 7, and rejection with an empty
+  `known_hosts` file.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; silent per-user install/uninstall passed
+  and verified that both executables are installed.
+- Installer `dshell-setup-v0.1.48-x64.exe` is 10,777,950 bytes. SHA-256:
+  `23F87A41ABC2D000B1B51DE759190CD95DC8E0C9E4AA3152A71052C8398AC867`.
+- Installer and executables are unsigned. Desktop UI, installer visuals,
+  DPI, IME and glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.47] - 2026-11-08
 
 Adds server-side Unix domain socket forwarding over SSH.

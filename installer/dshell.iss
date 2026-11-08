@@ -1,5 +1,5 @@
 #define AppName "dshell"
-#define AppVersion "0.1.47"
+#define AppVersion "0.1.48"
 #define AppExeName "dshell.exe"
 
 [Setup]
@@ -26,7 +26,7 @@ Compression=lzma2
 SolidCompression=yes
 CloseApplications=yes
 RestartApplications=no
-VersionInfoVersion=0.1.47.0
+VersionInfoVersion=0.1.48.0
 VersionInfoProductVersion={#AppVersion}
 VersionInfoProductName=dshell
 
@@ -35,6 +35,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "..\target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\dshell-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\dshell"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\{#AppExeName}"

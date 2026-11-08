@@ -101,6 +101,15 @@ pub struct ConnectionInfo {
     pub host_key_fingerprint: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteCommandOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_status: Option<u32>,
+}
+
+const MAX_REMOTE_COMMAND_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerMetrics {
     pub os: String,
@@ -511,6 +520,104 @@ fn default_known_hosts_path() -> Result<PathBuf> {
         .or_else(|| env::var_os("HOME"))
         .context("could not determine the current user's home directory")?;
     Ok(PathBuf::from(home).join(".ssh").join("known_hosts"))
+}
+
+pub async fn run_remote_command(
+    host: String,
+    port: u16,
+    username: String,
+    authentication: Authentication,
+    command: String,
+    known_hosts_path: Option<PathBuf>,
+) -> Result<RemoteCommandOutput> {
+    if host.trim().is_empty() || username.trim().is_empty() || port == 0 || command.is_empty() {
+        bail!("A host, username, valid port, and command are required.");
+    }
+    if matches!(
+        authentication,
+        Authentication::KeyboardInteractive {
+            interactive: true,
+            ..
+        }
+    ) {
+        bail!("Interactive keyboard prompts are not supported by command execution.");
+    }
+    let known_hosts_path = known_hosts_path.unwrap_or(default_known_hosts_path()?);
+    let handler = KnownHostsHandler {
+        host: host.clone(),
+        port,
+        path: known_hosts_path,
+        remote_forwards: Arc::new(Mutex::new(HashMap::new())),
+        remote_socket_forwards: Arc::new(Mutex::new(HashMap::new())),
+        forward_events: None,
+        events: None,
+    };
+    let config = Arc::new(client::Config::default());
+    let mut session = timeout(
+        Duration::from_secs(20),
+        client::connect(config, (host.as_str(), port), handler),
+    )
+    .await
+    .context("Timed out during the SSH handshake")?
+    .with_context(|| format!("SSH handshake to {host}:{port} failed"))?;
+    let (events, _event_rx) = mpsc::channel(1);
+    timeout(
+        Duration::from_secs(30),
+        authenticate(&mut session, &username, authentication, &events),
+    )
+    .await
+    .context("Timed out during SSH authentication")??;
+
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .context("Could not open an SSH command channel")?;
+    channel
+        .exec(true, command)
+        .await
+        .context("The SSH server rejected the remote command request")?;
+
+    let output = timeout(Duration::from_secs(120), async {
+        let mut output = RemoteCommandOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_status: None,
+        };
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => {
+                    if output.stdout.len() + output.stderr.len() + data.len()
+                        > MAX_REMOTE_COMMAND_OUTPUT_BYTES
+                    {
+                        bail!("The remote command output exceeded 16 MiB.");
+                    }
+                    output.stdout.extend_from_slice(&data);
+                }
+                ChannelMsg::ExtendedData { data, .. } => {
+                    if output.stdout.len() + output.stderr.len() + data.len()
+                        > MAX_REMOTE_COMMAND_OUTPUT_BYTES
+                    {
+                        bail!("The remote command output exceeded 16 MiB.");
+                    }
+                    output.stderr.extend_from_slice(&data);
+                }
+                ChannelMsg::ExitStatus { exit_status } => {
+                    output.exit_status = Some(exit_status);
+                }
+                ChannelMsg::Eof => {}
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        Ok::<RemoteCommandOutput, anyhow::Error>(output)
+    })
+    .await
+    .context("The remote command timed out after 120 seconds")??;
+
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "command completed", "en")
+        .await;
+    Ok(output)
 }
 
 /// Sanitize a remote ZMODEM filename: keep only the final path segment and
@@ -3378,9 +3485,9 @@ mod tests {
         parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
         parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
         parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
-        process_termination_command, run_connection_with_known_hosts, sanitize_zmodem_name,
-        service_action_command, service_logs_command, valid_process_pid, valid_service_name,
-        wait_before_reconnect,
+        process_termination_command, run_connection_with_known_hosts, run_remote_command,
+        sanitize_zmodem_name, service_action_command, service_logs_command, valid_process_pid,
+        valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -4346,6 +4453,61 @@ abc	img	name"
                 Ok::<(), anyhow::Error>(())
             })
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_remote_command_preserves_streams_and_exit_status() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = runtime
+            .block_on(run_remote_command(
+                host,
+                port,
+                username,
+                Authentication::Password(Zeroizing::new(password)),
+                "printf 'DSHELL_STDOUT'; printf 'DSHELL_STDERR' >&2; exit 7".to_owned(),
+                Some(known_hosts),
+            ))
+            .unwrap();
+        assert_eq!(output.stdout, b"DSHELL_STDOUT");
+        assert_eq!(output.stderr, b"DSHELL_STDERR");
+        assert_eq!(output.exit_status, Some(7));
+
+        let unknown_hosts = env::temp_dir().join(format!(
+            "dshell-cli-empty-known-hosts-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&unknown_hosts, "").unwrap();
+        let rejected = runtime.block_on(run_remote_command(
+            env::var("DSHELL_DOCKER_SSH_HOST").unwrap(),
+            env::var("DSHELL_DOCKER_SSH_PORT")
+                .unwrap()
+                .parse::<u16>()
+                .unwrap(),
+            env::var("DSHELL_DOCKER_SSH_USER").unwrap(),
+            Authentication::Password(Zeroizing::new(
+                env::var("DSHELL_DOCKER_SSH_PASSWORD").unwrap(),
+            )),
+            "printf should-not-run".to_owned(),
+            Some(unknown_hosts.clone()),
+        ));
+        let _ = std::fs::remove_file(unknown_hosts);
+        assert!(rejected.is_err(), "unknown host keys must fail closed");
     }
 
     #[test]

@@ -1,24 +1,17 @@
 mod auth_profiles;
-mod forward;
-mod groups;
-mod inline_image;
-mod keygen;
-mod log;
 mod openssh_config;
-mod profiles;
 mod restore;
 mod settings;
-mod sftp;
 mod shortcuts;
 mod snippets;
-mod ssh;
-mod terminal;
 mod terminal_compare;
-mod totp;
 mod tray;
 mod triggers;
 mod ui;
-mod zmodem;
+
+pub use dshell::{
+    forward, groups, inline_image, keygen, log, profiles, sftp, ssh, terminal, totp, zmodem,
+};
 
 use std::{
     cell::RefCell,

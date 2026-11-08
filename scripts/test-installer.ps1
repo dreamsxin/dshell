@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.47-x64.exe"
+$installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.48-x64.exe"
 if (-not (Test-Path -LiteralPath $installerPath)) {
     throw "Build the installer before running this smoke test: $installerPath"
 }
@@ -27,6 +27,10 @@ try {
     $installedExe = Join-Path $installRoot "dshell.exe"
     if (-not (Test-Path -LiteralPath $installedExe)) {
         throw "The installer did not place dshell.exe at the selected destination."
+    }
+    $installedCli = Join-Path $installRoot "dshell-cli.exe"
+    if (-not (Test-Path -LiteralPath $installedCli)) {
+        throw "The installer did not place dshell-cli.exe at the selected destination."
     }
 
     $uninstaller = Join-Path $installRoot "unins000.exe"

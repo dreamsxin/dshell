@@ -127,9 +127,7 @@ pub struct TerminalPalette {
     pub ansi: [u32; 16],
 }
 
-#[cfg(test)]
 pub const CELL_WIDTH_PX: f32 = 8.0;
-#[cfg(test)]
 pub const CELL_HEIGHT_PX: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
