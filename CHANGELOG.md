@@ -6,6 +6,34 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.58] - 2026-11-09
+
+Extends OpenSSH user certificate authentication to saved GUI identities.
+
+### Added
+
+- Automatically discover the OpenSSH user certificate `<identity>-cert.pub`
+  beside a saved GUI identity file.
+- Keep ordinary public-key authentication when no adjacent certificate exists;
+  fail closed when a discovered certificate cannot be loaded or is rejected.
+- Retain explicit `--certificate PATH` support in CLI `exec` and SFTP commands.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (277 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including explicit CLI
+  certificate auth, adjacent certificate discovery, and wrong-principal
+  rejection.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.58-x64.exe` is 11,207,480 bytes. SHA-256:
+  `30265C2F9F201CA54BF2A5A60CEDB4C1E14B23C5DC46590BCB4C9D8F014861C6`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.57] - 2026-11-09
 
 Adds OpenSSH user certificate authentication to the CLI.

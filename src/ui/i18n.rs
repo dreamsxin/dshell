@@ -487,6 +487,9 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "The remote host can request signatures from your local agent. Use only with trusted hosts." => {
             "远端主机可请求本地 agent 签名。仅对可信主机启用。"
         }
+        "If a matching -cert.pub file is next to the identity, dshell uses it as an OpenSSH user certificate." => {
+            "若身份文件旁存在匹配的 -cert.pub 文件，dshell 会将其用作 OpenSSH 用户证书。"
+        }
         "Retry interval (seconds)" => "重试间隔（秒）",
         "Maximum attempts" => "最大重试次数",
         "Run commands after login" => "登录后运行命令",
@@ -1179,6 +1182,13 @@ mod tests {
     fn simplified_chinese_translates_shell_labels_and_preserves_names() {
         assert_eq!(translate(Language::SimplifiedChinese, "Settings"), "设置");
         assert_eq!(translate(Language::SimplifiedChinese, "Generate"), "生成");
+        assert_eq!(
+            translate(
+                Language::SimplifiedChinese,
+                "If a matching -cert.pub file is next to the identity, dshell uses it as an OpenSSH user certificate."
+            ),
+            "若身份文件旁存在匹配的 -cert.pub 文件，dshell 会将其用作 OpenSSH 用户证书。"
+        );
         assert_eq!(
             translate(Language::SimplifiedChinese, "Start sessions in this group"),
             "启动此分组中的会话"

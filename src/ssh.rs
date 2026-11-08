@@ -3801,17 +3801,34 @@ async fn authenticate(
                 )
             })?;
             drop(passphrase);
-            let hash_alg = match session.best_supported_rsa_hash().await {
-                Ok(inner) => inner.flatten(),
-                Err(_) => None,
+            let mut certificate_path = identity_file.as_os_str().to_os_string();
+            certificate_path.push("-cert.pub");
+            let certificate_path = PathBuf::from(certificate_path);
+            let auth = if certificate_path.is_file() {
+                let certificate =
+                    load_openssh_certificate(&certificate_path).with_context(|| {
+                        format!(
+                            "Could not load OpenSSH user certificate {}",
+                            certificate_path.display()
+                        )
+                    })?;
+                session
+                    .authenticate_openssh_cert(username.to_owned(), Arc::new(key), certificate)
+                    .await
+                    .context("SSH public key certificate authentication failed")?
+            } else {
+                let hash_alg = match session.best_supported_rsa_hash().await {
+                    Ok(inner) => inner.flatten(),
+                    Err(_) => None,
+                };
+                session
+                    .authenticate_publickey(
+                        username.to_owned(),
+                        PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
+                    )
+                    .await
+                    .context("SSH public key authentication failed")?
             };
-            let auth = session
-                .authenticate_publickey(
-                    username.to_owned(),
-                    PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
-                )
-                .await
-                .context("SSH public key authentication failed")?;
             if !matches!(auth, AuthResult::Success) {
                 bail!("SSH public key authentication was rejected");
             }
@@ -6248,6 +6265,29 @@ abc	img	name"
             .unwrap();
         assert!(matches!(
             certificate_listing,
+            RemoteSftpOutput::Listed { path, .. } if path == remote_root
+        ));
+        let discovered_certificate_listing = runtime
+            .block_on(run_sftp_command(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::PublicKey {
+                    identity_file: PathBuf::from(
+                        env::var_os("DSHELL_DOCKER_SSH_IDENTITY")
+                            .expect("test identity path is not configured"),
+                    ),
+                    passphrase: Zeroizing::new(
+                        env::var("DSHELL_DOCKER_SSH_KEY_PASSPHRASE")
+                            .expect("test key passphrase is not configured"),
+                    ),
+                },
+                SftpCommand::List(remote_root.clone()),
+                Some(known_hosts.clone()),
+            ))
+            .unwrap();
+        assert!(matches!(
+            discovered_certificate_listing,
             RemoteSftpOutput::Listed { path, .. } if path == remote_root
         ));
         let rejected_certificate = runtime.block_on(run_sftp_command(

@@ -7,8 +7,9 @@ $containerName = "dshell-ssh-test-$([Guid]::NewGuid().ToString('N'))"
 $knownHostsPath = Join-Path $env:TEMP "$containerName-known_hosts"
 $identityPath = Join-Path $env:TEMP "$containerName-id_ed25519"
 $certificateAuthorityPath = Join-Path $env:TEMP "$containerName-user-ca"
-$userCertificatePath = "$identityPath-valid-cert.pub"
-$invalidUserCertificatePath = "$identityPath-cert.pub"
+$userCertificatePath = "$identityPath-cert.pub"
+$stagedUserCertificatePath = "$identityPath-staged-cert.pub"
+$invalidUserCertificatePath = "$identityPath-wrong-cert.pub"
 $keyPassphrase = "dshell-test-passphrase-$([Guid]::NewGuid().ToString('N'))"
 $passwordBytes = New-Object byte[] 24
 $random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -109,14 +110,16 @@ try {
     }
 
     ssh-keygen -q -s $certificateAuthorityPath -P $keyPassphrase -I "dshell-test-cert" -n "dshelltest" -V "-5m:+1h" "$identityPath.pub"
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $invalidUserCertificatePath)) {
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $userCertificatePath)) {
         throw "Could not sign the temporary OpenSSH user certificate."
     }
-    Move-Item -LiteralPath $invalidUserCertificatePath -Destination $userCertificatePath
+    Move-Item -LiteralPath $userCertificatePath -Destination $stagedUserCertificatePath
     ssh-keygen -q -s $certificateAuthorityPath -P $keyPassphrase -I "dshell-test-wrong-principal" -n "not-dshelltest" -V "-5m:+1h" "$identityPath.pub"
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $invalidUserCertificatePath)) {
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $userCertificatePath)) {
         throw "Could not sign the negative-test OpenSSH user certificate."
     }
+    Move-Item -LiteralPath $userCertificatePath -Destination $invalidUserCertificatePath
+    Move-Item -LiteralPath $stagedUserCertificatePath -Destination $userCertificatePath
     $env:DSHELL_DOCKER_SSH_HOST = "127.0.0.1"
     $env:DSHELL_DOCKER_SSH_PORT = "$port"
     $env:DSHELL_DOCKER_SSH_USER = "dshelltest"
@@ -147,6 +150,7 @@ finally {
     Remove-Item -LiteralPath $identityPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$identityPath.pub" -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $userCertificatePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stagedUserCertificatePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $invalidUserCertificatePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $certificateAuthorityPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$certificateAuthorityPath.pub" -Force -ErrorAction SilentlyContinue

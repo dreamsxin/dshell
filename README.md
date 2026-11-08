@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.57`.
+`v0.1.58`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -92,7 +92,9 @@ Run `cargo run --locked`, enter the host, port, user, and credentials in the
 connection bar, then connect. Authentication supports a password, an OpenSSH
 private key file (with an optional passphrase), keyboard-interactive
 authentication, or the system SSH agent (Windows OpenSSH named pipe or Pageant;
-`SSH_AUTH_SOCK` on Unix). A plain password prompt in keyboard-interactive mode
+`SSH_AUTH_SOCK` on Unix). When a matching `<identity>-cert.pub` file is next to
+an identity, the GUI uses it as an OpenSSH user certificate; the CLI also
+accepts an explicit `--certificate PATH`. A plain password prompt in keyboard-interactive mode
 uses the password field; one-time-password or other extra prompts open a masked
 dialog that sends responses only to the SSH server. Clicking a saved host row or
 its connect icon opens a credential-only dialog when no credential is cached in

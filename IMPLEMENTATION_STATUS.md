@@ -2,7 +2,11 @@
 
 ## 当前切片
 
-2026-11-09，Windows/MSVC：Bitvise/OpenSSH 用户证书 CLI 认证对标 `v0.1.57` 已完成实现。`dshell-cli exec` 与 SFTP 子命令接受显式 `--certificate`，要求同时提供匹配 `--identity-file`；解密口令仍从 stdin 读取并用 Zeroizing 管理，证书只从指定路径加载，strict known_hosts 逻辑未改变。验证：`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked`（124 library + 141 GUI + 12 CLI passed；13 Docker 专项 ignored）、硬约束脚本全部通过；Docker SSH 13/13，覆盖 CA 签发且 principal 匹配的认证成功及 principal 错误的拒绝。双二进制 Release 构建、Inno Setup 6.7.3 编译和静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.57-x64.exe` 大小 11,216,065 字节，SHA-256 `DC3B97F236B5C839A60DB1398F085BE23427EAF291B957958A231E20FAC804CE`；应用和 CLI 未签名。GUI/安装向导、DPI、IME、字形仍需隔离 Windows 桌面人工验收。当前用户证书配置通过 CLI 提供，GUI 主机资料尚不支持保存证书路径；GitHub Release 由用户手工上传安装包与校验文件。
+2026-11-09，Windows/MSVC：`v0.1.57` 为 `dshell-cli exec` 与 SFTP 子命令增加显式 OpenSSH 用户证书认证，必须同时指定匹配的 `--identity-file` 与 `--certificate`；私钥口令由 stdin 读取，known_hosts 严格校验不变。验证覆盖 CA 签名证书成功和错误 principal 拒绝；安装包与哈希记录见 `CHANGELOG.md`。
+
+2026-11-09，Windows/MSVC：`v0.1.58` 补齐 GUI OpenSSH 用户证书认证。保存身份文件后，若同目录存在 `<identity>-cert.pub`，GUI 自动使用此证书；不存在时走普通公钥认证，存在但无法解析或服务器拒绝时失败关闭，不新增 profile schema 字段。验证：`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked`（124 library + 141 GUI + 12 CLI passed）、硬约束脚本通过；Docker SSH 13/13，覆盖显式 CLI 证书认证、GUI 风格相邻证书发现和错误 principal 拒绝。双二进制 Release 构建、Inno Setup 6.7.3 编译、静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.58-x64.exe` 大小 11,207,480 字节，SHA-256 `30265C2F9F201CA54BF2A5A60CEDB4C1E14B23C5DC46590BCB4C9D8F014861C6`；应用和 CLI 未签名。隔离 Windows GUI/DPI/IME/字形验收仍需人工完成；GitHub Release 由用户手工上传安装包与校验文件。
+
+2026-11-09，Windows/MSVC：Bitvise/OpenSSH 用户证书 CLI 认证对标 `v0.1.57` 已完成。`dshell-cli exec` 与 SFTP 子命令接受显式 `--certificate` 并要求匹配 `--identity-file`；私钥口令从 stdin 输入并由 Zeroizing 管理，known_hosts 严格校验不变。验证覆盖 CA 签名证书成功和错误 principal 拒绝；完整测试及发布产物见 `CHANGELOG.md`。
 
 2026-11-09，Windows/MSVC：Bitvise 文本模式 SFTP 对标 `v0.1.56` 已完成实现。`dshell-cli sftp put-text/get-text` 和 JSON batch 支持固定块流式行尾转换：上传将 CR、LF、CRLF 统一为 LF，下载统一输出 CRLF；除换行外原始字节不变，普通 put/get 保持 binary-safe，text 操作不支持续传。下载拒绝符号链接和特殊本地目标。验证：`cargo fmt --all`、`cargo check --locked --all-targets`、`cargo test --locked`（124 library + 141 GUI + 11 CLI passed；13 Docker 专项 ignored）、硬约束脚本、Docker SSH 13/13 均通过，覆盖跨块换行、文本传输及 batch。双二进制 Release 构建、Inno Setup 6.7.3 编译和静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.56-x64.exe` 大小 11,184,006 字节，SHA-256 `4F55FF618ABCCA6BA36FF00613ED6A258953C02B806770740FCF511A57A39A42`；应用和 CLI 未签名。GUI/安装向导、DPI、IME、字形仍需隔离 Windows 桌面人工验收；GitHub Release 由用户手工上传安装包与校验文件。
 

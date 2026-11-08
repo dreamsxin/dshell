@@ -11580,6 +11580,10 @@ impl AppView {
                                 &tokens,
                                 self.tr("The identity file path is saved with the host. Passphrases are kept only in memory; private key material is never copied."),
                             ))
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("If a matching -cert.pub file is next to the identity, dshell uses it as an OpenSSH user certificate."),
+                            ))
                     })
                     .when(self.auth_method == AuthMethod::Agent, |panel| {
                         panel.child(components::help_text(
