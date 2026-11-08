@@ -63,6 +63,8 @@ struct ConnectionArgs {
     port: u16,
     #[arg(long, value_name = "PATH")]
     identity_file: Option<PathBuf>,
+    #[arg(long, value_name = "PATH", requires = "identity_file")]
+    certificate: Option<PathBuf>,
     #[arg(long)]
     agent: bool,
     #[arg(long)]
@@ -353,9 +355,17 @@ fn build_authentication(args: &ConnectionArgs) -> Result<Authentication> {
         } else {
             Zeroizing::new(String::new())
         };
-        Authentication::PublicKey {
-            identity_file,
-            passphrase,
+        if let Some(certificate_file) = args.certificate.clone() {
+            Authentication::PublicKeyCertificate {
+                identity_file,
+                certificate_file,
+                passphrase,
+            }
+        } else {
+            Authentication::PublicKey {
+                identity_file,
+                passphrase,
+            }
         }
     } else if args.password_stdin {
         Authentication::Password(read_secret_stdin("password")?)
@@ -782,6 +792,54 @@ mod tests {
         assert!(args.connection.agent);
         assert!(args.forward_agent);
         assert_eq!(args.command, "uname -a");
+    }
+
+    #[test]
+    fn exec_parses_public_key_certificate_with_identity_file() {
+        let parsed = Cli::try_parse_from([
+            "dshell-cli",
+            "exec",
+            "--host",
+            "server.example.com",
+            "--user",
+            "operator",
+            "--identity-file",
+            "id_ed25519",
+            "--certificate",
+            "id_ed25519-cert.pub",
+            "--",
+            "true",
+        ])
+        .unwrap();
+        let super::Command::Exec(args) = parsed.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(
+            args.connection.certificate.as_deref(),
+            Some(std::path::Path::new("id_ed25519-cert.pub"))
+        );
+        assert!(matches!(
+            super::build_authentication(&args.connection).unwrap(),
+            dshell::ssh::Authentication::PublicKeyCertificate {
+                certificate_file,
+                ..
+            } if certificate_file == std::path::Path::new("id_ed25519-cert.pub")
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "dshell-cli",
+                "exec",
+                "--host",
+                "server.example.com",
+                "--user",
+                "operator",
+                "--certificate",
+                "id_ed25519-cert.pub",
+                "--",
+                "true",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

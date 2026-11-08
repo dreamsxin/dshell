@@ -6,6 +6,9 @@ $dockerfile = Join-Path $dockerContext "Dockerfile"
 $containerName = "dshell-ssh-test-$([Guid]::NewGuid().ToString('N'))"
 $knownHostsPath = Join-Path $env:TEMP "$containerName-known_hosts"
 $identityPath = Join-Path $env:TEMP "$containerName-id_ed25519"
+$certificateAuthorityPath = Join-Path $env:TEMP "$containerName-user-ca"
+$userCertificatePath = "$identityPath-valid-cert.pub"
+$invalidUserCertificatePath = "$identityPath-cert.pub"
 $keyPassphrase = "dshell-test-passphrase-$([Guid]::NewGuid().ToString('N'))"
 $passwordBytes = New-Object byte[] 24
 $random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -20,9 +23,18 @@ try {
         throw "Could not build the cached Ubuntu SSH test image."
     }
 
+    ssh-keygen -q -t ed25519 -N $keyPassphrase -C "dshell-test-user-ca" -f $certificateAuthorityPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$certificateAuthorityPath.pub")) {
+        throw "Could not create the temporary OpenSSH user CA."
+    }
+
     docker run --detach --name $containerName --publish 127.0.0.1::22 --env "DSHELL_TEST_PASSWORD=$password" $image | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Could not start the Ubuntu SSH container."
+    }
+    docker cp "$certificateAuthorityPath.pub" "${containerName}:/etc/ssh/dshell_user_ca.pub" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not install the temporary OpenSSH user CA."
     }
 
     $portMapping = docker port $containerName 22/tcp
@@ -96,12 +108,23 @@ try {
         throw "Could not install the temporary public key for the test user."
     }
 
+    ssh-keygen -q -s $certificateAuthorityPath -P $keyPassphrase -I "dshell-test-cert" -n "dshelltest" -V "-5m:+1h" "$identityPath.pub"
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $invalidUserCertificatePath)) {
+        throw "Could not sign the temporary OpenSSH user certificate."
+    }
+    Move-Item -LiteralPath $invalidUserCertificatePath -Destination $userCertificatePath
+    ssh-keygen -q -s $certificateAuthorityPath -P $keyPassphrase -I "dshell-test-wrong-principal" -n "not-dshelltest" -V "-5m:+1h" "$identityPath.pub"
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $invalidUserCertificatePath)) {
+        throw "Could not sign the negative-test OpenSSH user certificate."
+    }
     $env:DSHELL_DOCKER_SSH_HOST = "127.0.0.1"
     $env:DSHELL_DOCKER_SSH_PORT = "$port"
     $env:DSHELL_DOCKER_SSH_USER = "dshelltest"
     $env:DSHELL_DOCKER_SSH_PASSWORD = $password
     $env:DSHELL_DOCKER_SSH_IDENTITY = $identityPath
     $env:DSHELL_DOCKER_SSH_KEY_PASSPHRASE = $keyPassphrase
+    $env:DSHELL_DOCKER_SSH_USER_CERTIFICATE = $userCertificatePath
+    $env:DSHELL_DOCKER_SSH_INVALID_USER_CERTIFICATE = $invalidUserCertificatePath
     $env:DSHELL_DOCKER_SSH_KNOWN_HOSTS = $knownHostsPath
 
     cargo test --locked docker_ssh_ -- --ignored --nocapture --test-threads=1
@@ -116,9 +139,15 @@ finally {
     Remove-Item Env:\DSHELL_DOCKER_SSH_PASSWORD -ErrorAction SilentlyContinue
     Remove-Item Env:\DSHELL_DOCKER_SSH_IDENTITY -ErrorAction SilentlyContinue
     Remove-Item Env:\DSHELL_DOCKER_SSH_KEY_PASSPHRASE -ErrorAction SilentlyContinue
+    Remove-Item Env:\DSHELL_DOCKER_SSH_USER_CERTIFICATE -ErrorAction SilentlyContinue
+    Remove-Item Env:\DSHELL_DOCKER_SSH_INVALID_USER_CERTIFICATE -ErrorAction SilentlyContinue
     Remove-Item Env:\DSHELL_DOCKER_SSH_KNOWN_HOSTS -ErrorAction SilentlyContinue
     docker rm --force $containerName *> $null
     Remove-Item -LiteralPath $knownHostsPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $identityPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$identityPath.pub" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $userCertificatePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $invalidUserCertificatePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $certificateAuthorityPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$certificateAuthorityPath.pub" -Force -ErrorAction SilentlyContinue
 }

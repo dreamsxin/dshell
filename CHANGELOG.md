@@ -6,6 +6,34 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.57] - 2026-11-09
+
+Adds OpenSSH user certificate authentication to the CLI.
+
+### Added
+
+- Accept `--certificate PATH` alongside `--identity-file PATH` for `exec` and
+  SFTP commands.
+- Load and authenticate OpenSSH user certificates using the matching private
+  key; encrypted private keys continue to read passphrases from stdin.
+- Keep certificate selection explicit and preserve strict `known_hosts`
+  verification.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (277 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including a valid CA-signed
+  user certificate and rejection of a certificate with the wrong principal.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.57-x64.exe` is 11,216,065 bytes. SHA-256:
+  `DC3B97F236B5C839A60DB1398F085BE23427EAF291B957958A231E20FAC804CE`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.56] - 2026-11-09
 
 Adds explicit text-mode SFTP transfers with streaming line-ending conversion.

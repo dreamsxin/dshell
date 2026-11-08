@@ -14,7 +14,7 @@ use russh::{
     client::{self, AuthResult, Handler, KeyboardInteractiveAuthResponse, Prompt},
     keys::{
         HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, check_known_hosts_path,
-        decode_secret_key, known_hosts::learn_known_hosts_path,
+        decode_secret_key, known_hosts::learn_known_hosts_path, load_openssh_certificate,
     },
 };
 use tokio::{
@@ -49,6 +49,11 @@ pub enum Authentication {
     },
     PublicKey {
         identity_file: PathBuf,
+        passphrase: Zeroizing<String>,
+    },
+    PublicKeyCertificate {
+        identity_file: PathBuf,
+        certificate_file: PathBuf,
         passphrase: Zeroizing<String>,
     },
     Agent,
@@ -3811,6 +3816,42 @@ async fn authenticate(
                 bail!("SSH public key authentication was rejected");
             }
         }
+        Authentication::PublicKeyCertificate {
+            identity_file,
+            certificate_file,
+            passphrase,
+        } => {
+            let identity_file = expand_user_path(&identity_file);
+            let key_content = std::fs::read_to_string(&identity_file).with_context(|| {
+                format!(
+                    "Could not read SSH identity file {}",
+                    identity_file.display()
+                )
+            })?;
+            let key_content = key_content.strip_prefix('\u{FEFF}').unwrap_or(&key_content);
+            let passphrase_ref = (!passphrase.is_empty()).then_some(passphrase.as_str());
+            let key = decode_secret_key(key_content, passphrase_ref).with_context(|| {
+                format!(
+                    "Could not load SSH identity file {}",
+                    identity_file.display()
+                )
+            })?;
+            drop(passphrase);
+            let certificate_file = expand_user_path(&certificate_file);
+            let certificate = load_openssh_certificate(&certificate_file).with_context(|| {
+                format!(
+                    "Could not load OpenSSH user certificate {}",
+                    certificate_file.display()
+                )
+            })?;
+            let auth = session
+                .authenticate_openssh_cert(username.to_owned(), Arc::new(key), certificate)
+                .await
+                .context("SSH public key certificate authentication failed")?;
+            if !matches!(auth, AuthResult::Success) {
+                bail!("SSH public key certificate authentication was rejected");
+            }
+        }
         Authentication::Agent => {
             let mut agent = connect_agent().await?;
             let identities = agent
@@ -6181,6 +6222,56 @@ abc	img	name"
             run(SftpCommand::CreateDirectory(remote_root.clone())).unwrap(),
             RemoteSftpOutput::Completed { .. }
         ));
+        let certificate_authentication = Authentication::PublicKeyCertificate {
+            identity_file: PathBuf::from(
+                env::var_os("DSHELL_DOCKER_SSH_IDENTITY")
+                    .expect("test identity path is not configured"),
+            ),
+            certificate_file: PathBuf::from(
+                env::var_os("DSHELL_DOCKER_SSH_USER_CERTIFICATE")
+                    .expect("test user certificate path is not configured"),
+            ),
+            passphrase: Zeroizing::new(
+                env::var("DSHELL_DOCKER_SSH_KEY_PASSPHRASE")
+                    .expect("test key passphrase is not configured"),
+            ),
+        };
+        let certificate_listing = runtime
+            .block_on(run_sftp_command(
+                host.clone(),
+                port,
+                username.clone(),
+                certificate_authentication,
+                SftpCommand::List(remote_root.clone()),
+                Some(known_hosts.clone()),
+            ))
+            .unwrap();
+        assert!(matches!(
+            certificate_listing,
+            RemoteSftpOutput::Listed { path, .. } if path == remote_root
+        ));
+        let rejected_certificate = runtime.block_on(run_sftp_command(
+            host.clone(),
+            port,
+            username.clone(),
+            Authentication::PublicKeyCertificate {
+                identity_file: PathBuf::from(
+                    env::var_os("DSHELL_DOCKER_SSH_IDENTITY")
+                        .expect("test identity path is not configured"),
+                ),
+                certificate_file: PathBuf::from(
+                    env::var_os("DSHELL_DOCKER_SSH_INVALID_USER_CERTIFICATE")
+                        .expect("invalid test certificate path is not configured"),
+                ),
+                passphrase: Zeroizing::new(
+                    env::var("DSHELL_DOCKER_SSH_KEY_PASSPHRASE")
+                        .expect("test key passphrase is not configured"),
+                ),
+            },
+            SftpCommand::List(remote_root.clone()),
+            Some(known_hosts.clone()),
+        ));
+        assert!(rejected_certificate.is_err());
         let remote_file = format!("{remote_root}/upload.txt");
         assert!(matches!(
             run(SftpCommand::Upload {

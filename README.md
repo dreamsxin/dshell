@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.56`.
+`v0.1.57`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -263,11 +263,14 @@ The installer includes `dshell-cli.exe` for non-interactive remote commands:
 
 ```powershell
 dshell-cli exec --host server.example.com --user operator --agent -- "uname -a"
+dshell-cli exec --host server.example.com --user operator --identity-file .\id_ed25519 --certificate .\id_ed25519-cert.pub -- "uname -a"
 dshell-cli exec --host server.example.com --user operator --agent --forward-agent -- "ssh-add -L"
 ```
 
 Choose exactly one authentication method: `--agent`, `--identity-file PATH`,
-or `--password-stdin`. An encrypted key can read its passphrase with
+or `--password-stdin`. For OpenSSH user certificate authentication, provide
+the matching public certificate with `--certificate PATH` alongside
+`--identity-file`. An encrypted key can read its passphrase with
 `--passphrase-stdin`. Passwords and passphrases are never command-line
 arguments. The CLI uses the existing OpenSSH `known_hosts` file and fails
 closed for unknown or changed server keys. It forwards stdout and stderr and
