@@ -126,11 +126,21 @@ pub enum SftpCommand {
         overwrite: bool,
         resume: bool,
     },
+    UploadText {
+        local: PathBuf,
+        remote: String,
+        overwrite: bool,
+    },
     Download {
         remote: String,
         local: PathBuf,
         overwrite: bool,
         resume: bool,
+    },
+    DownloadText {
+        remote: String,
+        local: PathBuf,
+        overwrite: bool,
     },
     UploadDirectory {
         local: PathBuf,
@@ -363,6 +373,20 @@ pub async fn run<S>(
                     &cancellation,
                 )
                 .await;
+            }
+            SftpCommand::UploadText {
+                local,
+                remote,
+                overwrite,
+            } => {
+                upload_text(&session, local, remote, overwrite, &events, &cancellation).await;
+            }
+            SftpCommand::DownloadText {
+                remote,
+                local,
+                overwrite,
+            } => {
+                download_text(&session, remote, local, overwrite, &events, &cancellation).await;
             }
             SftpCommand::UploadDirectory {
                 local,
@@ -879,6 +903,317 @@ async fn upload(
     let _ = events
         .send(SftpEvent::TransferFinished { kind, name })
         .await;
+}
+
+async fn upload_text(
+    session: &SftpSession,
+    local: PathBuf,
+    remote: String,
+    overwrite: bool,
+    events: &mpsc::Sender<SftpEvent>,
+    cancellation: &AtomicBool,
+) {
+    let kind = TransferKind::Upload;
+    let name = local.file_name().map_or_else(
+        || local.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let existed_before = session.try_exists(remote.clone()).await.unwrap_or(false);
+    match upload_text_inner(session, &local, &remote, overwrite, events, cancellation).await {
+        Ok(total) => {
+            let _ = report_progress(events, kind, &name, total, total).await;
+            let _ = events
+                .send(SftpEvent::TransferFinished { kind, name })
+                .await;
+        }
+        Err(_error) if cancellation.load(Ordering::SeqCst) => {
+            if !existed_before {
+                let _ = session.remove_file(remote).await;
+            }
+            let _ = events
+                .send(SftpEvent::TransferCancelled { kind, name })
+                .await;
+        }
+        Err(error) => {
+            if !existed_before {
+                let _ = session.remove_file(remote.clone()).await;
+            }
+            fail(
+                events,
+                kind,
+                &name,
+                format!("Text upload to {remote} failed: {error}"),
+            )
+            .await;
+        }
+    }
+}
+
+async fn upload_text_inner(
+    session: &SftpSession,
+    local: &Path,
+    remote: &str,
+    overwrite: bool,
+    events: &mpsc::Sender<SftpEvent>,
+    cancellation: &AtomicBool,
+) -> Result<u64, String> {
+    let source_metadata = tokio::fs::symlink_metadata(local)
+        .await
+        .map_err(|error| format!("Could not inspect {}: {error}", local.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        return Err("text uploads require a regular, non-symlink local file".to_owned());
+    }
+    if !overwrite && session.try_exists(remote.to_owned()).await.unwrap_or(false) {
+        let _ = events
+            .send(SftpEvent::NeedsOverwrite {
+                kind: TransferKind::Upload,
+                local: local.to_path_buf(),
+                remote: remote.to_owned(),
+                is_directory: false,
+            })
+            .await;
+        return Err("destination already exists".to_owned());
+    }
+    let mut source = tokio::fs::File::open(local)
+        .await
+        .map_err(|error| format!("Could not open {}: {error}", local.display()))?;
+    let total = source.metadata().await.map_or(0, |metadata| metadata.len());
+    let kind = TransferKind::Upload;
+    let name = local.file_name().map_or_else(
+        || local.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let mut destination = session
+        .create(remote.to_owned())
+        .await
+        .map_err(|error| format!("Could not create {remote}: {error}"))?;
+    cancellation.store(false, Ordering::SeqCst);
+    events
+        .send(SftpEvent::TransferStarted {
+            kind,
+            name: name.clone(),
+            total,
+        })
+        .await
+        .map_err(|_| "transfer event channel closed".to_owned())?;
+    let mut input = vec![0; TRANSFER_CHUNK_BYTES];
+    let mut output = Vec::with_capacity(TRANSFER_CHUNK_BYTES + 1);
+    let mut pending_cr = false;
+    let mut transferred = 0u64;
+    let mut last_report = Instant::now();
+    loop {
+        if cancellation.load(Ordering::SeqCst) {
+            return Err("transfer cancelled".to_owned());
+        }
+        let count = source
+            .read(&mut input)
+            .await
+            .map_err(|error| format!("Could not read {}: {error}", local.display()))?;
+        if count == 0 {
+            break;
+        }
+        output.clear();
+        normalize_newlines(&input[..count], &mut pending_cr, &mut output);
+        if !output.is_empty() {
+            destination
+                .write_all(&output)
+                .await
+                .map_err(|error| format!("Could not write {remote}: {error}"))?;
+        }
+        transferred = transferred.saturating_add(count as u64);
+        if last_report.elapsed() >= PROGRESS_INTERVAL {
+            last_report = Instant::now();
+            if !report_progress(events, kind, &name, transferred, total).await {
+                return Err("transfer event channel closed".to_owned());
+            }
+        }
+    }
+    if pending_cr {
+        destination
+            .write_all(b"\n")
+            .await
+            .map_err(|error| format!("Could not finish {remote}: {error}"))?;
+    }
+    destination
+        .shutdown()
+        .await
+        .map_err(|error| format!("Could not finish {remote}: {error}"))?;
+    Ok(transferred)
+}
+
+async fn download_text(
+    session: &SftpSession,
+    remote: String,
+    local: PathBuf,
+    overwrite: bool,
+    events: &mpsc::Sender<SftpEvent>,
+    cancellation: &AtomicBool,
+) {
+    let kind = TransferKind::Download;
+    let name = local.file_name().map_or_else(
+        || local.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let existed_before = tokio::fs::symlink_metadata(&local).await.is_ok();
+    match download_text_inner(session, &remote, &local, overwrite, events, cancellation).await {
+        Ok((transferred, total)) => {
+            let _ = report_progress(events, kind, &name, transferred, total).await;
+            let _ = events
+                .send(SftpEvent::TransferFinished { kind, name })
+                .await;
+        }
+        Err(_error) if cancellation.load(Ordering::SeqCst) => {
+            if !existed_before {
+                let _ = tokio::fs::remove_file(&local).await;
+            }
+            let _ = events
+                .send(SftpEvent::TransferCancelled { kind, name })
+                .await;
+        }
+        Err(error) => {
+            if !existed_before {
+                let _ = tokio::fs::remove_file(&local).await;
+            }
+            fail(
+                events,
+                kind,
+                &name,
+                format!("Text download from {remote} failed: {error}"),
+            )
+            .await;
+        }
+    }
+}
+
+async fn download_text_inner(
+    session: &SftpSession,
+    remote: &str,
+    local: &Path,
+    overwrite: bool,
+    events: &mpsc::Sender<SftpEvent>,
+    cancellation: &AtomicBool,
+) -> Result<(u64, u64), String> {
+    match tokio::fs::symlink_metadata(local).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("text downloads require a regular, non-symlink local file".to_owned());
+        }
+        Ok(_) if !overwrite => {
+            let _ = events
+                .send(SftpEvent::NeedsOverwrite {
+                    kind: TransferKind::Download,
+                    local: local.to_path_buf(),
+                    remote: remote.to_owned(),
+                    is_directory: false,
+                })
+                .await;
+            return Err("destination already exists".to_owned());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Could not inspect {}: {error}", local.display())),
+    }
+    let mut source = session
+        .open(remote.to_owned())
+        .await
+        .map_err(|error| format!("Could not open {remote}: {error}"))?;
+    let total = source
+        .metadata()
+        .await
+        .map_or(0, |metadata| metadata.size.unwrap_or(0));
+    let mut destination = tokio::fs::File::create(local)
+        .await
+        .map_err(|error| format!("Could not create {}: {error}", local.display()))?;
+    let kind = TransferKind::Download;
+    let name = local.file_name().map_or_else(
+        || local.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    cancellation.store(false, Ordering::SeqCst);
+    events
+        .send(SftpEvent::TransferStarted {
+            kind,
+            name: name.clone(),
+            total,
+        })
+        .await
+        .map_err(|_| "transfer event channel closed".to_owned())?;
+    let mut input = vec![0; TRANSFER_CHUNK_BYTES];
+    let mut output = Vec::with_capacity(TRANSFER_CHUNK_BYTES * 2);
+    let mut pending_cr = false;
+    let mut transferred = 0u64;
+    let mut last_report = Instant::now();
+    loop {
+        if cancellation.load(Ordering::SeqCst) {
+            return Err("transfer cancelled".to_owned());
+        }
+        let count = source
+            .read(&mut input)
+            .await
+            .map_err(|error| format!("Could not read {remote}: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        output.clear();
+        expand_newlines_to_crlf(&input[..count], &mut pending_cr, &mut output);
+        destination
+            .write_all(&output)
+            .await
+            .map_err(|error| format!("Could not write {}: {error}", local.display()))?;
+        transferred = transferred.saturating_add(count as u64);
+        if last_report.elapsed() >= PROGRESS_INTERVAL {
+            last_report = Instant::now();
+            if !report_progress(events, kind, &name, transferred, total).await {
+                return Err("transfer event channel closed".to_owned());
+            }
+        }
+    }
+    if pending_cr {
+        output.clear();
+        output.extend_from_slice(b"\r\n");
+        destination
+            .write_all(&output)
+            .await
+            .map_err(|error| format!("Could not finish {}: {error}", local.display()))?;
+    }
+    destination
+        .shutdown()
+        .await
+        .map_err(|error| format!("Could not finish {}: {error}", local.display()))?;
+    Ok((transferred, total))
+}
+
+fn normalize_newlines(input: &[u8], pending_cr: &mut bool, output: &mut Vec<u8>) {
+    for &byte in input {
+        if *pending_cr {
+            output.push(b'\n');
+            *pending_cr = false;
+            if byte == b'\n' {
+                continue;
+            }
+        }
+        if byte == b'\r' {
+            *pending_cr = true;
+        } else {
+            output.push(byte);
+        }
+    }
+}
+
+fn expand_newlines_to_crlf(input: &[u8], pending_cr: &mut bool, output: &mut Vec<u8>) {
+    for &byte in input {
+        if *pending_cr {
+            output.extend_from_slice(b"\r\n");
+            *pending_cr = false;
+            if byte == b'\n' {
+                continue;
+            }
+        }
+        match byte {
+            b'\r' => *pending_cr = true,
+            b'\n' => output.extend_from_slice(b"\r\n"),
+            _ => output.push(byte),
+        }
+    }
 }
 
 async fn download(
@@ -1859,9 +2194,9 @@ pub fn parse_unix_timestamp(input: &str) -> Result<Option<u32>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_EDIT_FILE_BYTES, SftpCommand, TRANSFER_CHUNK_BYTES, format_permission_mode,
-        list_local_directory, parent_remote_path, parse_permission_mode, parse_unix_timestamp,
-        remote_join, resume_offset,
+        MAX_EDIT_FILE_BYTES, SftpCommand, TRANSFER_CHUNK_BYTES, expand_newlines_to_crlf,
+        format_permission_mode, list_local_directory, normalize_newlines, parent_remote_path,
+        parse_permission_mode, parse_unix_timestamp, remote_join, resume_offset,
     };
 
     #[test]
@@ -1899,6 +2234,27 @@ mod tests {
         assert_eq!(format_permission_mode(None), "0000");
         assert!(parse_permission_mode("888").is_err());
         assert!(parse_permission_mode("17777").is_err());
+    }
+
+    #[test]
+    fn text_line_endings_normalize_cr_lf_and_crlf_across_chunks() {
+        let mut pending_cr = false;
+        let mut output = Vec::new();
+        normalize_newlines(b"a\r", &mut pending_cr, &mut output);
+        normalize_newlines(b"\nb\rc\n", &mut pending_cr, &mut output);
+        if pending_cr {
+            output.push(b'\n');
+        }
+        assert_eq!(output, b"a\nb\nc\n");
+    }
+
+    #[test]
+    fn text_download_expands_newline_forms_without_doubling_crlf() {
+        let mut pending_cr = false;
+        let mut output = Vec::new();
+        expand_newlines_to_crlf(b"a\r", &mut pending_cr, &mut output);
+        expand_newlines_to_crlf(b"\nb\rc\n", &mut pending_cr, &mut output);
+        assert_eq!(output, b"a\r\nb\r\nc\r\n");
     }
 
     #[test]

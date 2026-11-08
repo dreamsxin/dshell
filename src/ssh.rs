@@ -6197,6 +6197,66 @@ abc	img	name"
             RemoteSftpOutput::Stat(entry)
                 if entry.is_file && entry.size == b"dshell sftp cli round trip".len() as u64
         ));
+        let local_text = local.path().join("text-upload.txt");
+        std::fs::write(&local_text, b"first\r\nsecond\rthird\n").unwrap();
+        let remote_text = format!("{remote_root}/text.txt");
+        assert!(matches!(
+            run(SftpCommand::UploadText {
+                local: local_text,
+                remote: remote_text.clone(),
+                overwrite: false,
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        let text_output = runtime
+            .block_on(run_remote_command(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::Password(Zeroizing::new(password.clone())),
+                format!("cat '{remote_text}'"),
+                Some(known_hosts.clone()),
+                false,
+            ))
+            .unwrap();
+        assert_eq!(text_output.stdout, b"first\nsecond\nthird\n");
+        let local_text_copy = local.path().join("text-download.txt");
+        assert!(matches!(
+            run(SftpCommand::DownloadText {
+                remote: remote_text.clone(),
+                local: local_text_copy.clone(),
+                overwrite: false,
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert_eq!(
+            std::fs::read(local_text_copy).unwrap(),
+            b"first\r\nsecond\r\nthird\r\n"
+        );
+        let batch_text_local = local.path().join("batch-text.txt");
+        let batch_text_download = local.path().join("batch-text-download.txt");
+        std::fs::write(&batch_text_local, b"batch\rtext\r\nmode\n").unwrap();
+        let batch_text_remote = format!("{remote_root}/batch-text.txt");
+        let text_outputs = run_many(vec![
+            SftpCommand::UploadText {
+                local: batch_text_local,
+                remote: batch_text_remote.clone(),
+                overwrite: false,
+            },
+            SftpCommand::DownloadText {
+                remote: batch_text_remote.clone(),
+                local: batch_text_download.clone(),
+                overwrite: false,
+            },
+        ])
+        .unwrap();
+        assert_eq!(text_outputs.len(), 2);
+        assert_eq!(
+            std::fs::read(batch_text_download).unwrap(),
+            b"batch\r\ntext\r\nmode\r\n"
+        );
         assert!(matches!(
             run(SftpCommand::RealPath(remote_file.clone())).unwrap(),
             RemoteSftpOutput::RealPath { resolved_path, .. }
@@ -6363,6 +6423,14 @@ abc	img	name"
         ));
         assert!(matches!(
             run(SftpCommand::RemoveFile(remote_file)).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveFile(remote_text)).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveFile(batch_text_remote)).unwrap(),
             RemoteSftpOutput::Completed { .. }
         ));
         for name in ["glob-a.dat", "glob-b.dat", "glob-link.dat"] {

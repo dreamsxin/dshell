@@ -2,7 +2,7 @@
 
 ## Scope
 
-Prepare the first Windows installer for the existing native GPUI application. This is the first installer distribution, not the project's first public release: `CHANGELOG.md` identifies `v0.1.0` as the first public release, and earlier tags must not be moved or overwritten. The first installer was prepared for `v0.1.44`; the plan is updated through the `v0.1.55` installer.
+Prepare the first Windows installer for the existing native GPUI application. This is the first installer distribution, not the project's first public release: `CHANGELOG.md` identifies `v0.1.0` as the first public release, and earlier tags must not be moved or overwritten. The first installer was prepared for `v0.1.44`; the plan is updated through the `v0.1.56` installer.
 
 Initial target: x64 Windows on MSVC. Keep the installer native and install the desktop application plus the standalone `dshell-cli.exe` command tool. Do not add a WebView runtime, background service, auto-start entry, telemetry, or file associations.
 

@@ -129,6 +129,12 @@ enum SftpAction {
         #[arg(long)]
         resume: bool,
     },
+    PutText {
+        local: PathBuf,
+        remote: String,
+        #[arg(long)]
+        overwrite: bool,
+    },
     Get {
         remote: String,
         local: PathBuf,
@@ -136,6 +142,12 @@ enum SftpAction {
         overwrite: bool,
         #[arg(long)]
         resume: bool,
+    },
+    GetText {
+        remote: String,
+        local: PathBuf,
+        #[arg(long)]
+        overwrite: bool,
     },
     PutDir {
         local: PathBuf,
@@ -207,6 +219,12 @@ enum SftpBatchOperation {
         #[serde(default)]
         resume: bool,
     },
+    PutText {
+        local: PathBuf,
+        remote: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
     Get {
         remote: String,
         local: PathBuf,
@@ -214,6 +232,12 @@ enum SftpBatchOperation {
         overwrite: bool,
         #[serde(default)]
         resume: bool,
+    },
+    GetText {
+        remote: String,
+        local: PathBuf,
+        #[serde(default)]
+        overwrite: bool,
     },
     PutDir {
         local: PathBuf,
@@ -391,6 +415,15 @@ fn run_sftp(args: SftpArgs) -> Result<u8> {
                 overwrite,
                 resume,
             },
+            SftpAction::PutText {
+                local,
+                remote,
+                overwrite,
+            } => SftpCommand::UploadText {
+                local,
+                remote,
+                overwrite,
+            },
             SftpAction::Get {
                 remote,
                 local,
@@ -401,6 +434,15 @@ fn run_sftp(args: SftpArgs) -> Result<u8> {
                 local,
                 overwrite,
                 resume,
+            },
+            SftpAction::GetText {
+                remote,
+                local,
+                overwrite,
+            } => SftpCommand::DownloadText {
+                remote,
+                local,
+                overwrite,
             },
             SftpAction::PutDir {
                 local,
@@ -503,6 +545,15 @@ fn load_sftp_batch(path: &std::path::Path) -> Result<Vec<SftpCommand>> {
                         resume,
                     }
                 }
+                SftpBatchOperation::PutText {
+                    local,
+                    remote,
+                    overwrite,
+                } => SftpCommand::UploadText {
+                    local,
+                    remote,
+                    overwrite,
+                },
                 SftpBatchOperation::Get {
                     remote,
                     local,
@@ -517,6 +568,15 @@ fn load_sftp_batch(path: &std::path::Path) -> Result<Vec<SftpCommand>> {
                         resume,
                     }
                 }
+                SftpBatchOperation::GetText {
+                    remote,
+                    local,
+                    overwrite,
+                } => SftpCommand::DownloadText {
+                    remote,
+                    local,
+                    overwrite,
+                },
                 SftpBatchOperation::PutDir {
                     local,
                     remote,
@@ -821,6 +881,34 @@ mod tests {
     }
 
     #[test]
+    fn sftp_parses_text_transfers_with_explicit_overwrite() {
+        let parsed = Cli::try_parse_from([
+            "dshell-cli",
+            "sftp",
+            "--host",
+            "server.example.com",
+            "--user",
+            "operator",
+            "--agent",
+            "put-text",
+            "local.txt",
+            "/srv/file.txt",
+            "--overwrite",
+        ])
+        .unwrap();
+        let super::Command::Sftp(args) = parsed.command else {
+            panic!("expected SFTP command");
+        };
+        assert!(matches!(
+            args.action,
+            super::SftpAction::PutText {
+                overwrite: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn sftp_overwrite_and_resume_are_mutually_exclusive() {
         assert!(
             Cli::try_parse_from([
@@ -847,12 +935,12 @@ mod tests {
         let path = directory.path().join("batch.json");
         std::fs::write(
             &path,
-            r#"{"version":1,"operations":[{"op":"list"},{"op":"stat","remote":"/tmp/file.bin"},{"op":"real_path","remote":"/tmp"},{"op":"rename","from":"/tmp/old","to":"/tmp/new"},{"op":"chmod","remote":"/tmp/new","mode":"0640"},{"op":"readlink","remote":"/tmp/link"},{"op":"symlink","target":"new","link":"/tmp/link"},{"op":"put","local":"file.bin","remote":"/tmp/file.bin","resume":true},{"op":"mkdir","remote":"/tmp/new-dir"}]}"#,
+            r#"{"version":1,"operations":[{"op":"list"},{"op":"stat","remote":"/tmp/file.bin"},{"op":"real_path","remote":"/tmp"},{"op":"rename","from":"/tmp/old","to":"/tmp/new"},{"op":"chmod","remote":"/tmp/new","mode":"0640"},{"op":"readlink","remote":"/tmp/link"},{"op":"symlink","target":"new","link":"/tmp/link"},{"op":"put_text","local":"file.txt","remote":"/tmp/file.txt"},{"op":"get_text","remote":"/tmp/file.txt","local":"copy.txt","overwrite":true},{"op":"put","local":"file.bin","remote":"/tmp/file.bin","resume":true},{"op":"mkdir","remote":"/tmp/new-dir"}]}"#,
         )
         .unwrap();
 
         let commands = super::load_sftp_batch(&path).unwrap();
-        assert_eq!(commands.len(), 9);
+        assert_eq!(commands.len(), 11);
         assert!(matches!(&commands[0], SftpCommand::List(path) if path == "."));
         assert!(matches!(
             &commands[1],
@@ -875,11 +963,21 @@ mod tests {
         );
         assert!(matches!(
             &commands[7],
+            SftpCommand::UploadText { local, remote, overwrite: false }
+                if local == std::path::Path::new("file.txt") && remote == "/tmp/file.txt"
+        ));
+        assert!(matches!(
+            &commands[8],
+            SftpCommand::DownloadText { remote, local, overwrite: true }
+                if remote == "/tmp/file.txt" && local == std::path::Path::new("copy.txt")
+        ));
+        assert!(matches!(
+            &commands[9],
             SftpCommand::Upload { remote, resume: true, overwrite: false, .. }
                 if remote == "/tmp/file.bin"
         ));
         assert!(matches!(
-            &commands[8],
+            &commands[10],
             SftpCommand::CreateDirectory(path) if path == "/tmp/new-dir"
         ));
     }

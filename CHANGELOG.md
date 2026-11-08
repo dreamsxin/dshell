@@ -6,6 +6,32 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.56] - 2026-11-09
+
+Adds explicit text-mode SFTP transfers with streaming line-ending conversion.
+
+### Added
+
+- Add `put-text` and `get-text` to the CLI and version 1 JSON batch files.
+- Normalize CR, LF and CRLF to LF during text upload, and emit CRLF during text
+  download while preserving all non-newline bytes.
+- Keep ordinary `put` and `get` byte-preserving and text transfers non-resumable.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (276 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including text transfer
+  conversions and JSON batch operation reuse.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.56-x64.exe` is 11,184,006 bytes. SHA-256:
+  `4F55FF618ABCCA6BA36FF00613ED6A258953C02B806770740FCF511A57A39A42`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.55] - 2026-11-09
 
 Adds remote SFTP file-management operations to the CLI.
