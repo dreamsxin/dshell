@@ -36,6 +36,8 @@ Bitvise 的文本传输选项提供跨平台行尾处理。`v0.1.56` 增加显�
 
 Bitvise 支持经 SOCKS 和 HTTP CONNECT 代理建立出站 SSH 连接。`v0.1.59` 为 CLI exec/SFTP 提供无认证 SOCKS5 与 HTTP CONNECT 隧道，代理侧解析目标主机名；SSH 层仍按最终目标地址执行严格 known_hosts 校验。代理认证凭据暂不支持。
 
+`v0.1.60` 将无认证代理扩展到 GUI 主机资料：可选直连、SOCKS5 或 HTTP CONNECT；使用跳板时，代理仅用于本机到首个跳板的 TCP 拨号，后续链路继续由 SSH jump channel 承载。代理认证不支持。
+
 ## 零、实施状态审计（2026-11-06）
 
 基于代码级 grep 审计，每个功能在 `src/` 中的实际引用计数确认了实现状态：

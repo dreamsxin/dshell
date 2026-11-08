@@ -2,6 +2,10 @@
 
 ## 当前切片
 
+`v0.1.60` 的最终安装包重建结果：11,216,984 字节，SHA-256 `B8DD171B0115B20630EB2369D10388433E7100C8D093A15AC709DCF336C11D98`（取代下方早先候选构建值）。
+
+2026-11-09，Windows/MSVC：`v0.1.60` 为 GUI 主机资料增加可选无认证 SOCKS5/HTTP CONNECT 代理。设置保存在版本化 `hosts.json` 与 profile export 中，老资料缺省直连；没有跳板时代理到目标 SSH 主机，有跳板时代理只用于本机到首个跳板的 TCP 拨号，后续 hop 走 SSH channel。连接测试和重复会话共用该设置；profile 密钥校验与 known_hosts 目标校验保持不变。验证：`cargo fmt --all`、锁定全目标检查、单测（126 library + 141 GUI + 13 CLI passed；14 Docker 专项 ignored）、硬约束脚本通过；Docker SSH 14/14，覆盖 GUI 连接 runner 的 SOCKS5 隧道和 CLI 的 SOCKS5/HTTP CONNECT。双二进制 Release 构建、Inno Setup 6.7.3 编译和静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.60-x64.exe` 大小 11,222,850 字节，SHA-256 `FB5892F98213AC7CE238CBB10A8AD3B865482CE6DA35549AE252BCD696C9353E`；应用与 CLI 未签名。GUI/安装向导、DPI、IME、字形仍需隔离 Windows 桌面人工验收；GitHub Release 由用户手工上传。
+
 2026-11-09，Windows/MSVC：`v0.1.59` 为 CLI exec/SFTP 增加无认证 SOCKS5 与 HTTP CONNECT 代理。代理配置包装既有认证方式；SOCKS5 用域名 ATYP 将目标解析交给代理，HTTP CONNECT 使用目标 authority；russh 在代理隧道流上握手，known_hosts 仍针对目标主机/端口严格校验。代理拒绝、SOCKS5 要求认证时失败关闭，不接受代理凭据。验证：`cargo fmt --all`、锁定全目标检查、单测（125 library + 141 GUI + 13 CLI passed；13 Docker 专项 ignored）、硬约束脚本通过；Docker SSH 13/13，覆盖两种真实代理隧道和拒绝路径。双二进制 Release 构建、Inno Setup 6.7.3 编译及静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.59-x64.exe` 大小 11,216,552 字节，SHA-256 `F4575E62C077EBE01A39E925F11570CD7AB14E15099FED72D733B90CAA2A87F9`；应用和 CLI 未签名。隔离 GUI/DPI/IME/字形验收仍需人工完成；GitHub Release 由用户手工上传。
 
 2026-11-09，Windows/MSVC：`v0.1.57` 为 `dshell-cli exec` 与 SFTP 子命令增加显式 OpenSSH 用户证书认证，必须同时指定匹配的 `--identity-file` 与 `--certificate`；私钥口令由 stdin 读取，known_hosts 严格校验不变。验证覆盖 CA 签名证书成功和错误 principal 拒绝；安装包与哈希记录见 `CHANGELOG.md`。

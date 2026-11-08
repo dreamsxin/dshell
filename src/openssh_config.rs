@@ -363,6 +363,7 @@ fn build_profile(
             AuthMethod::PublicKey
         },
         agent_forwarding: false,
+        proxy: None,
         identity_file,
         proxy_jump: String::new(),
         forwards,

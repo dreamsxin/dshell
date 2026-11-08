@@ -6,6 +6,34 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.60] - 2026-11-09
+
+Adds per-host outbound proxy settings to the GUI.
+
+### Added
+
+- Configure direct, SOCKS5 or HTTP CONNECT transport in a saved host profile.
+- Apply the proxy to the initial outbound TCP connection; with a jump chain,
+  the proxy connects to the first jump host and later hops use SSH channels.
+- Retain strict target and jump-host `known_hosts` verification and default
+  older host profiles to direct connections.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (280 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 14/14, including CLI SOCKS5/HTTP
+  CONNECT tunnels and GUI connection-runner tunnels through SOCKS5 and HTTP
+  CONNECT.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.60-x64.exe` is 11,216,984 bytes. SHA-256:
+  `B8DD171B0115B20630EB2369D10388433E7100C8D093A15AC709DCF336C11D98`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.59] - 2026-11-09
 
 Adds outbound SOCKS5 and HTTP CONNECT proxies to CLI SSH operations.

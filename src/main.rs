@@ -61,10 +61,10 @@ use sftp::{
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
-    AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ServerData,
-    ServerDataError, ServerListener, ServerMetrics, ServerMount, ServerNetworkInterface,
-    ServerPowerAction, ServerProcess, ServerService, ServerServiceLogs, ServerSession,
-    ServiceAction, UiEvent,
+    AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ProxySpec, ProxyType,
+    ServerData, ServerDataError, ServerListener, ServerMetrics, ServerMount,
+    ServerNetworkInterface, ServerPowerAction, ServerProcess, ServerService, ServerServiceLogs,
+    ServerSession, ServiceAction, UiEvent,
 };
 use terminal::{
     CursorStyle, MouseTrackingMode, SearchDirection, TerminalEmulator, TerminalFrame,
@@ -1417,6 +1417,7 @@ fn render_session_trace(session: &SshSession, host_key_info: Option<&ConnectionI
 struct SessionLaunchSettings {
     auth_method: AuthMethod,
     agent_forwarding: bool,
+    proxy: Option<ProxySpec>,
     identity_file: String,
     proxy_jump: String,
     terminal_theme: Option<TerminalTheme>,
@@ -1440,6 +1441,7 @@ impl SessionLaunchSettings {
             favorite: false,
             auth_method: self.auth_method,
             agent_forwarding: self.agent_forwarding,
+            proxy: self.proxy.clone(),
             identity_file: self.identity_file.clone(),
             proxy_jump: self.proxy_jump.clone(),
             forwards: self.forwards.clone(),
@@ -2465,6 +2467,7 @@ fn update_sessions_for_profile(
         session.profile_name = Some(updated.name.clone());
         session.launch_settings.terminal_theme = updated.terminal_theme;
         session.launch_settings.agent_forwarding = updated.agent_forwarding;
+        session.launch_settings.proxy = updated.proxy.clone();
     }
 }
 
@@ -2754,6 +2757,7 @@ mod session_tests {
                 favorite: false,
                 auth_method: AuthMethod::Agent,
                 agent_forwarding: false,
+                proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -2833,6 +2837,7 @@ mod session_tests {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -2959,6 +2964,7 @@ mod session_tests {
         let settings = SessionLaunchSettings {
             auth_method: AuthMethod::PublicKey,
             agent_forwarding: true,
+            proxy: None,
             identity_file: "~/.ssh/id_ed25519".to_owned(),
             proxy_jump: "bastion".to_owned(),
             terminal_theme: Some(TerminalTheme::SolarizedDark),
@@ -3014,6 +3020,7 @@ mod session_tests {
             favorite: false,
             auth_method: AuthMethod::Agent,
             agent_forwarding: false,
+            proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -3085,6 +3092,7 @@ mod session_tests {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -4016,6 +4024,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4076,6 +4085,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4135,6 +4145,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4179,6 +4190,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4266,6 +4278,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Agent,
                 agent_forwarding: false,
+                proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4567,6 +4580,9 @@ struct AppView {
     profile_favorite: bool,
     profile_auto_reconnect: bool,
     profile_agent_forwarding: bool,
+    profile_proxy_type: Option<ProxyType>,
+    profile_proxy_host: Entity<InputState>,
+    profile_proxy_port: Entity<InputState>,
     profile_login_commands_enabled: bool,
     profile_login_commands: Entity<InputState>,
     profile_notes: Entity<InputState>,
@@ -4780,6 +4796,9 @@ impl AppView {
         let group_editor_name = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let identity_file =
             cx.new(|cx| InputState::new(window, cx).placeholder("~/.ssh/id_ed25519"));
+        let profile_proxy_host =
+            cx.new(|cx| InputState::new(window, cx).placeholder("proxy.example.com"));
+        let profile_proxy_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let key_passphrase = cx.new(|cx| InputState::new(window, cx).placeholder("Key passphrase"));
         key_passphrase.update(cx, |state, cx| state.set_masked(true, window, cx));
         let jump_profile = cx.new(|cx| {
@@ -4995,6 +5014,9 @@ impl AppView {
             profile_favorite: false,
             profile_auto_reconnect: false,
             profile_agent_forwarding: false,
+            profile_proxy_type: None,
+            profile_proxy_host,
+            profile_proxy_port,
             profile_login_commands_enabled: false,
             profile_login_commands,
             profile_notes,
@@ -5568,6 +5590,32 @@ impl AppView {
             .find(|profile| profile.name.eq_ignore_ascii_case(name.trim()))
     }
 
+    fn profile_proxy_settings(&self, cx: &App) -> Result<Option<ProxySpec>, String> {
+        let Some(proxy_type) = self.profile_proxy_type else {
+            return Ok(None);
+        };
+        let host = self.profile_proxy_host.read(cx).value().trim().to_owned();
+        let port_text = self.profile_proxy_port.read(cx).value().trim().to_owned();
+        let default_port = match proxy_type {
+            ProxyType::Socks5 => 1080,
+            ProxyType::HttpConnect => 8080,
+        };
+        let port = if port_text.is_empty() {
+            default_port
+        } else {
+            port_text
+                .parse::<u16>()
+                .map_err(|_| "Proxy port must be between 1 and 65535.".to_owned())?
+        };
+        let proxy = ProxySpec {
+            proxy_type,
+            host,
+            port,
+        };
+        proxy.validate().map_err(str::to_owned)?;
+        Ok(Some(proxy))
+    }
+
     fn profile_needs_credential_prompt(&self, profile: &HostProfile) -> bool {
         let target_needs = matches!(
             profile.auth_method,
@@ -5704,6 +5752,7 @@ impl AppView {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -6707,6 +6756,9 @@ impl AppView {
         self.profile_favorite = false;
         self.profile_auto_reconnect = false;
         self.profile_agent_forwarding = false;
+        self.profile_proxy_type = None;
+        Self::set_input_value(&self.profile_proxy_host, "", window, cx);
+        Self::set_input_value(&self.profile_proxy_port, "", window, cx);
         self.profile_login_commands_enabled = false;
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
@@ -6769,6 +6821,25 @@ impl AppView {
         );
         self.profile_auto_reconnect = profile.reconnect.enabled;
         self.profile_agent_forwarding = profile.agent_forwarding;
+        self.profile_proxy_type = profile.proxy.as_ref().map(|proxy| proxy.proxy_type);
+        Self::set_input_value(
+            &self.profile_proxy_host,
+            profile
+                .proxy
+                .as_ref()
+                .map_or("", |proxy| proxy.host.as_str()),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.profile_proxy_port,
+            &profile
+                .proxy
+                .as_ref()
+                .map_or(String::new(), |proxy| proxy.port.to_string()),
+            window,
+            cx,
+        );
         self.profile_login_commands_enabled = profile.login_commands.enabled;
         Self::set_input_value(
             &self.profile_login_commands,
@@ -8166,6 +8237,14 @@ impl AppView {
         let port = self.port.read(cx).value().parse::<u16>();
         let username = self.username.read(cx).value().trim().to_owned();
         let identity_file = self.identity_file.read(cx).value().trim().to_owned();
+        let proxy = match self.profile_proxy_settings(cx) {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let proxy_jump = self.jump_profile.read(cx).value().trim().to_owned();
         let keepalive_seconds = self
             .keepalive_seconds
@@ -8298,6 +8377,7 @@ impl AppView {
             favorite: self.profile_favorite,
             auth_method: self.auth_method,
             agent_forwarding: self.profile_agent_forwarding,
+            proxy: proxy.clone(),
             identity_file: if self.auth_method == AuthMethod::PublicKey {
                 identity_file
             } else {
@@ -8469,6 +8549,14 @@ impl AppView {
             cx.notify();
             return;
         }
+        let proxy = match self.profile_proxy_settings(cx) {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let authentication = match build_authentication(
             auth_method,
             &identity_file,
@@ -8494,6 +8582,7 @@ impl AppView {
             username,
             authentication,
             agent_forwarding: false,
+            proxy,
             terminal_size: self.terminal_size,
             jump: Vec::new(),
             keepalive_seconds,
@@ -8643,9 +8732,18 @@ impl AppView {
             .as_ref()
             .map(|profile| profile.forwards.clone())
             .unwrap_or_default();
+        let proxy = match self.profile_proxy_settings(cx) {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let launch_settings = SessionLaunchSettings {
             auth_method: self.auth_method,
             agent_forwarding: self.profile_agent_forwarding,
+            proxy: proxy.clone(),
             identity_file: identity_file.clone(),
             proxy_jump: jump_name.clone(),
             terminal_theme: self.profile_terminal_theme,
@@ -8783,6 +8881,7 @@ impl AppView {
             username: username.clone(),
             authentication,
             agent_forwarding: launch_settings.agent_forwarding,
+            proxy: launch_settings.proxy.clone(),
             terminal_size,
             jump,
             keepalive_seconds,
@@ -11170,6 +11269,74 @@ impl AppView {
             );
         }
 
+        let mut proxy_selector = div().flex().flex_wrap().gap(px(ui_tokens::SPACE_2));
+        for (index, (proxy_type, label)) in [
+            (None, "Direct"),
+            (Some(ProxyType::Socks5), "SOCKS5"),
+            (Some(ProxyType::HttpConnect), "HTTP CONNECT"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            proxy_selector = proxy_selector.child(
+                components::button(
+                    &tokens,
+                    ("profile-proxy-type", index),
+                    self.tr(label),
+                    if self.profile_proxy_type == proxy_type {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Secondary
+                    },
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.profile_proxy_type = proxy_type;
+                    if let Some(proxy_type) = proxy_type {
+                        let default_port = match proxy_type {
+                            ProxyType::Socks5 => "1080",
+                            ProxyType::HttpConnect => "8080",
+                        };
+                        let current = this.profile_proxy_port.read(cx).value();
+                        if current.is_empty() || current == "1080" || current == "8080" {
+                            Self::set_input_value(
+                                &this.profile_proxy_port,
+                                default_port,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                    cx.notify();
+                })),
+            );
+        }
+        let mut proxy_settings = div()
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_2))
+            .child(components::label_text(&tokens, self.tr("Outbound proxy")))
+            .child(proxy_selector);
+        if self.profile_proxy_type.is_some() {
+            proxy_settings = proxy_settings
+                .child(components::field(
+                    &tokens,
+                    self.tr("Proxy host"),
+                    &self.profile_proxy_host,
+                    false,
+                ))
+                .child(components::field(
+                    &tokens,
+                    self.tr("Proxy port"),
+                    &self.profile_proxy_port,
+                    false,
+                ))
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("The proxy handles the first outbound connection. Proxy authentication is not supported; the SSH server host key is still verified."),
+                ));
+        }
+
         let section_content = match self.session_editor_section {
             SessionEditorSection::Connection => div()
                 .flex()
@@ -11283,6 +11450,7 @@ impl AppView {
                 } else {
                     components::warning_text(&tokens, jump_summary)
                 })
+                .child(proxy_settings)
                 .child(components::field(
                     &tokens,
                     self.tr("Keep-alive (seconds, 0 = off)"),

@@ -11,10 +11,12 @@ use crate::forward::{ForwardKind, ForwardRuleSpec, validate_socket_path};
 use crate::groups::normalize_group_path;
 use crate::terminal::TerminalTheme;
 
-const DOCUMENT_VERSION: u8 = 12;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, DOCUMENT_VERSION];
-const EXPORT_DOCUMENT_VERSION: u8 = 8;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 14;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 14] =
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, DOCUMENT_VERSION];
+const EXPORT_DOCUMENT_VERSION: u8 = 10;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 10] =
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 pub const MAX_TAB_LABEL_CHARS: usize = 80;
@@ -35,6 +37,33 @@ pub enum AuthMethod {
     PublicKey,
     KeyboardInteractive,
     Agent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyType {
+    HttpConnect,
+    Socks5,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxySpec {
+    pub proxy_type: ProxyType,
+    pub host: String,
+    pub port: u16,
+}
+
+impl ProxySpec {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.host.trim().is_empty() || self.host.chars().any(char::is_control) {
+            return Err("Proxy host is required and cannot contain control characters.");
+        }
+        if self.port == 0 {
+            return Err("Proxy port must be between 1 and 65535.");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -258,6 +287,8 @@ pub struct HostProfile {
     pub auth_method: AuthMethod,
     #[serde(default, skip_serializing_if = "is_false")]
     pub agent_forwarding: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxySpec>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub identity_file: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -676,6 +707,28 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
                 profile.name
             ));
         }
+        if let Some(proxy) = &profile.proxy {
+            if proxy.host.trim().is_empty() || proxy.host.chars().any(char::is_control) {
+                return Err(format!(
+                    "Host profile {} has an invalid proxy host.",
+                    profile.name
+                ));
+            }
+            if proxy.port == 0 {
+                return Err(format!(
+                    "Host profile {} has an invalid proxy port.",
+                    profile.name
+                ));
+            }
+        }
+        if let Some(proxy) = &profile.proxy {
+            proxy.validate().map_err(|error| {
+                format!(
+                    "Host profile {} has invalid proxy settings: {error}",
+                    profile.name
+                )
+            })?;
+        }
         profile
             .reconnect
             .validate()
@@ -730,6 +783,7 @@ mod tests {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -982,6 +1036,7 @@ mod tests {
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -1112,6 +1167,11 @@ mod tests {
             terminal_theme: Some(TerminalTheme::SolarizedLight),
             tab_color: TabColor::Custom(0x12abef),
             agent_forwarding: true,
+            proxy: Some(ProxySpec {
+                proxy_type: ProxyType::HttpConnect,
+                host: "proxy.example.com".to_owned(),
+                port: 8080,
+            }),
             login_commands: LoginCommandSettings {
                 enabled: true,
                 commands: vec!["cd /srv/app".to_owned(), "uname -a".to_owned()],
@@ -1125,6 +1185,52 @@ mod tests {
 
         store.save(&data).unwrap();
         assert_eq!(store.load().unwrap().profiles, vec![profile]);
+    }
+
+    #[test]
+    fn profiles_round_trip_proxy_settings_and_validate_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProfileStore::at(directory.path().join("hosts.json"));
+        let proxied_profile = HostProfile {
+            proxy: Some(ProxySpec {
+                proxy_type: ProxyType::Socks5,
+                host: "proxy.example.com".to_owned(),
+                port: 1080,
+            }),
+            ..profile("proxied")
+        };
+        let data = HostData {
+            profiles: vec![proxied_profile.clone()],
+            recent: Vec::new(),
+        };
+        store.save(&data).unwrap();
+        assert_eq!(store.load().unwrap().profiles, vec![proxied_profile]);
+
+        for proxy in [
+            ProxySpec {
+                proxy_type: ProxyType::Socks5,
+                host: String::new(),
+                port: 1080,
+            },
+            ProxySpec {
+                proxy_type: ProxyType::HttpConnect,
+                host: "proxy.example.com".to_owned(),
+                port: 0,
+            },
+            ProxySpec {
+                proxy_type: ProxyType::Socks5,
+                host: "proxy\nexample.com".to_owned(),
+                port: 1080,
+            },
+        ] {
+            assert!(
+                validate_profiles(&[HostProfile {
+                    proxy: Some(proxy),
+                    ..profile("invalid-proxy")
+                }])
+                .is_err()
+            );
+        }
     }
 
     #[test]

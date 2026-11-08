@@ -490,6 +490,15 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "If a matching -cert.pub file is next to the identity, dshell uses it as an OpenSSH user certificate." => {
             "若身份文件旁存在匹配的 -cert.pub 文件，dshell 会将其用作 OpenSSH 用户证书。"
         }
+        "Outbound proxy" => "出站代理",
+        "Direct" => "直连",
+        "SOCKS5" => "SOCKS5",
+        "HTTP CONNECT" => "HTTP CONNECT",
+        "Proxy host" => "代理主机",
+        "Proxy port" => "代理端口",
+        "The proxy handles the first outbound connection. Proxy authentication is not supported; the SSH server host key is still verified." => {
+            "代理用于首个出站连接。暂不支持代理认证；仍会校验 SSH 服务器主机密钥。"
+        }
         "Retry interval (seconds)" => "重试间隔（秒）",
         "Maximum attempts" => "最大重试次数",
         "Run commands after login" => "登录后运行命令",

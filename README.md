@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.59`.
+`v0.1.60`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -287,6 +287,10 @@ HTTP CONNECT proxy. Use `--proxy-type socks5|http-connect` and `--proxy-host`;
 the default ports are 1080 and 8080, or set `--proxy-port`. The proxy resolves
 the target hostname. Proxy authentication is not supported; SSH host-key
 verification still applies to the target server.
+
+Saved GUI host profiles can also select Direct, SOCKS5 or HTTP CONNECT under
+Outbound proxy. When a jump chain is configured, the proxy carries the initial
+connection to the first jump host; the remaining hops use SSH channels.
 
 Agent forwarding is off by default. Add `--forward-agent` only when the remote
 command needs the local agent, such as running `git` against another SSH host.

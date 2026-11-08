@@ -32,6 +32,7 @@ use crate::forward::{
 use crate::inline_image::InlineImageCollector;
 use crate::log;
 use crate::profiles::ReconnectSettings;
+pub use crate::profiles::{ProxySpec, ProxyType};
 use crate::sftp::{self, SftpCommand, SftpEvent};
 use crate::terminal::{
     CursorStyle, MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton,
@@ -63,19 +64,6 @@ pub enum Authentication {
     Agent,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProxyType {
-    HttpConnect,
-    Socks5,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProxySpec {
-    pub proxy_type: ProxyType,
-    pub host: String,
-    pub port: u16,
-}
-
 #[derive(Clone)]
 pub struct JumpSpec {
     pub host: String,
@@ -101,6 +89,7 @@ pub struct ConnectionSpec {
     pub username: String,
     pub authentication: Authentication,
     pub agent_forwarding: bool,
+    pub proxy: Option<ProxySpec>,
     pub terminal_size: TerminalSize,
     /// Jump chain, ordered nearest-first: hops[0] is dialed directly from
     /// this machine, each later hop is dialed through the previous one, and
@@ -778,6 +767,26 @@ async fn connect_proxy_stream(
         }
     }
     Ok(stream)
+}
+
+async fn connect_initial_session<H: Handler + Send + 'static>(
+    config: Arc<client::Config>,
+    host: &str,
+    port: u16,
+    handler: H,
+    proxy: Option<&ProxySpec>,
+) -> Result<client::Handle<H>> {
+    match proxy {
+        Some(proxy) => {
+            let stream = connect_proxy_stream(proxy, host, port).await?;
+            client::connect_stream(config, stream, handler)
+                .await
+                .map_err(|error| anyhow!("{error:?}"))
+        }
+        None => client::connect(config, (host, port), handler)
+            .await
+            .map_err(|error| anyhow!("{error:?}")),
+    }
 }
 
 pub async fn run_remote_command(
@@ -1557,6 +1566,13 @@ async fn run_connection(
 /// is cancelled immediately after the test. Credentials are consumed here and
 /// not stored. Must run on a Tokio runtime.
 pub async fn test_connection(spec: ConnectionSpec) -> Result<String> {
+    test_connection_with_known_hosts(spec, default_known_hosts_path()?).await
+}
+
+async fn test_connection_with_known_hosts(
+    spec: ConnectionSpec,
+    known_hosts_path: PathBuf,
+) -> Result<String> {
     let (_command_tx, mut command_rx) = mpsc::channel(8);
     let (cancel_tx, mut cancel_rx) = watch::channel(false);
     let (event_tx, mut event_rx) = mpsc::channel(16);
@@ -1567,7 +1583,6 @@ pub async fn test_connection(spec: ConnectionSpec) -> Result<String> {
     let sftp_command_target = Arc::new(AsyncMutex::new(None::<mpsc::Sender<SftpCommand>>));
     let (_forward_command_tx, mut forward_command_rx) = mpsc::channel(1);
     let (forward_event_tx, _forward_event_rx) = mpsc::unbounded_channel::<ForwardEvent>();
-    let known_hosts_path = default_known_hosts_path()?;
     let connection = tokio::spawn({
         let spec = spec.clone();
         let mut command_rx = command_rx;
@@ -1705,6 +1720,7 @@ async fn run_connection_attempt_with_known_hosts(
         username,
         authentication,
         agent_forwarding,
+        proxy,
         terminal_size,
         jump,
         keepalive_seconds,
@@ -1744,13 +1760,15 @@ async fn run_connection_attempt_with_known_hosts(
                     events: None,
                 };
                 let mut handle = match hop_handles.last_mut() {
-                    None => {
-                        client::connect(Arc::clone(&config), (hop.host.as_str(), hop.port), handler)
-                            .await
-                            .with_context(|| {
-                                format!("SSH jump host {} handshake failed", hop.host)
-                            })?
-                    }
+                    None => connect_initial_session(
+                        Arc::clone(&config),
+                        &hop.host,
+                        hop.port,
+                        handler,
+                        proxy.as_ref(),
+                    )
+                    .await
+                    .with_context(|| format!("SSH jump host {} handshake failed", hop.host))?,
                     Some(previous) => {
                         let channel = previous
                             .channel_open_direct_tcpip(
@@ -1805,7 +1823,7 @@ async fn run_connection_attempt_with_known_hosts(
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
-            session = client::connect(config, (host.as_str(), port), handler)
+            session = connect_initial_session(config, &host, port, handler, proxy.as_ref())
                 .await
                 .context("SSH handshake failed")?;
         }
@@ -4223,8 +4241,9 @@ mod tests {
         parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
         parse_service_logs, power_action_command, process_termination_command, relay_agent_stream,
         run_connection_with_known_hosts, run_remote_command, run_sftp_command, run_sftp_commands,
-        sanitize_zmodem_name, service_action_command, service_logs_command, valid_process_pid,
-        valid_service_name, wait_before_reconnect,
+        sanitize_zmodem_name, service_action_command, service_logs_command,
+        test_connection_with_known_hosts, valid_process_pid, valid_service_name,
+        wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -4922,6 +4941,7 @@ abc	img	name"
             username: "test".to_owned(),
             authentication: Authentication::Password(Zeroizing::new("secret".to_owned())),
             agent_forwarding: false,
+            proxy: None,
             terminal_size: TerminalSize {
                 columns: 80,
                 rows: 24,
@@ -5012,6 +5032,7 @@ abc	img	name"
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5496,6 +5517,7 @@ abc	img	name"
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5629,6 +5651,7 @@ abc	img	name"
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5842,6 +5865,7 @@ abc	img	name"
                     username: username.clone(),
                     authentication: Authentication::Password(Zeroizing::new(password.clone())),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5989,6 +6013,7 @@ abc	img	name"
                     username: username.clone(),
                     authentication: Authentication::Password(Zeroizing::new(password.clone())),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6150,6 +6175,7 @@ abc	img	name"
                         totp_secret: None,
                     },
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6285,6 +6311,7 @@ abc	img	name"
                     passphrase: Zeroizing::new("definitely-the-wrong-passphrase".to_owned()),
                 },
                 agent_forwarding: false,
+                proxy: None,
                 terminal_size: TerminalSize {
                     columns: 80,
                     rows: 24,
@@ -6361,6 +6388,7 @@ abc	img	name"
                         passphrase: Zeroizing::new(passphrase),
                     },
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6457,6 +6485,52 @@ abc	img	name"
                 Ok::<(), anyhow::Error>(())
             })
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_gui_connection_uses_saved_proxy_transport() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for proxy_type in [ProxyType::Socks5, ProxyType::HttpConnect] {
+            let (proxy, proxy_task) =
+                runtime.block_on(start_test_proxy(proxy_type, host.clone(), port));
+            let spec = ConnectionSpec {
+                host: host.clone(),
+                port,
+                username: username.clone(),
+                authentication: Authentication::Password(Zeroizing::new(password.clone())),
+                agent_forwarding: false,
+                proxy: Some(proxy),
+                terminal_size: TerminalSize {
+                    columns: 80,
+                    rows: 24,
+                },
+                jump: Vec::new(),
+                keepalive_seconds: 0,
+                reconnect: ReconnectSettings::default(),
+                theme: TerminalTheme::Default,
+                cursor_style: CursorStyle::Block,
+            };
+            let result =
+                runtime.block_on(test_connection_with_known_hosts(spec, known_hosts.clone()));
+            proxy_task.abort();
+            assert!(result.unwrap().starts_with("Connected to "));
+        }
     }
 
     #[test]
@@ -7014,6 +7088,7 @@ abc	img	name"
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -7530,6 +7605,7 @@ abc	img	name"
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -7727,6 +7803,7 @@ abc	img	name"
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
+                    proxy: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
