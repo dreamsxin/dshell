@@ -160,6 +160,11 @@ pub enum SftpCommand {
         from: String,
         to: String,
     },
+    CreateSymlink {
+        target: String,
+        link: String,
+    },
+    ReadLink(String),
     CreateDirectory(String),
     RemoveFile(String),
     RemoveDirectory(String),
@@ -192,6 +197,10 @@ pub enum SftpEvent {
     RealPath {
         requested_path: String,
         resolved_path: String,
+    },
+    LinkTarget {
+        path: String,
+        target: String,
     },
     FilesystemInfo(RemoteFilesystemInfo),
     FilesystemUnavailable {
@@ -423,6 +432,37 @@ pub async fn run<S>(
                     }
                 }
             }
+            SftpCommand::CreateSymlink { target, link } => {
+                // OpenSSH's SFTP v3 server retains the reversed wire argument order.
+                match session.symlink(target.clone(), link.clone()).await {
+                    Ok(()) => {
+                        let _ = events
+                            .send(SftpEvent::OperationFinished {
+                                action: format!("Created symbolic link {link} -> {target}"),
+                            })
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = events
+                            .send(SftpEvent::Error(format!(
+                                "Could not create symbolic link {link} -> {target}: {error}"
+                            )))
+                            .await;
+                    }
+                }
+            }
+            SftpCommand::ReadLink(path) => match session.read_link(path.clone()).await {
+                Ok(target) => {
+                    let _ = events.send(SftpEvent::LinkTarget { path, target }).await;
+                }
+                Err(error) => {
+                    let _ = events
+                        .send(SftpEvent::Error(format!(
+                            "Could not read symbolic link {path}: {error}"
+                        )))
+                        .await;
+                }
+            },
             SftpCommand::CreateDirectory(path) => match session.create_dir(path.clone()).await {
                 Ok(()) => {
                     let _ = events

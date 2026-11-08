@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.54`.
+`v0.1.55`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -289,6 +289,10 @@ The CLI also supports batch SFTP operations:
 dshell-cli sftp --host server.example.com --user operator --agent ls /srv
 dshell-cli sftp --host server.example.com --user operator --agent stat /srv/build.zip
 dshell-cli sftp --host server.example.com --user operator --agent realpath ./build.zip
+dshell-cli sftp --host server.example.com --user operator --agent rename /srv/old.zip /srv/new.zip
+dshell-cli sftp --host server.example.com --user operator --agent chmod 0640 /srv/secret.txt
+dshell-cli sftp --host server.example.com --user operator --agent readlink /srv/current
+dshell-cli sftp --host server.example.com --user operator --agent symlink releases/current /srv/current
 dshell-cli sftp --host server.example.com --user operator --agent put .\build.zip /srv/build.zip
 dshell-cli sftp --host server.example.com --user operator --agent get /srv/build.zip .\build.zip --resume
 dshell-cli sftp --host server.example.com --user operator --agent put-dir .\site /srv/site --resume
@@ -297,8 +301,10 @@ dshell-cli sftp --host server.example.com --user operator --agent get-glob "/srv
 dshell-cli sftp --host server.example.com --user operator --agent batch --file .\deploy.json
 ```
 
-Available actions are `ls`, `stat`, `realpath`, `put`, `get`, `put-dir`,
-`get-dir`, `mkdir`, `rm`, and `rmdir`. `stat` reports the remote type, size,
+Available actions are `ls`, `stat`, `realpath`, `rename`, `chmod`, `readlink`,
+`symlink`, `put`, `get`, `put-dir`, `get-dir`, `mkdir`, `rm`, and `rmdir`.
+`chmod` accepts a 3- or 4-digit octal mode. `readlink` and `symlink` operate on
+remote symbolic links. `stat` reports the remote type, size,
 permission mode, and modification time; `realpath` prints the server-resolved
 absolute path. Existing destinations are refused unless `--overwrite` or
 `--resume` is explicitly selected. Batch transfers reuse the desktop SFTP
@@ -320,6 +326,10 @@ Each item uses the same operation names and fields, for example:
     { "op": "mkdir", "remote": "/srv/releases" },
     { "op": "stat", "remote": "/srv/build.zip" },
     { "op": "real_path", "remote": "/srv/releases" },
+    { "op": "rename", "from": "/srv/old.zip", "to": "/srv/new.zip" },
+    { "op": "chmod", "remote": "/srv/new.zip", "mode": "0640" },
+    { "op": "readlink", "remote": "/srv/current" },
+    { "op": "symlink", "target": "releases/current", "link": "/srv/current" },
     { "op": "put", "local": ".\\build.zip", "remote": "/srv/releases/build.zip" },
     { "op": "put_dir", "local": ".\\site", "remote": "/srv/www/site", "resume": true },
     { "op": "put_glob", "local_pattern": ".\\dist\\*.zip", "remote_directory": "/srv/releases" },
@@ -328,8 +338,9 @@ Each item uses the same operation names and fields, for example:
 }
 ```
 
-Batch operation objects use `list`, `stat`, `real_path`, `put`, `get`,
-`put_dir`, `get_dir`, `put_glob`, `get_glob`, `mkdir`, `rm`, or `rmdir`. Transfers may set `overwrite`
+Batch operation objects use `list`, `stat`, `real_path`, `rename`, `chmod`,
+`readlink`, `symlink`, `put`, `get`, `put_dir`, `get_dir`, `put_glob`,
+`get_glob`, `mkdir`, `rm`, or `rmdir`. Transfers may set `overwrite`
 or `resume` to `true`; setting both is invalid. Batch files contain paths and
 options only, never credentials.
 Operations run in order and stop on the first failure; completed earlier

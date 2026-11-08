@@ -120,6 +120,10 @@ pub enum RemoteSftpOutput {
         requested_path: String,
         resolved_path: String,
     },
+    LinkTarget {
+        path: String,
+        target: String,
+    },
     Completed {
         transfers: Vec<(String, u64)>,
         actions: Vec<String>,
@@ -988,7 +992,9 @@ async fn run_remote_download_glob(
     .await?
     {
         RemoteSftpOutput::Listed { entries, .. } => entries,
-        RemoteSftpOutput::Stat(_) | RemoteSftpOutput::RealPath { .. } => {
+        RemoteSftpOutput::Stat(_)
+        | RemoteSftpOutput::RealPath { .. }
+        | RemoteSftpOutput::LinkTarget { .. } => {
             bail!("Remote glob listing returned an unexpected result.")
         }
         RemoteSftpOutput::Completed { .. } => bail!("Remote glob listing returned no entries."),
@@ -1054,6 +1060,10 @@ async fn run_sftp_worker_command(
         SftpCommand::RealPath(path) => Some(path.clone()),
         _ => None,
     };
+    let expected_link_path = match &command {
+        SftpCommand::ReadLink(path) => Some(path.clone()),
+        _ => None,
+    };
     command_tx
         .send(command)
         .await
@@ -1087,6 +1097,11 @@ async fn run_sftp_worker_command(
                     resolved_path,
                 });
             }
+            SftpEvent::LinkTarget { path, target }
+                if expected_link_path.as_deref() == Some(path.as_str()) =>
+            {
+                return Ok(RemoteSftpOutput::LinkTarget { path, target });
+            }
             SftpEvent::Ready { .. } => {}
             SftpEvent::TransferStarted { name, total, .. } => {
                 transfer_names.insert(name, total);
@@ -1119,7 +1134,8 @@ async fn run_sftp_worker_command(
             | SftpEvent::FileContent { .. }
             | SftpEvent::FileSaved { .. }
             | SftpEvent::Stat { .. }
-            | SftpEvent::RealPath { .. } => {}
+            | SftpEvent::RealPath { .. }
+            | SftpEvent::LinkTarget { .. } => {}
         }
     }
 }
@@ -6185,6 +6201,54 @@ abc	img	name"
             run(SftpCommand::RealPath(remote_file.clone())).unwrap(),
             RemoteSftpOutput::RealPath { resolved_path, .. }
                 if resolved_path.ends_with("/upload.txt")
+        ));
+        assert!(matches!(
+            run(SftpCommand::SetMetadata {
+                path: remote_file.clone(),
+                permissions: Some(0o640),
+                atime: None,
+                mtime: None,
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::Stat(remote_file.clone())).unwrap(),
+            RemoteSftpOutput::Stat(entry) if entry.permissions.map(|mode| mode & 0o7777) == Some(0o640)
+        ));
+        let renamed_file = format!("{remote_root}/renamed.txt");
+        assert!(matches!(
+            run(SftpCommand::Rename {
+                from: remote_file.clone(),
+                to: renamed_file.clone(),
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        let link = format!("{remote_root}/upload-link");
+        assert!(matches!(
+            run(SftpCommand::CreateSymlink {
+                target: renamed_file.clone(),
+                link: link.clone(),
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::ReadLink(link.clone())).unwrap(),
+            RemoteSftpOutput::LinkTarget { target, .. } if target == renamed_file
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveFile(link)).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::Rename {
+                from: renamed_file,
+                to: remote_file.clone(),
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
         ));
         assert!(run(SftpCommand::Stat(format!("{remote_root}/missing"))).is_err());
         let overwrite_error = run(SftpCommand::Upload {

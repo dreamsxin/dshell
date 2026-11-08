@@ -12766,7 +12766,8 @@ impl AppView {
                 SftpEvent::FileContent { .. }
                 | SftpEvent::FileSaved { .. }
                 | SftpEvent::Stat { .. }
-                | SftpEvent::RealPath { .. } => {}
+                | SftpEvent::RealPath { .. }
+                | SftpEvent::LinkTarget { .. } => {}
             }
         }
         if let Some(path) = remembered_remote_path {

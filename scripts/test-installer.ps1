@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.54-x64.exe"
+$installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.55-x64.exe"
 if (-not (Test-Path -LiteralPath $installerPath)) {
     throw "Build the installer before running this smoke test: $installerPath"
 }

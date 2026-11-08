@@ -26,6 +26,8 @@ Bitvise 提供 `sexec` 命令行远程执行客户端。`v0.1.48` 增加原生 `
 
 Bitvise 的 SFTP 命令行工作流提供远端文件属性和规范化路径查询。`v0.1.54` 为 `dshell-cli sftp` 及 JSON batch 增加 `stat` 与 `realpath`，通过 SSH SFTP subsystem 执行，不依赖远端 shell。
 
+`v0.1.55` 扩展 SFTP 文件管理 CLI 和批处理：增加重命名、八进制权限变更、符号链接读取与创建，所有操作复用同一 SFTP subsystem，不调用远端 shell。
+
 ## 零、实施状态审计（2026-11-06）
 
 基于代码级 grep 审计，每个功能在 `src/` 中的实际引用计数确认了实现状态：

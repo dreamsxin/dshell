@@ -6,6 +6,32 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.55] - 2026-11-09
+
+Adds remote SFTP file-management operations to the CLI.
+
+### Added
+
+- Add `rename`, `chmod`, `readlink` and `symlink` SFTP commands.
+- Support the same operations in version 1 JSON SFTP batch files.
+- Parse chmod modes as 3- or 4-digit octal permissions and escape terminal
+  control characters in operation and transfer output.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (273 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including permission changes,
+  remote renames and symbolic-link create/read/remove.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.55-x64.exe` is 11,152,185 bytes. SHA-256:
+  `2AA316C8FF1926786ED3510BD9571FC3D8E47DE15E4F538781D4DBFB37396820`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.54] - 2026-11-09
 
 Adds remote SFTP metadata and canonical-path queries to the CLI.

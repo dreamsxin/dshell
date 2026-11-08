@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use dshell::{
-    sftp::SftpCommand,
+    sftp::{self, SftpCommand},
     ssh::{self, Authentication, RemoteSftpOutput},
 };
 use serde::Deserialize;
@@ -106,6 +106,21 @@ enum SftpAction {
     RealPath {
         remote: String,
     },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Chmod {
+        mode: String,
+        remote: String,
+    },
+    Readlink {
+        remote: String,
+    },
+    Symlink {
+        target: String,
+        link: String,
+    },
     Put {
         local: PathBuf,
         remote: String,
@@ -168,6 +183,21 @@ enum SftpBatchOperation {
     },
     RealPath {
         remote: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Chmod {
+        remote: String,
+        mode: String,
+    },
+    Readlink {
+        remote: String,
+    },
+    Symlink {
+        target: String,
+        link: String,
     },
     Put {
         local: PathBuf,
@@ -341,6 +371,15 @@ fn run_sftp(args: SftpArgs) -> Result<u8> {
             SftpAction::Ls { remote } => SftpCommand::List(remote),
             SftpAction::Stat { remote } => SftpCommand::Stat(remote),
             SftpAction::RealPath { remote } => SftpCommand::RealPath(remote),
+            SftpAction::Rename { from, to } => SftpCommand::Rename { from, to },
+            SftpAction::Chmod { mode, remote } => SftpCommand::SetMetadata {
+                path: remote,
+                permissions: Some(sftp::parse_permission_mode(&mode).map_err(anyhow::Error::msg)?),
+                atime: None,
+                mtime: None,
+            },
+            SftpAction::Readlink { remote } => SftpCommand::ReadLink(remote),
+            SftpAction::Symlink { target, link } => SftpCommand::CreateSymlink { target, link },
             SftpAction::Put {
                 local,
                 remote,
@@ -437,6 +476,19 @@ fn load_sftp_batch(path: &std::path::Path) -> Result<Vec<SftpCommand>> {
                 SftpBatchOperation::List { remote } => SftpCommand::List(remote),
                 SftpBatchOperation::Stat { remote } => SftpCommand::Stat(remote),
                 SftpBatchOperation::RealPath { remote } => SftpCommand::RealPath(remote),
+                SftpBatchOperation::Rename { from, to } => SftpCommand::Rename { from, to },
+                SftpBatchOperation::Chmod { remote, mode } => SftpCommand::SetMetadata {
+                    path: remote,
+                    permissions: Some(
+                        sftp::parse_permission_mode(&mode).map_err(anyhow::Error::msg)?,
+                    ),
+                    atime: None,
+                    mtime: None,
+                },
+                SftpBatchOperation::Readlink { remote } => SftpCommand::ReadLink(remote),
+                SftpBatchOperation::Symlink { target, link } => {
+                    SftpCommand::CreateSymlink { target, link }
+                }
                 SftpBatchOperation::Put {
                     local,
                     remote,
@@ -586,13 +638,22 @@ fn print_sftp_output(output: RemoteSftpOutput) -> Result<()> {
             writeln!(stdout, "{}", escape_terminal_controls(&resolved_path))?;
             stdout.flush()?;
         }
+        RemoteSftpOutput::LinkTarget { target, .. } => {
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{}", escape_terminal_controls(&target))?;
+            stdout.flush()?;
+        }
         RemoteSftpOutput::Completed { transfers, actions } => {
             let mut stderr = std::io::stderr().lock();
             for action in actions {
-                writeln!(stderr, "{action}")?;
+                writeln!(stderr, "{}", escape_terminal_controls(&action))?;
             }
             for (name, bytes) in transfers {
-                writeln!(stderr, "{name}: {bytes} bytes transferred")?;
+                writeln!(
+                    stderr,
+                    "{}: {bytes} bytes transferred",
+                    escape_terminal_controls(&name)
+                )?;
             }
             stderr.flush()?;
         }
@@ -733,6 +794,33 @@ mod tests {
     }
 
     #[test]
+    fn sftp_parses_remote_file_management_actions() {
+        let actions = [
+            ("rename", vec!["/srv/old", "/srv/new"]),
+            ("chmod", vec!["0640", "/srv/file"]),
+            ("readlink", vec!["/srv/link"]),
+            ("symlink", vec!["target", "/srv/link"]),
+        ];
+        for (action, arguments) in actions {
+            let mut command = vec![
+                "dshell-cli",
+                "sftp",
+                "--host",
+                "server.example.com",
+                "--user",
+                "operator",
+                "--agent",
+                action,
+            ];
+            command.extend(arguments);
+            assert!(
+                Cli::try_parse_from(command).is_ok(),
+                "{action} should parse"
+            );
+        }
+    }
+
+    #[test]
     fn sftp_overwrite_and_resume_are_mutually_exclusive() {
         assert!(
             Cli::try_parse_from([
@@ -759,12 +847,12 @@ mod tests {
         let path = directory.path().join("batch.json");
         std::fs::write(
             &path,
-            r#"{"version":1,"operations":[{"op":"list"},{"op":"stat","remote":"/tmp/file.bin"},{"op":"real_path","remote":"/tmp"},{"op":"put","local":"file.bin","remote":"/tmp/file.bin","resume":true},{"op":"mkdir","remote":"/tmp/new-dir"}]}"#,
+            r#"{"version":1,"operations":[{"op":"list"},{"op":"stat","remote":"/tmp/file.bin"},{"op":"real_path","remote":"/tmp"},{"op":"rename","from":"/tmp/old","to":"/tmp/new"},{"op":"chmod","remote":"/tmp/new","mode":"0640"},{"op":"readlink","remote":"/tmp/link"},{"op":"symlink","target":"new","link":"/tmp/link"},{"op":"put","local":"file.bin","remote":"/tmp/file.bin","resume":true},{"op":"mkdir","remote":"/tmp/new-dir"}]}"#,
         )
         .unwrap();
 
         let commands = super::load_sftp_batch(&path).unwrap();
-        assert_eq!(commands.len(), 5);
+        assert_eq!(commands.len(), 9);
         assert!(matches!(&commands[0], SftpCommand::List(path) if path == "."));
         assert!(matches!(
             &commands[1],
@@ -774,13 +862,24 @@ mod tests {
             &commands[2],
             SftpCommand::RealPath(path) if path == "/tmp"
         ));
+        assert!(
+            matches!(&commands[3], SftpCommand::Rename { from, to } if from == "/tmp/old" && to == "/tmp/new")
+        );
         assert!(matches!(
-            &commands[3],
+            &commands[4],
+            SftpCommand::SetMetadata { path, permissions: Some(0o640), .. } if path == "/tmp/new"
+        ));
+        assert!(matches!(&commands[5], SftpCommand::ReadLink(path) if path == "/tmp/link"));
+        assert!(
+            matches!(&commands[6], SftpCommand::CreateSymlink { target, link } if target == "new" && link == "/tmp/link")
+        );
+        assert!(matches!(
+            &commands[7],
             SftpCommand::Upload { remote, resume: true, overwrite: false, .. }
                 if remote == "/tmp/file.bin"
         ));
         assert!(matches!(
-            &commands[4],
+            &commands[8],
             SftpCommand::CreateDirectory(path) if path == "/tmp/new-dir"
         ));
     }
@@ -814,6 +913,13 @@ mod tests {
         std::fs::write(
             &path,
             r#"{"version":1,"operations":[{"op":"list","remote":"/tmp","password":"secret"}]}"#,
+        )
+        .unwrap();
+        assert!(super::load_sftp_batch(&path).is_err());
+
+        std::fs::write(
+            &path,
+            r#"{"version":1,"operations":[{"op":"chmod","remote":"/tmp/file","mode":"0888"}]}"#,
         )
         .unwrap();
         assert!(super::load_sftp_batch(&path).is_err());
