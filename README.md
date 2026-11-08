@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.58`.
+`v0.1.59`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -265,6 +265,7 @@ The installer includes `dshell-cli.exe` for non-interactive remote commands:
 
 ```powershell
 dshell-cli exec --host server.example.com --user operator --agent -- "uname -a"
+dshell-cli exec --host server.example.com --user operator --agent --proxy-type socks5 --proxy-host proxy.example.com -- "uname -a"
 dshell-cli exec --host server.example.com --user operator --identity-file .\id_ed25519 --certificate .\id_ed25519-cert.pub -- "uname -a"
 dshell-cli exec --host server.example.com --user operator --agent --forward-agent -- "ssh-add -L"
 ```
@@ -280,6 +281,12 @@ returns the remote exit status. Interactive keyboard-interactive prompts,
 including OTP prompts, are not supported in this command mode. The command is
 visible in local process arguments and may be logged by the remote shell; do
 not put secrets in the command text.
+
+CLI `exec` and SFTP operations can connect through an unauthenticated SOCKS5 or
+HTTP CONNECT proxy. Use `--proxy-type socks5|http-connect` and `--proxy-host`;
+the default ports are 1080 and 8080, or set `--proxy-port`. The proxy resolves
+the target hostname. Proxy authentication is not supported; SSH host-key
+verification still applies to the target server.
 
 Agent forwarding is off by default. Add `--forward-agent` only when the remote
 command needs the local agent, such as running `git` against another SSH host.

@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use dshell::{
     sftp::{self, SftpCommand},
-    ssh::{self, Authentication, RemoteSftpOutput},
+    ssh::{self, Authentication, ProxySpec, ProxyType, RemoteSftpOutput},
 };
 use serde::Deserialize;
 use tokio::runtime::Builder;
@@ -73,6 +73,18 @@ struct ConnectionArgs {
     passphrase_stdin: bool,
     #[arg(long, value_name = "PATH")]
     known_hosts: Option<PathBuf>,
+    #[arg(long, value_enum, requires = "proxy_host")]
+    proxy_type: Option<ProxyTypeArg>,
+    #[arg(long, requires = "proxy_type")]
+    proxy_host: Option<String>,
+    #[arg(long, requires = "proxy_type")]
+    proxy_port: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ProxyTypeArg {
+    HttpConnect,
+    Socks5,
 }
 
 #[derive(Subcommand)]
@@ -372,7 +384,36 @@ fn build_authentication(args: &ConnectionArgs) -> Result<Authentication> {
     } else {
         Authentication::Agent
     };
-    Ok(authentication)
+    let proxy = match (args.proxy_type, args.proxy_host.as_ref()) {
+        (Some(proxy_type), Some(host)) => {
+            let proxy_type = match proxy_type {
+                ProxyTypeArg::HttpConnect => ProxyType::HttpConnect,
+                ProxyTypeArg::Socks5 => ProxyType::Socks5,
+            };
+            let default_port = match proxy_type {
+                ProxyType::HttpConnect => 8080,
+                ProxyType::Socks5 => 1080,
+            };
+            let port = args.proxy_port.unwrap_or(default_port);
+            if host.trim().is_empty() || port == 0 {
+                bail!("Proxy host and port must be valid.");
+            }
+            Some(ProxySpec {
+                proxy_type,
+                host: host.clone(),
+                port,
+            })
+        }
+        (None, None) if args.proxy_port.is_none() => None,
+        _ => bail!("Choose a proxy type and proxy host together."),
+    };
+    Ok(match proxy {
+        Some(proxy) => Authentication::ViaProxy {
+            authentication: Box::new(authentication),
+            proxy,
+        },
+        None => authentication,
+    })
 }
 
 fn run_sftp(args: SftpArgs) -> Result<u8> {
@@ -835,6 +876,53 @@ mod tests {
                 "operator",
                 "--certificate",
                 "id_ed25519-cert.pub",
+                "--",
+                "true",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn connection_parses_http_and_socks_proxy_settings() {
+        for (proxy_type, port) in [("http-connect", "8080"), ("socks5", "1088")] {
+            let parsed = Cli::try_parse_from([
+                "dshell-cli",
+                "exec",
+                "--host",
+                "server.example.com",
+                "--user",
+                "operator",
+                "--agent",
+                "--proxy-type",
+                proxy_type,
+                "--proxy-host",
+                "proxy.example.com",
+                "--proxy-port",
+                port,
+                "--",
+                "true",
+            ])
+            .unwrap();
+            let super::Command::Exec(args) = parsed.command else {
+                panic!("expected exec command");
+            };
+            assert!(matches!(
+                super::build_authentication(&args.connection).unwrap(),
+                dshell::ssh::Authentication::ViaProxy { .. }
+            ));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "dshell-cli",
+                "exec",
+                "--host",
+                "server.example.com",
+                "--user",
+                "operator",
+                "--agent",
+                "--proxy-type",
+                "socks5",
                 "--",
                 "true",
             ])

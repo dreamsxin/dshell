@@ -6,6 +6,34 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.59] - 2026-11-09
+
+Adds outbound SOCKS5 and HTTP CONNECT proxies to CLI SSH operations.
+
+### Added
+
+- Add `--proxy-type socks5|http-connect`, `--proxy-host` and optional
+  `--proxy-port` to CLI `exec` and SFTP commands.
+- Tunnel SSH through the proxy while keeping DNS resolution for the target at
+  the proxy and strict `known_hosts` verification bound to the SSH target.
+- Fail closed when HTTP CONNECT is denied or SOCKS5 requests an unsupported
+  authentication method.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (279 passed), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including real SFTP sessions
+  through HTTP CONNECT and SOCKS5 and explicit proxy failure-path tests.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.59-x64.exe` is 11,216,552 bytes. SHA-256:
+  `F4575E62C077EBE01A39E925F11570CD7AB14E15099FED72D733B90CAA2A87F9`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.58] - 2026-11-09
 
 Extends OpenSSH user certificate authentication to saved GUI identities.

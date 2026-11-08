@@ -28,7 +28,7 @@ try {
         throw "Inno Setup compilation failed."
     }
 
-    $installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.58-x64.exe"
+    $installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.59-x64.exe"
     if (-not (Test-Path -LiteralPath $installerPath)) {
         throw "The expected installer output was not created: $installerPath"
     }

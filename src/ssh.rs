@@ -56,7 +56,24 @@ pub enum Authentication {
         certificate_file: PathBuf,
         passphrase: Zeroizing<String>,
     },
+    ViaProxy {
+        authentication: Box<Authentication>,
+        proxy: ProxySpec,
+    },
     Agent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyType {
+    HttpConnect,
+    Socks5,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxySpec {
+    pub proxy_type: ProxyType,
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Clone)]
@@ -603,6 +620,13 @@ async fn connect_command_session(
     if host.trim().is_empty() || username.trim().is_empty() || port == 0 {
         bail!("A host, username, and valid port are required.");
     }
+    let (authentication, proxy) = match authentication {
+        Authentication::ViaProxy {
+            authentication,
+            proxy,
+        } => (*authentication, Some(proxy)),
+        authentication => (authentication, None),
+    };
     if matches!(
         authentication,
         Authentication::KeyboardInteractive {
@@ -623,10 +647,15 @@ async fn connect_command_session(
         events: None,
     };
     let config = Arc::new(client::Config::default());
-    let mut session = timeout(
-        Duration::from_secs(20),
-        client::connect(config, (host.as_str(), port), handler),
-    )
+    let mut session = timeout(Duration::from_secs(20), async {
+        match proxy {
+            Some(proxy) => {
+                let stream = connect_proxy_stream(&proxy, &host, port).await?;
+                client::connect_stream(config, stream, handler).await
+            }
+            None => client::connect(config, (host.as_str(), port), handler).await,
+        }
+    })
     .await
     .context("Timed out during the SSH handshake")?
     .with_context(|| format!("SSH handshake to {host}:{port} failed"))?;
@@ -638,6 +667,117 @@ async fn connect_command_session(
     .await
     .context("Timed out during SSH authentication")??;
     Ok(session)
+}
+
+async fn connect_proxy_stream(
+    proxy: &ProxySpec,
+    target_host: &str,
+    target_port: u16,
+) -> Result<tokio::net::TcpStream> {
+    if proxy.host.trim().is_empty() || proxy.port == 0 {
+        bail!("A valid proxy host and port are required.");
+    }
+    if target_host.trim().is_empty() || target_host.chars().any(char::is_control) {
+        bail!("Target host contains invalid control characters.");
+    }
+    let mut stream = tokio::net::TcpStream::connect((proxy.host.as_str(), proxy.port))
+        .await
+        .with_context(|| format!("Could not connect to proxy {}:{}", proxy.host, proxy.port))?;
+    match proxy.proxy_type {
+        ProxyType::HttpConnect => {
+            let authority = if target_host.contains(':') && !target_host.starts_with('[') {
+                format!("[{target_host}]:{target_port}")
+            } else {
+                format!("{target_host}:{target_port}")
+            };
+            let request = format!(
+                "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
+            );
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .context("Could not send HTTP CONNECT request")?;
+            let mut response = Vec::with_capacity(256);
+            let mut byte = [0u8; 1];
+            while response.len() < 16 * 1024 && !response.ends_with(b"\r\n\r\n") {
+                stream
+                    .read_exact(&mut byte)
+                    .await
+                    .context("Proxy closed during the HTTP CONNECT response")?;
+                response.push(byte[0]);
+            }
+            if !response.ends_with(b"\r\n\r\n") {
+                bail!("HTTP CONNECT proxy response exceeded 16 KiB.");
+            }
+            let first_line = response
+                .split(|byte| *byte == b'\n')
+                .next()
+                .map(|line| String::from_utf8_lossy(line).trim().to_owned())
+                .unwrap_or_default();
+            let mut fields = first_line.split_ascii_whitespace();
+            let protocol = fields.next().unwrap_or_default();
+            let status = fields.next().unwrap_or_default();
+            if !matches!(protocol, "HTTP/1.0" | "HTTP/1.1")
+                || status.len() != 3
+                || !status.bytes().all(|byte| byte.is_ascii_digit())
+                || status != "200"
+            {
+                bail!("HTTP CONNECT proxy rejected the tunnel (status {status}).");
+            }
+        }
+        ProxyType::Socks5 => {
+            stream
+                .write_all(&[0x05, 0x01, 0x00])
+                .await
+                .context("Could not send SOCKS5 method negotiation")?;
+            let mut method = [0u8; 2];
+            stream
+                .read_exact(&mut method)
+                .await
+                .context("Could not read SOCKS5 method selection")?;
+            if method != [0x05, 0x00] {
+                bail!("SOCKS5 proxy requires an unsupported authentication method.");
+            }
+            let target = target_host.as_bytes();
+            if target.is_empty() || target.len() > u8::MAX as usize || target.contains(&0) {
+                bail!("Target host is not valid for SOCKS5 domain forwarding.");
+            }
+            let mut request = Vec::with_capacity(target.len() + 7);
+            request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, target.len() as u8]);
+            request.extend_from_slice(target);
+            request.extend_from_slice(&target_port.to_be_bytes());
+            stream
+                .write_all(&request)
+                .await
+                .context("Could not send SOCKS5 connect request")?;
+            let mut response = [0u8; 4];
+            stream
+                .read_exact(&mut response)
+                .await
+                .context("Could not read SOCKS5 connect response")?;
+            if response[0] != 0x05 || response[1] != 0x00 || response[2] != 0x00 {
+                bail!("SOCKS5 proxy rejected the tunnel (status {}).", response[1]);
+            }
+            match response[3] {
+                0x01 => {
+                    let mut remainder = [0u8; 6];
+                    stream.read_exact(&mut remainder).await?;
+                }
+                0x03 => {
+                    let mut length = [0u8; 1];
+                    stream.read_exact(&mut length).await?;
+                    let mut remainder = vec![0u8; usize::from(length[0]) + 2];
+                    stream.read_exact(&mut remainder).await?;
+                }
+                0x04 => {
+                    let mut remainder = [0u8; 18];
+                    stream.read_exact(&mut remainder).await?;
+                }
+                _ => bail!("SOCKS5 proxy returned an invalid address type."),
+            }
+        }
+    }
+    Ok(stream)
 }
 
 pub async fn run_remote_command(
@@ -3904,6 +4044,9 @@ async fn authenticate(
                 rejection.unwrap_or_else(|| "no usable identities".to_owned())
             );
         }
+        Authentication::ViaProxy { .. } => {
+            bail!("Proxy settings must be applied before SSH authentication.");
+        }
     }
     Ok(())
 }
@@ -4072,16 +4215,16 @@ async fn run_connection_with_known_hosts(
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, MAX_SERVER_LISTENERS, MAX_SERVER_MOUNTS,
-        MAX_SERVER_SESSIONS, ReconnectSettings, RemoteSftpOutput, ServerPowerAction, ServiceAction,
-        UiEvent, can_answer_with_password, connection_info_for_key, is_known_host_key,
-        is_retryable_reconnect_error, parse_power_action, parse_process_action,
-        parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
-        parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
-        parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
-        process_termination_command, relay_agent_stream, run_connection_with_known_hosts,
-        run_remote_command, run_sftp_command, run_sftp_commands, sanitize_zmodem_name,
-        service_action_command, service_logs_command, valid_process_pid, valid_service_name,
-        wait_before_reconnect,
+        MAX_SERVER_SESSIONS, ProxySpec, ProxyType, ReconnectSettings, RemoteSftpOutput,
+        ServerPowerAction, ServiceAction, UiEvent, can_answer_with_password, connect_proxy_stream,
+        connection_info_for_key, is_known_host_key, is_retryable_reconnect_error,
+        parse_power_action, parse_process_action, parse_server_docker_containers,
+        parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
+        parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
+        parse_service_logs, power_action_command, process_termination_command, relay_agent_stream,
+        run_connection_with_known_hosts, run_remote_command, run_sftp_command, run_sftp_commands,
+        sanitize_zmodem_name, service_action_command, service_logs_command, valid_process_pid,
+        valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -4106,6 +4249,82 @@ mod tests {
     };
     use zeroize::Zeroizing;
 
+    async fn start_test_proxy(
+        proxy_type: ProxyType,
+        target_host: String,
+        target_port: u16,
+    ) -> (ProxySpec, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = ProxySpec {
+            proxy_type,
+            host: address.ip().to_string(),
+            port: address.port(),
+        };
+        let task = tokio::spawn(async move {
+            let Ok((mut downstream, _)) = listener.accept().await else {
+                return;
+            };
+            let accepted = match proxy_type {
+                ProxyType::HttpConnect => {
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while request.len() < 8192 && !request.ends_with(b"\r\n\r\n") {
+                        if downstream.read_exact(&mut byte).await.is_err() {
+                            return;
+                        }
+                        request.push(byte[0]);
+                    }
+                    let request = String::from_utf8_lossy(&request);
+                    request.starts_with(&format!("CONNECT {target_host}:{target_port} HTTP/1."))
+                }
+                ProxyType::Socks5 => {
+                    let mut greeting = [0u8; 3];
+                    if downstream.read_exact(&mut greeting).await.is_err()
+                        || greeting != [0x05, 0x01, 0x00]
+                    {
+                        return;
+                    }
+                    if downstream.write_all(&[0x05, 0x00]).await.is_err() {
+                        return;
+                    }
+                    let mut header = [0u8; 5];
+                    if downstream.read_exact(&mut header).await.is_err()
+                        || header[..4] != [0x05, 0x01, 0x00, 0x03]
+                    {
+                        return;
+                    }
+                    let host_length = usize::from(header[4]);
+                    let mut address = vec![0u8; host_length + 2];
+                    if downstream.read_exact(&mut address).await.is_err() {
+                        return;
+                    }
+                    address[..host_length] == *target_host.as_bytes()
+                        && address[host_length..] == target_port.to_be_bytes()
+                }
+            };
+            if !accepted {
+                return;
+            }
+            let Ok(mut upstream) = TcpStream::connect((target_host.as_str(), target_port)).await
+            else {
+                return;
+            };
+            let response = match proxy_type {
+                ProxyType::HttpConnect => b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec(),
+                ProxyType::Socks5 => [
+                    &[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1][..],
+                    &target_port.to_be_bytes(),
+                ]
+                .concat(),
+            };
+            if downstream.write_all(&response).await.is_ok() {
+                let _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await;
+            }
+        });
+        (proxy, task)
+    }
+
     #[tokio::test]
     async fn forwarded_agent_channel_relays_agent_protocol_bytes() {
         let (mut remote, forwarded) = duplex(64);
@@ -4129,6 +4348,57 @@ mod tests {
         };
         tokio::join!(remote_task, agent_task);
         relay.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_tunnels_fail_closed_on_denial_or_authentication_requirement() {
+        let http_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        let http_proxy = ProxySpec {
+            proxy_type: ProxyType::HttpConnect,
+            host: "127.0.0.1".to_owned(),
+            port: http_port,
+        };
+        let http_server = tokio::spawn(async move {
+            let (mut stream, _) = http_listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let error = connect_proxy_stream(&http_proxy, "server.example.com", 22)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("rejected the tunnel"));
+        http_server.await.unwrap();
+
+        let socks_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let socks_port = socks_listener.local_addr().unwrap().port();
+        let socks_proxy = ProxySpec {
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_owned(),
+            port: socks_port,
+        };
+        let socks_server = tokio::spawn(async move {
+            let (mut stream, _) = socks_listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            stream.write_all(&[0x05, 0x02]).await.unwrap();
+        });
+        let error = connect_proxy_stream(&socks_proxy, "server.example.com", 22)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported authentication"));
+        socks_server.await.unwrap();
     }
 
     #[tokio::test]
@@ -6312,6 +6582,28 @@ abc	img	name"
             Some(known_hosts.clone()),
         ));
         assert!(rejected_certificate.is_err());
+        for proxy_type in [ProxyType::HttpConnect, ProxyType::Socks5] {
+            let (proxy, proxy_task) =
+                runtime.block_on(start_test_proxy(proxy_type, host.clone(), port));
+            let proxied_result = runtime.block_on(run_sftp_command(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::ViaProxy {
+                    authentication: Box::new(Authentication::Password(Zeroizing::new(
+                        password.clone(),
+                    ))),
+                    proxy,
+                },
+                SftpCommand::List(remote_root.clone()),
+                Some(known_hosts.clone()),
+            ));
+            proxy_task.abort();
+            assert!(matches!(
+                proxied_result.unwrap(),
+                RemoteSftpOutput::Listed { path, .. } if path == remote_root
+            ));
+        }
         let remote_file = format!("{remote_root}/upload.txt");
         assert!(matches!(
             run(SftpCommand::Upload {
