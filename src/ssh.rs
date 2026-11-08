@@ -108,6 +108,18 @@ pub struct RemoteCommandOutput {
     pub exit_status: Option<u32>,
 }
 
+#[derive(Debug)]
+pub enum RemoteSftpOutput {
+    Listed {
+        path: String,
+        entries: Vec<sftp::RemoteEntry>,
+    },
+    Completed {
+        transfers: Vec<(String, u64)>,
+        actions: Vec<String>,
+    },
+}
+
 const MAX_REMOTE_COMMAND_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -522,16 +534,15 @@ fn default_known_hosts_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".ssh").join("known_hosts"))
 }
 
-pub async fn run_remote_command(
+async fn connect_command_session(
     host: String,
     port: u16,
     username: String,
     authentication: Authentication,
-    command: String,
     known_hosts_path: Option<PathBuf>,
-) -> Result<RemoteCommandOutput> {
-    if host.trim().is_empty() || username.trim().is_empty() || port == 0 || command.is_empty() {
-        bail!("A host, username, valid port, and command are required.");
+) -> Result<client::Handle<KnownHostsHandler>> {
+    if host.trim().is_empty() || username.trim().is_empty() || port == 0 {
+        bail!("A host, username, and valid port are required.");
     }
     if matches!(
         authentication,
@@ -540,13 +551,12 @@ pub async fn run_remote_command(
             ..
         }
     ) {
-        bail!("Interactive keyboard prompts are not supported by command execution.");
+        bail!("Interactive keyboard prompts are not supported by command-line operations.");
     }
-    let known_hosts_path = known_hosts_path.unwrap_or(default_known_hosts_path()?);
     let handler = KnownHostsHandler {
         host: host.clone(),
         port,
-        path: known_hosts_path,
+        path: known_hosts_path.unwrap_or(default_known_hosts_path()?),
         remote_forwards: Arc::new(Mutex::new(HashMap::new())),
         remote_socket_forwards: Arc::new(Mutex::new(HashMap::new())),
         forward_events: None,
@@ -567,6 +577,22 @@ pub async fn run_remote_command(
     )
     .await
     .context("Timed out during SSH authentication")??;
+    Ok(session)
+}
+
+pub async fn run_remote_command(
+    host: String,
+    port: u16,
+    username: String,
+    authentication: Authentication,
+    command: String,
+    known_hosts_path: Option<PathBuf>,
+) -> Result<RemoteCommandOutput> {
+    if command.is_empty() {
+        bail!("A remote command is required.");
+    }
+    let session =
+        connect_command_session(host, port, username, authentication, known_hosts_path).await?;
 
     let mut channel = session
         .channel_open_session()
@@ -618,6 +644,131 @@ pub async fn run_remote_command(
         .disconnect(Disconnect::ByApplication, "command completed", "en")
         .await;
     Ok(output)
+}
+
+pub async fn run_sftp_command(
+    host: String,
+    port: u16,
+    username: String,
+    authentication: Authentication,
+    command: SftpCommand,
+    known_hosts_path: Option<PathBuf>,
+) -> Result<RemoteSftpOutput> {
+    let mut session =
+        connect_command_session(host, port, username, authentication, known_hosts_path).await?;
+    let channel = timeout(Duration::from_secs(15), async {
+        let channel = session.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        Ok::<_, russh::Error>(channel)
+    })
+    .await
+    .context("Timed out opening the SFTP subsystem")?
+    .context("The SSH server rejected the SFTP subsystem")?;
+
+    let (command_tx, command_rx) = mpsc::channel(2);
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&cancellation);
+    let worker = tokio::spawn(async move {
+        sftp::run(channel.into_stream(), command_rx, event_tx, worker_cancel).await;
+    });
+
+    let result = async {
+        timeout(Duration::from_secs(30), async {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    SftpEvent::Ready { .. } => return Ok::<(), anyhow::Error>(()),
+                    SftpEvent::Error(error) => bail!("Could not initialize SFTP: {error}"),
+                    _ => {}
+                }
+            }
+            bail!("SFTP closed before initialization completed")
+        })
+        .await
+        .context("Timed out initializing the SFTP subsystem")??;
+
+        // Discard the initial directory listing emitted when the subsystem starts.
+        let _ = timeout(Duration::from_secs(30), async {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    SftpEvent::Entries { .. } | SftpEvent::Error(_) => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        let requested_path = match &command {
+            SftpCommand::List(path) => Some(path.clone()),
+            _ => None,
+        };
+        command_tx
+            .send(command)
+            .await
+            .context("The SFTP worker stopped before accepting the operation")?;
+
+        let mut transfers = Vec::new();
+        let mut transfer_names = HashMap::<String, u64>::new();
+        let mut actions = Vec::new();
+        loop {
+            let event = timeout(Duration::from_secs(300), event_rx.recv())
+                .await
+                .context("No SFTP progress was received for 5 minutes")?
+                .context("SFTP connection closed before the operation completed")?;
+                match event {
+                    SftpEvent::Entries { path, entries }
+                        if requested_path.as_deref() == Some(path.as_str()) =>
+                    {
+                        if let Some(requested_path) = requested_path.as_deref() {
+                            if path == requested_path {
+                                break Ok(RemoteSftpOutput::Listed { path, entries });
+                            }
+                        }
+                    }
+                    SftpEvent::Entries { .. } | SftpEvent::Ready { .. } => {}
+                    SftpEvent::TransferStarted { name, total, .. } => {
+                        transfer_names.insert(name, total);
+                    }
+                    SftpEvent::TransferProgress { .. } => {}
+                    SftpEvent::TransferFinished { kind, name } => {
+                        let total = transfer_names.remove(&name).unwrap_or(0);
+                        transfers.push((format!("{} {name}", kind.label()), total));
+                        break Ok(RemoteSftpOutput::Completed { transfers, actions });
+                    }
+                    SftpEvent::OperationFinished { action } => {
+                        actions.push(action);
+                        break Ok(RemoteSftpOutput::Completed { transfers, actions });
+                    }
+                    SftpEvent::TransferFailed { name, error, .. } => {
+                        bail!("SFTP transfer {name} failed: {error}");
+                    }
+                    SftpEvent::TransferCancelled { name, .. } => {
+                        bail!("SFTP transfer {name} was cancelled.");
+                    }
+                    SftpEvent::NeedsOverwrite { remote, local, .. } => {
+                        bail!(
+                            "Destination already exists ({remote} or {}). Pass --overwrite or --resume explicitly.",
+                            local.display()
+                        );
+                    }
+                    SftpEvent::Error(error) => bail!("SFTP operation failed: {error}"),
+                    SftpEvent::FilesystemInfo(_) | SftpEvent::FilesystemUnavailable { .. }
+                    | SftpEvent::FileContent { .. } | SftpEvent::FileSaved { .. } => {}
+                }
+            }
+    }
+    .await;
+
+    drop(command_tx);
+    if result.is_err() {
+        cancellation.store(true, std::sync::atomic::Ordering::Relaxed);
+        worker.abort();
+    }
+    let _ = worker.await;
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "SFTP operation completed", "en")
+        .await;
+    result
 }
 
 /// Sanitize a remote ZMODEM filename: keep only the final path segment and
@@ -3479,15 +3630,15 @@ async fn run_connection_with_known_hosts(
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, MAX_SERVER_LISTENERS, MAX_SERVER_MOUNTS,
-        MAX_SERVER_SESSIONS, ReconnectSettings, ServerPowerAction, ServiceAction, UiEvent,
-        can_answer_with_password, connection_info_for_key, is_known_host_key,
+        MAX_SERVER_SESSIONS, ReconnectSettings, RemoteSftpOutput, ServerPowerAction, ServiceAction,
+        UiEvent, can_answer_with_password, connection_info_for_key, is_known_host_key,
         is_retryable_reconnect_error, parse_power_action, parse_process_action,
         parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
         parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
         parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
         process_termination_command, run_connection_with_known_hosts, run_remote_command,
-        sanitize_zmodem_name, service_action_command, service_logs_command, valid_process_pid,
-        valid_service_name, wait_before_reconnect,
+        run_sftp_command, sanitize_zmodem_name, service_action_command, service_logs_command,
+        valid_process_pid, valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -5495,6 +5646,147 @@ abc	img	name"
                 Ok::<(), anyhow::Error>(())
             })
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-docker-ssh.ps1 to provide an Ubuntu SSH server"]
+    fn docker_ssh_cli_sftp_operations_reuse_transfer_runtime() {
+        let host = env::var("DSHELL_DOCKER_SSH_HOST").expect("test host is not configured");
+        let port = env::var("DSHELL_DOCKER_SSH_PORT")
+            .expect("test port is not configured")
+            .parse::<u16>()
+            .expect("test port must be numeric");
+        let username = env::var("DSHELL_DOCKER_SSH_USER").expect("test username is not configured");
+        let password =
+            env::var("DSHELL_DOCKER_SSH_PASSWORD").expect("test password is not configured");
+        let known_hosts = PathBuf::from(
+            env::var_os("DSHELL_DOCKER_SSH_KNOWN_HOSTS")
+                .expect("isolated known_hosts path is not configured"),
+        );
+        let local = tempfile::tempdir().unwrap();
+        let source = local.path().join("upload.txt");
+        let destination = local.path().join("download.txt");
+        std::fs::write(&source, b"dshell sftp cli round trip").unwrap();
+        let remote_root = format!("/tmp/dshell-cli-sftp-{}", std::process::id());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let run = |command| {
+            runtime.block_on(run_sftp_command(
+                host.clone(),
+                port,
+                username.clone(),
+                Authentication::Password(Zeroizing::new(password.clone())),
+                command,
+                Some(known_hosts.clone()),
+            ))
+        };
+
+        assert!(matches!(
+            run(SftpCommand::CreateDirectory(remote_root.clone())).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        let remote_file = format!("{remote_root}/upload.txt");
+        assert!(matches!(
+            run(SftpCommand::Upload {
+                local: source.clone(),
+                remote: remote_file.clone(),
+                overwrite: false,
+                resume: false,
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(
+            run(SftpCommand::Upload {
+                local: source.clone(),
+                remote: remote_file.clone(),
+                overwrite: false,
+                resume: false,
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("Pass --overwrite or --resume")
+        );
+        assert!(matches!(
+            run(SftpCommand::Download {
+                remote: remote_file.clone(),
+                local: destination.clone(),
+                overwrite: false,
+                resume: false,
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert_eq!(
+            std::fs::read(destination).unwrap(),
+            b"dshell sftp cli round trip"
+        );
+        let local_tree = local.path().join("tree");
+        std::fs::create_dir_all(local_tree.join("nested")).unwrap();
+        std::fs::write(
+            local_tree.join("nested").join("item.txt"),
+            b"recursive payload",
+        )
+        .unwrap();
+        let remote_tree = format!("{remote_root}/tree");
+        assert!(matches!(
+            run(SftpCommand::UploadDirectory {
+                local: local_tree,
+                remote: remote_tree.clone(),
+                overwrite: false,
+                resume: false,
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        let downloaded_tree = local.path().join("downloaded-tree");
+        assert!(matches!(
+            run(SftpCommand::DownloadDirectory {
+                remote: remote_tree.clone(),
+                local: downloaded_tree.clone(),
+                overwrite: false,
+                resume: false,
+            })
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert_eq!(
+            std::fs::read(downloaded_tree.join("nested").join("item.txt")).unwrap(),
+            b"recursive payload"
+        );
+        assert!(matches!(
+            run(SftpCommand::List(remote_root.clone())).unwrap(),
+            RemoteSftpOutput::Listed { entries, .. } if entries.iter().any(|entry| entry.name == "upload.txt") && entries.iter().any(|entry| entry.name == "tree")
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveFile(remote_file)).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveFile(format!(
+                "{remote_tree}/nested/item.txt"
+            )))
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveDirectory(format!(
+                "{remote_tree}/nested"
+            )))
+            .unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveDirectory(remote_tree)).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
+        assert!(matches!(
+            run(SftpCommand::RemoveDirectory(remote_root)).unwrap(),
+            RemoteSftpOutput::Completed { .. }
+        ));
     }
 
     #[test]

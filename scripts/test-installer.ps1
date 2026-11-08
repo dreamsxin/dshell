@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.48-x64.exe"
+$installerPath = Join-Path $repoRoot "dist\installer\dshell-setup-v0.1.49-x64.exe"
 if (-not (Test-Path -LiteralPath $installerPath)) {
     throw "Build the installer before running this smoke test: $installerPath"
 }
@@ -47,6 +47,9 @@ try {
     }
     if (Test-Path -LiteralPath $installedExe) {
         throw "The uninstaller left dshell.exe in the selected destination."
+    }
+    if (Test-Path -LiteralPath $installedCli) {
+        throw "The uninstaller left dshell-cli.exe in the selected destination."
     }
 
     Write-Output "Silent per-user install and uninstall passed."

@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.48`.
+`v0.1.49`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -274,6 +274,20 @@ returns the remote exit status. Interactive keyboard-interactive prompts,
 including OTP prompts, are not supported in this command mode. The command is
 visible in local process arguments and may be logged by the remote shell; do
 not put secrets in the command text.
+
+The CLI also supports batch SFTP operations:
+
+```powershell
+dshell-cli sftp --host server.example.com --user operator --agent ls /srv
+dshell-cli sftp --host server.example.com --user operator --agent put .\build.zip /srv/build.zip
+dshell-cli sftp --host server.example.com --user operator --agent get /srv/build.zip .\build.zip --resume
+dshell-cli sftp --host server.example.com --user operator --agent put-dir .\site /srv/site --resume
+```
+
+Available actions are `ls`, `put`, `get`, `put-dir`, `get-dir`, `mkdir`, `rm`,
+and `rmdir`. Existing destinations are refused unless `--overwrite` or
+`--resume` is explicitly selected. Batch transfers reuse the desktop SFTP
+worker, including resume behavior and recursive path validation.
 
 The session properties also accept a keep-alive interval in seconds (`0`
 disables it). A positive value makes the client send keepalive messages when

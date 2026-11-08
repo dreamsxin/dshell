@@ -20,7 +20,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统托盘沿用同一终端标记。
 
-首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.48` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
+首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.49` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
 
 界面语言支持 English 与简体中文，语言选择随外观设置持久化；主机资料、认证模板和布局反馈也会跟随语言切换，远端终端输出保持原样，避免把命令结果或 TUI 内容误翻译。
 
@@ -56,6 +56,7 @@ Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统�
 | 脚本/自动化 | VB/JScript/Python 与登录脚本 | 有限；主机资料可选保存最多 16 条单行命令，仅首次交互式 shell 建立后在可见终端执行；导入的资料默认关闭自动运行 | Expect/Send 提示匹配、任意脚本引擎 |
 | 本地 Shell | 有 | 无 | 后续评估 |
 | 命令行远程执行 | `sexec` | `dshell-cli exec`；复用主机密钥校验与现有认证 | 交互式 keyboard-interactive/OTP |
+| CLI 批处理 SFTP | `sftpc` | `dshell-cli sftp`；列表、文件/目录传输、续传与显式覆盖 | 通配符、用户脚本 |
 | 协议范围 | SSH/Telnet/Rlogin/Serial/RDP | SSH（含 SFTP、转发） | 不计划扩展非 SSH 协议 |
 | 凭据安全 | 主密码保护 | 严格 known_hosts；秘密仅在 Zeroizing 运行时缓存，绝不写入资料或导出；加载旧资料时清理遗留凭据字段 | 系统密钥环集成 |
 
@@ -251,6 +252,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 42. `v0.1.46` 增加活动转发连接可观测性：Tunnels 与会话检查器列出当前 peer 和目标地址；每条转发通道使用唯一连接 ID，关闭事件精确移除条目并同步活动数量。本机客户端连接信息仅驻留当前会话内存。
 43. `v0.1.47` 对标 Bitvise 9.66 服务端 Unix socket forwarding：本机 TCP listener 可通过 `direct-streamlocal@openssh.com` 到达 SSH 服务端 socket；服务端 `streamlocal-forward@openssh.com` listener 可通过 `forwarded-streamlocal@openssh.com` 回连本机 TCP target。两种规则均复用转发状态、连接详情和主机资料生命周期。
 44. `v0.1.48` 增加 Bitvise `sexec` 对应的 `dshell-cli exec`：复用 SSH library 和 known_hosts 严格校验，以 agent/私钥/stdin 密码认证建立单次 exec channel，分别输出 stdout/stderr 并返回远端退出码；安装器并列安装 GUI 与 CLI。
+45. `v0.1.49` 扩展 `dshell-cli sftp`：支持 ls、put/get、put-dir/get-dir、mkdir、rm、rmdir；复用桌面传输 worker，覆盖需显式选择，支持续传并保留递归路径安全限制。
 
 ## SSH 参考资料
 

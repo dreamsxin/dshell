@@ -14,6 +14,8 @@ Bitvise 9.66 的官方版本记录增加了服务端 Unix socket 转发。`v0.1.
 
 Bitvise 提供 `sexec` 命令行远程执行客户端。`v0.1.48` 增加原生 `dshell-cli exec`，复用 dshell SSH runtime、认证和严格 known_hosts 检查，支持 agent、私钥和标准输入密码，保留 stdout/stderr 与退出码，并将 CLI 与桌面端一起放入 Windows 安装包。该命令面向非交互自动化，不处理交互式 keyboard-interactive/OTP 提示。
 
+`v0.1.49` 扩展命令行 SFTP 批处理：支持 `ls`、`put/get`、`put-dir/get-dir`、`mkdir`、`rm/rmdir`，复用桌面 SFTP worker 的续传、递归条目限制和路径安全检查；目标已存在时需明确选择覆盖或续传。
+
 ## 零、实施状态审计（2026-11-06）
 
 基于代码级 grep 审计，每个功能在 `src/` 中的实际引用计数确认了实现状态：

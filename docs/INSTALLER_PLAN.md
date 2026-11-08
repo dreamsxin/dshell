@@ -2,7 +2,7 @@
 
 ## Scope
 
-Prepare the first Windows installer for the existing native GPUI application. This is the first installer distribution, not the project's first public release: `CHANGELOG.md` identifies `v0.1.0` as the first public release, and earlier tags must not be moved or overwritten. The first installer was prepared for `v0.1.44`; this plan is updated for the next `v0.1.48` installer.
+Prepare the first Windows installer for the existing native GPUI application. This is the first installer distribution, not the project's first public release: `CHANGELOG.md` identifies `v0.1.0` as the first public release, and earlier tags must not be moved or overwritten. The first installer was prepared for `v0.1.44`; this plan is updated for the next `v0.1.49` installer.
 
 Initial target: x64 Windows on MSVC. Keep the installer native and install the desktop application plus the standalone `dshell-cli.exe` command tool. Do not add a WebView runtime, background service, auto-start entry, telemetry, or file associations.
 
@@ -44,7 +44,7 @@ The app has no selectable feature components, so omit a feature-selection page. 
 ## Release Artifacts and Signing
 
 - Build the release executable with `cargo build --release --locked`; package the exact executable and required runtime files after a clean-machine dependency check.
-- Produce `dshell-setup-v0.1.48-x64.exe`, plus a SHA-256 checksum and source tag reference.
+- Produce `dshell-setup-v0.1.49-x64.exe`, plus a SHA-256 checksum and source tag reference.
 - Sign the application executable and setup executable with Authenticode and timestamp them if a verified publisher certificate is available. If signing is unavailable, make that visible in the release decision and notes rather than claiming a signed installer.
 - Keep a portable ZIP as a separate optional artifact; it must not be required by the installer workflow.
 
@@ -60,7 +60,7 @@ The app has no selectable feature components, so omit a feature-selection page. 
 
 ## Decisions Before Implementation
 
-- Release scope is frozen as `v0.1.48`; earlier tags are not replaced.
+- Release scope is frozen as `v0.1.49`; earlier tags are not replaced.
 - First release supports x64 per-user installation only.
 - No Authenticode certificate is available for this candidate; the installer and EXE are unsigned. Decide whether to add a signing certificate before public publication.
 - The optional portable ZIP is not included in this first installer candidate.

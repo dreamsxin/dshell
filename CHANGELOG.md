@@ -6,6 +6,34 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.49] - 2026-11-08
+
+Extends the command-line SSH client with SFTP batch operations.
+
+### Added
+
+- Add `dshell-cli sftp` actions for listing, single-file and recursive
+  directory transfers, directory creation, file removal, and directory removal.
+- Reuse the desktop SFTP transfer worker for resume and recursive path safety.
+  Existing destinations require an explicit `--overwrite` or `--resume`.
+- Escape terminal control characters in remote file names printed by `ls`.
+
+### Verification
+
+- Verified on 2026-11-08 with `cargo fmt --all` and
+  `scripts\\verify-hard-constraints.ps1`: 265 unit tests passed and 13
+  Docker-only tests were skipped by that script.
+- `scripts\\test-docker-ssh.ps1` passed 13/13, including CLI SFTP file
+  upload/download, recursive directory round-trip, listing, overwrite refusal,
+  and remote cleanup.
+- `cargo build --release --locked --bin dshell --bin dshell-cli` and Inno
+  Setup 6.7.3 compilation passed; silent per-user install/uninstall passed
+  and verified that both executables are installed.
+- Installer `dshell-setup-v0.1.49-x64.exe` is 11,006,630 bytes. SHA-256:
+  `173729EAF75D02898873EB6A78D018C231FA48AA59351E3E93095768323C074F`.
+- Installer and executables are unsigned. Desktop UI, installer visuals,
+  DPI, IME and glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.48] - 2026-11-08
 
 Adds a native command-line SSH client for non-interactive remote commands.
