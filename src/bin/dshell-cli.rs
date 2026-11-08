@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use dshell::{
     sftp::{self, SftpCommand},
-    ssh::{self, Authentication, ProxySpec, ProxyType, RemoteSftpOutput},
+    ssh::{self, Authentication, ProxyCredentials, ProxySpec, ProxyType, RemoteSftpOutput},
 };
 use serde::Deserialize;
 use tokio::runtime::Builder;
@@ -77,6 +77,10 @@ struct ConnectionArgs {
     proxy_type: Option<ProxyTypeArg>,
     #[arg(long, requires = "proxy_type")]
     proxy_host: Option<String>,
+    #[arg(long, requires = "proxy_type")]
+    proxy_user: Option<String>,
+    #[arg(long, requires = "proxy_user")]
+    proxy_password_stdin: bool,
     #[arg(long, requires = "proxy_type")]
     proxy_port: Option<u16>,
 }
@@ -363,12 +367,59 @@ fn build_authentication(args: &ConnectionArgs) -> Result<Authentication> {
         bail!("--passphrase-stdin requires --identity-file.");
     }
 
+    if args.proxy_password_stdin && args.proxy_type.is_none() {
+        bail!("--proxy-password-stdin requires proxy options.");
+    }
+    if args.proxy_password_stdin
+        && matches!(
+            args.proxy_type,
+            Some(ProxyTypeArg::Socks4 | ProxyTypeArg::Socks4a)
+        )
+    {
+        bail!("SOCKS4 and SOCKS4A do not support password authentication.");
+    }
+    if matches!(
+        args.proxy_type,
+        Some(ProxyTypeArg::HttpConnect | ProxyTypeArg::Socks5)
+    ) && args
+        .proxy_user
+        .as_deref()
+        .is_some_and(|username| !username.trim().is_empty())
+        && !args.proxy_password_stdin
+    {
+        bail!("Proxy authentication requires --proxy-password-stdin.");
+    }
+    if args.proxy_password_stdin
+        && args
+            .proxy_user
+            .as_deref()
+            .is_none_or(|username| username.trim().is_empty())
+    {
+        bail!("--proxy-password-stdin requires a non-empty --proxy-user.");
+    }
+    let ssh_secret_requested = args.password_stdin || args.passphrase_stdin;
+    let (proxy_password, ssh_secret) = match (args.proxy_password_stdin, ssh_secret_requested) {
+        (true, true) => {
+            let mut secrets =
+                read_secret_stdin_fields(&["proxy password", "SSH password/passphrase"])?;
+            let ssh_secret = secrets.pop().expect("two secrets were requested");
+            let proxy_password = secrets.pop().expect("two secrets were requested");
+            (Some(proxy_password), Some(ssh_secret))
+        }
+        (true, false) => (Some(read_secret_stdin("proxy password")?), None),
+        (false, true) => (
+            None,
+            Some(read_secret_stdin(if args.passphrase_stdin {
+                "identity passphrase"
+            } else {
+                "password"
+            })?),
+        ),
+        (false, false) => (None, None),
+    };
+
     let authentication = if let Some(identity_file) = args.identity_file.clone() {
-        let passphrase = if args.passphrase_stdin {
-            read_secret_stdin("identity passphrase")?
-        } else {
-            Zeroizing::new(String::new())
-        };
+        let passphrase = ssh_secret.unwrap_or_else(|| Zeroizing::new(String::new()));
         if let Some(certificate_file) = args.certificate.clone() {
             Authentication::PublicKeyCertificate {
                 identity_file,
@@ -382,7 +433,7 @@ fn build_authentication(args: &ConnectionArgs) -> Result<Authentication> {
             }
         }
     } else if args.password_stdin {
-        Authentication::Password(read_secret_stdin("password")?)
+        Authentication::Password(ssh_secret.unwrap_or_else(|| Zeroizing::new(String::new())))
     } else {
         Authentication::Agent
     };
@@ -403,20 +454,35 @@ fn build_authentication(args: &ConnectionArgs) -> Result<Authentication> {
             if host.trim().is_empty() || port == 0 {
                 bail!("Proxy host and port must be valid.");
             }
-            Some(ProxySpec {
+            let proxy = ProxySpec {
                 proxy_type,
                 host: host.clone(),
                 port,
-            })
+                username: args.proxy_user.clone().unwrap_or_default(),
+            };
+            proxy.validate().map_err(anyhow::Error::msg)?;
+            Some(proxy)
         }
         (None, None) if args.proxy_port.is_none() => None,
         _ => bail!("Choose a proxy type and proxy host together."),
     };
     Ok(match proxy {
-        Some(proxy) => Authentication::ViaProxy {
-            authentication: Box::new(authentication),
-            proxy,
-        },
+        Some(proxy) => {
+            let credentials = if !matches!(proxy.proxy_type, ProxyType::Socks4 | ProxyType::Socks4a)
+                && (!proxy.username.is_empty() || proxy_password.is_some())
+            {
+                Some(ProxyCredentials {
+                    password: proxy_password.unwrap_or_else(|| Zeroizing::new(String::new())),
+                })
+            } else {
+                None
+            };
+            Authentication::ViaProxy {
+                authentication: Box::new(authentication),
+                proxy,
+                credentials,
+            }
+        }
         None => authentication,
     })
 }
@@ -809,6 +875,42 @@ fn read_secret_stdin(label: &str) -> Result<Zeroizing<String>> {
     Ok(value)
 }
 
+fn read_secret_stdin_fields(labels: &[&str]) -> Result<Vec<Zeroizing<String>>> {
+    let maximum_bytes = labels.len().saturating_mul(4097);
+    let mut input = Zeroizing::new(String::new());
+    std::io::stdin()
+        .take((maximum_bytes + 1) as u64)
+        .read_to_string(&mut input)
+        .context("could not read secrets from standard input")?;
+    if input.len() > maximum_bytes {
+        input.zeroize();
+        bail!("Secret input exceeded the size limit.");
+    }
+    let mut lines = input.split('\n').collect::<Vec<_>>();
+    if input.ends_with('\n') {
+        lines.pop();
+    }
+    if lines.len() != labels.len() {
+        input.zeroize();
+        bail!(
+            "Expected {} newline-separated secret values on stdin.",
+            labels.len()
+        );
+    }
+    let mut secrets = Vec::with_capacity(labels.len());
+    for (line, label) in lines.into_iter().zip(labels) {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.len() > 4096 {
+            input.zeroize();
+            secrets.clear();
+            bail!("{label} input exceeded 4096 bytes.");
+        }
+        secrets.push(Zeroizing::new(line.to_owned()));
+    }
+    input.zeroize();
+    Ok(secrets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Cli;
@@ -938,6 +1040,37 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn proxy_password_requires_a_non_empty_username_before_reading_stdin() {
+        let parsed = Cli::try_parse_from([
+            "dshell-cli",
+            "exec",
+            "--host",
+            "server.example.com",
+            "--user",
+            "operator",
+            "--agent",
+            "--proxy-type",
+            "socks5",
+            "--proxy-host",
+            "proxy.example.com",
+            "--proxy-user",
+            " ",
+            "--proxy-password-stdin",
+            "--",
+            "true",
+        ])
+        .unwrap();
+        let super::Command::Exec(args) = parsed.command else {
+            panic!("expected exec command");
+        };
+        let error = match super::build_authentication(&args.connection) {
+            Ok(_) => panic!("empty proxy username must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("non-empty --proxy-user"));
     }
 
     #[test]

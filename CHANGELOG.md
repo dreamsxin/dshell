@@ -6,6 +6,41 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.62] - 2026-11-09
+
+Adds password authentication for HTTP CONNECT and SOCKS5 outbound proxies.
+
+### Added
+
+- Add optional proxy usernames to saved GUI host profiles. Prompt for the
+  password at connection time; profile files and exports never contain it.
+- Add `--proxy-user` and `--proxy-password-stdin` to CLI `exec` and SFTP
+  operations. When proxy and SSH secrets are both read from stdin, the proxy
+  password is first and the SSH password/passphrase is second.
+- Send HTTP CONNECT Basic credentials and SOCKS5 username/password credentials
+  from zeroizing runtime buffers. SOCKS5 authentication negotiation does not
+  offer anonymous fallback when credentials are configured.
+- Keep SSH target host-key checks and jump-host routing unchanged. Document
+  that HTTP CONNECT Basic and SOCKS5 credentials are not encrypted by those
+  proxy protocols and should only be used on trusted networks.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (127 library +
+  141 GUI + 14 CLI passed; 14 Docker tests ignored by the default run), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 14/14. GUI connection tests and CLI
+  SFTP completed real SSH/SFTP sessions through authenticated SOCKS5 and HTTP
+  CONNECT as well as SOCKS4 and SOCKS4A.
+- `scripts\\build-installer.ps1` built both Release binaries and compiled the
+  installer with Inno Setup 6.7.3. `scripts\\test-installer.ps1` passed silent
+  per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.62-x64.exe` is 11,254,791 bytes. SHA-256:
+  `DC9E5875CF42D7BB463BF0DAB7528DCA994C5FECFD25A373DF43733C104A77BC`.
+- Installer and executables are unsigned. GUI/installer visuals, DPI, IME and
+  glyph checks remain manual work for an isolated Windows desktop.
+
 ## [0.1.61] - 2026-11-09
 
 Adds SOCKS4 and SOCKS4A outbound proxy protocols.

@@ -39,7 +39,7 @@ pub enum AuthMethod {
     Agent,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyType {
     HttpConnect,
@@ -48,21 +48,34 @@ pub enum ProxyType {
     Socks5,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxySpec {
     pub proxy_type: ProxyType,
     pub host: String,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
 }
 
 impl ProxySpec {
+    pub fn uses_password_authentication(&self) -> bool {
+        matches!(self.proxy_type, ProxyType::HttpConnect | ProxyType::Socks5)
+            && !self.username.is_empty()
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.host.trim().is_empty() || self.host.chars().any(char::is_control) {
             return Err("Proxy host is required and cannot contain control characters.");
         }
         if self.port == 0 {
             return Err("Proxy port must be between 1 and 65535.");
+        }
+        if self.username.len() > 255 || self.username.chars().any(char::is_control) {
+            return Err("Proxy username is invalid or exceeds 255 bytes.");
+        }
+        if self.proxy_type == ProxyType::HttpConnect && self.username.contains(':') {
+            return Err("HTTP proxy username cannot contain a colon.");
         }
         Ok(())
     }
@@ -1173,6 +1186,7 @@ mod tests {
                 proxy_type: ProxyType::HttpConnect,
                 host: "proxy.example.com".to_owned(),
                 port: 8080,
+                username: "build-bot".to_owned(),
             }),
             login_commands: LoginCommandSettings {
                 enabled: true,
@@ -1198,6 +1212,7 @@ mod tests {
                 proxy_type: ProxyType::Socks5,
                 host: "proxy.example.com".to_owned(),
                 port: 1080,
+                username: String::new(),
             }),
             ..profile("proxied")
         };
@@ -1213,16 +1228,19 @@ mod tests {
                 proxy_type: ProxyType::Socks5,
                 host: String::new(),
                 port: 1080,
+                username: String::new(),
             },
             ProxySpec {
                 proxy_type: ProxyType::HttpConnect,
                 host: "proxy.example.com".to_owned(),
                 port: 0,
+                username: String::new(),
             },
             ProxySpec {
                 proxy_type: ProxyType::Socks5,
                 host: "proxy\nexample.com".to_owned(),
                 port: 1080,
+                username: String::new(),
             },
         ] {
             assert!(

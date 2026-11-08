@@ -61,8 +61,8 @@ use sftp::{
 use shortcuts::{KeyShortcut, ShortcutAction, ShortcutSettings};
 use snippets::{CommandSnippet, MAX_SNIPPETS, SnippetStore};
 use ssh::{
-    AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ProxySpec, ProxyType,
-    ServerData, ServerDataError, ServerListener, ServerMetrics, ServerMount,
+    AuthPromptInfo, Authentication, ConnectionInfo, ConnectionSpec, JumpSpec, ProxyCredentials,
+    ProxySpec, ProxyType, ServerData, ServerDataError, ServerListener, ServerMetrics, ServerMount,
     ServerNetworkInterface, ServerPowerAction, ServerProcess, ServerService, ServerServiceLogs,
     ServerSession, ServiceAction, UiEvent,
 };
@@ -85,7 +85,7 @@ use ui::{
     theme::{ThemeTokens, UiTheme},
     tokens as ui_tokens,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 const TERMINAL_PANEL_HEADER_PX: f32 = ui_tokens::PANEL_HEADER_HEIGHT;
 const TERMINAL_CARD_BORDER_PX: f32 = 2.0;
@@ -337,6 +337,7 @@ struct CredentialCacheKey {
     auth_method: AuthMethod,
     identity_file: String,
     jump_profile: String,
+    proxy: Option<ProxySpec>,
 }
 
 impl CredentialCacheKey {
@@ -348,6 +349,7 @@ impl CredentialCacheKey {
             auth_method: profile.auth_method,
             identity_file: profile.identity_file.trim().to_owned(),
             jump_profile: profile.proxy_jump.trim().to_owned(),
+            proxy: profile.proxy.clone(),
         }
     }
 
@@ -358,6 +360,7 @@ impl CredentialCacheKey {
         auth_method: AuthMethod,
         identity_file: &str,
         jump_profile: &str,
+        proxy: Option<&ProxySpec>,
     ) -> Self {
         Self {
             host: host.trim().to_owned(),
@@ -366,6 +369,7 @@ impl CredentialCacheKey {
             auth_method,
             identity_file: identity_file.trim().to_owned(),
             jump_profile: jump_profile.trim().to_owned(),
+            proxy: proxy.cloned(),
         }
     }
 }
@@ -376,6 +380,7 @@ struct CachedCredentials {
     passphrase: Zeroizing<String>,
     jump_password: Zeroizing<String>,
     jump_passphrase: Zeroizing<String>,
+    proxy_password: Zeroizing<String>,
 }
 
 impl CachedCredentials {
@@ -384,12 +389,14 @@ impl CachedCredentials {
         passphrase: &Zeroizing<String>,
         jump_password: &Zeroizing<String>,
         jump_passphrase: &Zeroizing<String>,
+        proxy_password: &Zeroizing<String>,
     ) -> Self {
         Self {
             password: Zeroizing::new(password.as_str().to_owned()),
             passphrase: Zeroizing::new(passphrase.as_str().to_owned()),
             jump_password: Zeroizing::new(jump_password.as_str().to_owned()),
             jump_passphrase: Zeroizing::new(jump_passphrase.as_str().to_owned()),
+            proxy_password: Zeroizing::new(proxy_password.as_str().to_owned()),
         }
     }
 
@@ -398,6 +405,7 @@ impl CachedCredentials {
             || !self.passphrase.is_empty()
             || !self.jump_password.is_empty()
             || !self.jump_passphrase.is_empty()
+            || !self.proxy_password.is_empty()
     }
 }
 
@@ -2499,6 +2507,8 @@ fn is_authentication_failure(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("authentication")
         || message.contains("password")
+        || message.contains("proxy rejected")
+        || message.contains("proxy credentials")
         || message.contains("passphrase")
         || message.contains("private key")
 }
@@ -2881,6 +2891,12 @@ mod session_tests {
         assert!(is_authentication_failure(
             "private key passphrase is invalid"
         ));
+        assert!(is_authentication_failure(
+            "HTTP CONNECT proxy rejected the tunnel (status 407)."
+        ));
+        assert!(is_authentication_failure(
+            "SOCKS5 proxy rejected the credentials."
+        ));
         assert!(!is_authentication_failure(
             "Server key is not present in known_hosts"
         ));
@@ -2905,6 +2921,7 @@ mod session_tests {
             AuthMethod::Password,
             " ~/.ssh/id_ed25519 ",
             " jump ",
+            None,
         );
         let second = CredentialCacheKey::from_connection(
             "example.com",
@@ -2913,6 +2930,7 @@ mod session_tests {
             AuthMethod::Password,
             "~/.ssh/id_ed25519",
             "jump",
+            None,
         );
         assert_eq!(first, second);
     }
@@ -2920,6 +2938,7 @@ mod session_tests {
     #[test]
     fn cached_credentials_track_only_non_empty_secret_values() {
         let empty = CachedCredentials::from_inputs(
+            &Zeroizing::new(String::new()),
             &Zeroizing::new(String::new()),
             &Zeroizing::new(String::new()),
             &Zeroizing::new(String::new()),
@@ -2933,8 +2952,10 @@ mod session_tests {
             &Zeroizing::new(String::new()),
             &Zeroizing::new(String::new()),
             &Zeroizing::new(String::new()),
+            &Zeroizing::new("proxy-secret".to_owned()),
         );
         assert!(cached.contains_secret());
+        assert_eq!(cached.proxy_password.as_str(), "proxy-secret");
     }
 
     #[test]
@@ -4583,6 +4604,8 @@ struct AppView {
     profile_proxy_type: Option<ProxyType>,
     profile_proxy_host: Entity<InputState>,
     profile_proxy_port: Entity<InputState>,
+    profile_proxy_username: Entity<InputState>,
+    proxy_password: Entity<InputState>,
     profile_login_commands_enabled: bool,
     profile_login_commands: Entity<InputState>,
     profile_notes: Entity<InputState>,
@@ -4799,6 +4822,10 @@ impl AppView {
         let profile_proxy_host =
             cx.new(|cx| InputState::new(window, cx).placeholder("proxy.example.com"));
         let profile_proxy_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
+        let profile_proxy_username =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Proxy username"));
+        let proxy_password = cx.new(|cx| InputState::new(window, cx).placeholder("Proxy password"));
+        proxy_password.update(cx, |state, cx| state.set_masked(true, window, cx));
         let key_passphrase = cx.new(|cx| InputState::new(window, cx).placeholder("Key passphrase"));
         key_passphrase.update(cx, |state, cx| state.set_masked(true, window, cx));
         let jump_profile = cx.new(|cx| {
@@ -5017,6 +5044,8 @@ impl AppView {
             profile_proxy_type: None,
             profile_proxy_host,
             profile_proxy_port,
+            profile_proxy_username,
+            proxy_password,
             profile_login_commands_enabled: false,
             profile_login_commands,
             profile_notes,
@@ -5612,6 +5641,12 @@ impl AppView {
             proxy_type,
             host,
             port,
+            username: self
+                .profile_proxy_username
+                .read(cx)
+                .value()
+                .trim()
+                .to_owned(),
         };
         proxy.validate().map_err(str::to_owned)?;
         Ok(Some(proxy))
@@ -5631,7 +5666,11 @@ impl AppView {
                 ) && profile.jump_password.is_empty()
                     && jump.password.is_empty()
             });
-        target_needs || jump_needs
+        let proxy_needs = profile
+            .proxy
+            .as_ref()
+            .is_some_and(ProxySpec::uses_password_authentication);
+        target_needs || jump_needs || proxy_needs
     }
 
     fn apply_cached_credentials(
@@ -5659,6 +5698,12 @@ impl AppView {
             window,
             cx,
         );
+        Self::set_input_value(
+            &self.proxy_password,
+            credentials.proxy_password.as_str(),
+            window,
+            cx,
+        );
     }
 
     fn open_credential_prompt(&mut self, message: String, cx: &mut Context<Self>) {
@@ -5671,6 +5716,15 @@ impl AppView {
         self.overlay_focus_pending = true;
         let jump_name = self.jump_profile.read(cx).value();
         self.credential_focus_pending = self.auth_method != AuthMethod::Agent
+            || self.profile_proxy_type.is_some_and(|proxy_type| {
+                matches!(proxy_type, ProxyType::HttpConnect | ProxyType::Socks5)
+                    && !self
+                        .profile_proxy_username
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .is_empty()
+            })
             || self
                 .saved_jump_profile(&jump_name)
                 .is_some_and(|profile| profile.auth_method != AuthMethod::Agent);
@@ -5707,6 +5761,15 @@ impl AppView {
         self.overlay_focus_pending = true;
         let jump_name = self.jump_profile.read(cx).value();
         self.credential_focus_pending = self.auth_method != AuthMethod::Agent
+            || self.profile_proxy_type.is_some_and(|proxy_type| {
+                matches!(proxy_type, ProxyType::HttpConnect | ProxyType::Socks5)
+                    && !self
+                        .profile_proxy_username
+                        .read(cx)
+                        .value()
+                        .trim()
+                        .is_empty()
+            })
             || self
                 .saved_jump_profile(&jump_name)
                 .is_some_and(|profile| profile.auth_method != AuthMethod::Agent);
@@ -6751,6 +6814,7 @@ impl AppView {
         Self::set_input_value(&self.jump_profile, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        Self::set_input_value(&self.proxy_password, "", window, cx);
         Self::set_input_value(&self.keepalive_seconds, "0", window, cx);
         Self::set_input_value(&self.reconnect_interval_seconds, "5", window, cx);
         Self::set_input_value(&self.reconnect_max_attempts, "5", window, cx);
@@ -6760,6 +6824,8 @@ impl AppView {
         self.profile_proxy_type = None;
         Self::set_input_value(&self.profile_proxy_host, "", window, cx);
         Self::set_input_value(&self.profile_proxy_port, "", window, cx);
+        Self::set_input_value(&self.profile_proxy_username, "", window, cx);
+        Self::set_input_value(&self.proxy_password, "", window, cx);
         self.profile_login_commands_enabled = false;
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
@@ -6841,6 +6907,16 @@ impl AppView {
             window,
             cx,
         );
+        Self::set_input_value(
+            &self.profile_proxy_username,
+            &profile
+                .proxy
+                .as_ref()
+                .map_or(String::new(), |proxy| proxy.username.clone()),
+            window,
+            cx,
+        );
+        Self::set_input_value(&self.proxy_password, "", window, cx);
         self.profile_login_commands_enabled = profile.login_commands.enabled;
         Self::set_input_value(
             &self.profile_login_commands,
@@ -7038,6 +7114,7 @@ impl AppView {
         Self::set_input_value(&self.jump_profile, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        Self::set_input_value(&self.proxy_password, "", window, cx);
         Self::set_input_value(&self.keepalive_seconds, "0", window, cx);
         Self::set_input_value(&self.reconnect_interval_seconds, "5", window, cx);
         Self::set_input_value(&self.reconnect_max_attempts, "5", window, cx);
@@ -7569,11 +7646,13 @@ impl AppView {
         let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
         let jump_password = Zeroizing::new(self.jump_password.read(cx).text().to_string());
         let jump_passphrase = Zeroizing::new(self.jump_passphrase.read(cx).text().to_string());
+        let proxy_password = Zeroizing::new(self.proxy_password.read(cx).text().to_string());
         let credentials = CachedCredentials::from_inputs(
             &password,
             &passphrase,
             &jump_password,
             &jump_passphrase,
+            &proxy_password,
         );
         if let Some(launch) = self.group_launch.as_mut() {
             launch
@@ -7621,6 +7700,7 @@ impl AppView {
         Self::set_input_value(&self.key_passphrase, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        Self::set_input_value(&self.proxy_password, "", window, cx);
         self.credential_prompt_open = false;
         self.credential_prompt_session_id = None;
         self.session_editor_open = false;
@@ -8500,6 +8580,7 @@ impl AppView {
         Self::set_input_value(&self.key_passphrase, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        Self::set_input_value(&self.proxy_password, "", window, cx);
         self.confirm_delete = false;
         self.session_editor_open = false;
         self.credential_prompt_open = false;
@@ -8522,7 +8603,7 @@ impl AppView {
         cx.notify();
     }
 
-    fn test_current_connection(&mut self, cx: &mut Context<Self>) {
+    fn test_current_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.host.read(cx).value().trim().to_owned();
         let port_text = self.port.read(cx).value().trim().to_owned();
         let username = self.username.read(cx).value().trim().to_owned();
@@ -8558,6 +8639,17 @@ impl AppView {
                 return;
             }
         };
+        let proxy_password = Zeroizing::new(self.proxy_password.read(cx).text().to_string());
+        if proxy
+            .as_ref()
+            .is_some_and(ProxySpec::uses_password_authentication)
+            && proxy_password.is_empty()
+        {
+            self.profile_message =
+                self.tr("Enter the proxy password before testing this connection.");
+            cx.notify();
+            return;
+        }
         let authentication = match build_authentication(
             auth_method,
             &identity_file,
@@ -8572,6 +8664,12 @@ impl AppView {
                 return;
             }
         };
+        let proxy_credentials = proxy.as_ref().and_then(|proxy| {
+            (proxy.uses_password_authentication()).then(|| ProxyCredentials {
+                password: Zeroizing::new(proxy_password.as_str().to_owned()),
+            })
+        });
+        Self::set_input_value(&self.proxy_password, "", window, cx);
         let keepalive_seconds = match keepalive_text.parse::<u16>() {
             Ok(value) => value,
             Err(_) => 0,
@@ -8584,6 +8682,7 @@ impl AppView {
             authentication,
             agent_forwarding: false,
             proxy,
+            proxy_credentials,
             terminal_size: self.terminal_size,
             jump: Vec::new(),
             keepalive_seconds,
@@ -8655,20 +8754,40 @@ impl AppView {
         let requested_title = self.profile_name.read(cx).value().trim().to_owned();
         let identity_file = self.identity_file.read(cx).value().trim().to_owned();
         let jump_name = self.jump_profile.read(cx).value().trim().to_owned();
+        let proxy = match self.profile_proxy_settings(cx) {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let password = Zeroizing::new(self.password.read(cx).text().to_string());
         let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
         let jump_password = Zeroizing::new(self.jump_password.read(cx).text().to_string());
         let jump_passphrase = Zeroizing::new(self.jump_passphrase.read(cx).text().to_string());
+        let proxy_password = Zeroizing::new(self.proxy_password.read(cx).text().to_string());
+        if !self.credential_prompt_open
+            && proxy
+                .as_ref()
+                .is_some_and(ProxySpec::uses_password_authentication)
+            && proxy_password.is_empty()
+        {
+            self.open_credential_prompt(self.tr("Enter proxy credentials to connect."), cx);
+            return;
+        }
         let cached_credentials = CachedCredentials::from_inputs(
             &password,
             &passphrase,
             &jump_password,
             &jump_passphrase,
+            &proxy_password,
         );
         Self::set_input_value(&self.password, "", window, cx);
         Self::set_input_value(&self.key_passphrase, "", window, cx);
         Self::set_input_value(&self.jump_password, "", window, cx);
         Self::set_input_value(&self.jump_passphrase, "", window, cx);
+        Self::set_input_value(&self.proxy_password, "", window, cx);
 
         let port = match port {
             Ok(port) if port > 0 => port,
@@ -8733,14 +8852,6 @@ impl AppView {
             .as_ref()
             .map(|profile| profile.forwards.clone())
             .unwrap_or_default();
-        let proxy = match self.profile_proxy_settings(cx) {
-            Ok(proxy) => proxy,
-            Err(error) => {
-                self.profile_message = self.tr(&error);
-                cx.notify();
-                return;
-            }
-        };
         let launch_settings = SessionLaunchSettings {
             auth_method: self.auth_method,
             agent_forwarding: self.profile_agent_forwarding,
@@ -8767,6 +8878,13 @@ impl AppView {
                 return;
             }
         };
+        let proxy_credentials = proxy.as_ref().and_then(|proxy| {
+            (!matches!(proxy.proxy_type, ProxyType::Socks4 | ProxyType::Socks4a)
+                && (!proxy.username.is_empty() || !proxy_password.is_empty()))
+            .then(|| ProxyCredentials {
+                password: Zeroizing::new(proxy_password.as_str().to_owned()),
+            })
+        });
         let jump_chain = parse_jump_chain(&jump_name);
         let mut jump = Vec::with_capacity(jump_chain.len());
         for (index, name) in jump_chain.iter().enumerate() {
@@ -8863,6 +8981,7 @@ impl AppView {
             self.auth_method,
             &identity_file,
             &jump_name,
+            proxy.as_ref(),
         );
         let status = self
             .tr("Checking host keys and connecting to {host}:{port}{route}...")
@@ -8883,6 +9002,7 @@ impl AppView {
             authentication,
             agent_forwarding: launch_settings.agent_forwarding,
             proxy: launch_settings.proxy.clone(),
+            proxy_credentials,
             terminal_size,
             jump,
             keepalive_seconds,
@@ -9422,6 +9542,17 @@ impl AppView {
             .retain(|(session_id, _, _)| *session_id != id);
         self.pending_auth_prompts
             .retain(|prompt| prompt.session_id != id);
+        let proxy_credential_key = self
+            .session(id)
+            .and_then(|session| session.credential_key.clone());
+        if let Some(key) = proxy_credential_key
+            && let Some(credentials) = self.credential_cache.get_mut(&key)
+        {
+            credentials.proxy_password.zeroize();
+            if !credentials.contains_secret() {
+                self.credential_cache.remove(&key);
+            }
+        }
         let closes_split_pane = self.split.is_some_and(|split| split.contains(id));
         if !remove_session(&mut self.sessions, &mut self.active_session_id, id) {
             return;
@@ -11335,10 +11466,32 @@ impl AppView {
                     &self.profile_proxy_port,
                     false,
                 ))
-                .child(components::help_text(
+                .child(components::field(
                     &tokens,
-                    self.tr("The proxy handles the first outbound connection. Proxy authentication is not supported; the SSH server host key is still verified."),
+                    self.tr("Proxy username (optional)"),
+                    &self.profile_proxy_username,
+                    false,
                 ));
+            if self.profile_proxy_type.is_some_and(|proxy_type| {
+                matches!(proxy_type, ProxyType::HttpConnect | ProxyType::Socks5)
+            }) && !self
+                .profile_proxy_username
+                .read(cx)
+                .value()
+                .trim()
+                .is_empty()
+            {
+                proxy_settings = proxy_settings.child(components::field(
+                    &tokens,
+                    self.tr("Proxy password"),
+                    &self.proxy_password,
+                    true,
+                ));
+            }
+            proxy_settings = proxy_settings.child(components::help_text(
+                &tokens,
+                self.tr("HTTP CONNECT Basic and SOCKS5 username/password authentication are supported. Proxy credentials stay in memory and are not saved. These proxy protocols do not encrypt credentials; use a trusted network."),
+            ));
         }
 
         let section_content = match self.session_editor_section {
@@ -12025,6 +12178,28 @@ impl AppView {
             });
 
         let mut fields = div().flex().flex_col().gap(px(ui_tokens::SPACE_3));
+        let proxy_username = self
+            .profile_proxy_username
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        if self.profile_proxy_type.is_some_and(|proxy_type| {
+            matches!(proxy_type, ProxyType::HttpConnect | ProxyType::Socks5)
+        }) && !proxy_username.is_empty()
+        {
+            fields = fields
+                .child(components::field(
+                    &tokens,
+                    self.tr("Proxy password"),
+                    &self.proxy_password,
+                    true,
+                ))
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("Proxy credentials are kept in memory only and are never saved with the host."),
+                ));
+        }
         if self.auth_method.uses_password_input() {
             fields = fields
                 .child(components::field(
@@ -12183,8 +12358,8 @@ impl AppView {
                 ButtonKind::Ghost,
                 ButtonSize::Regular,
             )
-            .on_click(cx.listener(|this, _, _window, cx| {
-                this.test_current_connection(cx);
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.test_current_connection(window, cx);
             })),
         );
         if group_batch_prompt {

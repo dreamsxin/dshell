@@ -498,8 +498,8 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "HTTP CONNECT" => "HTTP CONNECT",
         "Proxy host" => "代理主机",
         "Proxy port" => "代理端口",
-        "The proxy handles the first outbound connection. Proxy authentication is not supported; the SSH server host key is still verified." => {
-            "代理用于首个出站连接。暂不支持代理认证；仍会校验 SSH 服务器主机密钥。"
+        "HTTP CONNECT Basic and SOCKS5 username/password authentication are supported. Proxy credentials stay in memory and are not saved. These proxy protocols do not encrypt credentials; use a trusted network." => {
+            "支持 HTTP CONNECT Basic 和 SOCKS5 用户名/密码认证。代理凭据仅保存在内存中，不会写入资料。代理协议不加密凭据，请仅在可信网络中使用。"
         }
         "Retry interval (seconds)" => "重试间隔（秒）",
         "Maximum attempts" => "最大重试次数",

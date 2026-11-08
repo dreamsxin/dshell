@@ -20,7 +20,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统托盘沿用同一终端标记。
 
-首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.61` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
+首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.62` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
 
 界面语言支持 English 与简体中文，语言选择随外观设置持久化；主机资料、认证模板和布局反馈也会跟随语言切换，远端终端输出保持原样，避免把命令结果或 TUI 内容误翻译。
 
@@ -266,6 +266,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 55. `v0.1.59` 为 CLI exec/SFTP 增加无认证 SOCKS5 与 HTTP CONNECT proxy 传输，目标 SSH 主机仍由 known_hosts 严格校验。
 56. `v0.1.60` 为 GUI 主机资料增加无认证 SOCKS5/HTTP CONNECT 出站代理；跳板链首跳经代理拨号。
 57. `v0.1.61` 扩展 CLI 与 GUI 出站代理支持到 SOCKS4/SOCKS4A。
+58. `v0.1.62` 为 HTTP CONNECT 增加 Basic 代理认证、为 SOCKS5 增加用户名/密码认证；GUI 凭据只在内存中使用，CLI 从 stdin 读取，SSH 目标主机密钥仍严格校验。代理协议本身不加密凭据，界面与 CLI 文档会提示用户仅在可信网络使用。
 
 ## SSH 参考资料
 

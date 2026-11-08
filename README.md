@@ -3,7 +3,7 @@
 dshell is a Rust-native SSH desktop client built with GPUI, russh, and
 alacritty_terminal. The terminal UI is drawn by GPUI; there is no WebView
 runtime. The first public release is `v0.1.0`; the current package version is
-`v0.1.61`.
+`v0.1.62`.
 See [CHANGELOG.md](CHANGELOG.md) for release scope and verification.
 
 The Windows executable includes a native application icon. Its terminal mark
@@ -282,15 +282,22 @@ including OTP prompts, are not supported in this command mode. The command is
 visible in local process arguments and may be logged by the remote shell; do
 not put secrets in the command text.
 
-CLI `exec` and SFTP operations can connect through an unauthenticated SOCKS4,
-SOCKS4A, SOCKS5 or HTTP CONNECT proxy. Use `--proxy-type socks4|socks4a|socks5|http-connect` and `--proxy-host`;
-the default ports are 1080 for SOCKS and 8080 for HTTP CONNECT, or set `--proxy-port`.
-SOCKS4 resolves IPv4 targets locally; SOCKS4A, SOCKS5 and HTTP CONNECT resolve
-the target hostname through the proxy. Proxy authentication is not supported; SSH host-key
-verification still applies to the target server.
+CLI `exec` and SFTP operations can connect through SOCKS4, SOCKS4A, SOCKS5 or
+HTTP CONNECT proxies. Use `--proxy-type socks4|socks4a|socks5|http-connect` and
+`--proxy-host`; the default ports are 1080 for SOCKS and 8080 for HTTP CONNECT,
+or set `--proxy-port`. SOCKS4 resolves IPv4 targets locally; SOCKS4A, SOCKS5
+and HTTP CONNECT resolve the target hostname through the proxy. HTTP CONNECT
+Basic and SOCKS5 username/password authentication are supported with
+`--proxy-user NAME --proxy-password-stdin`. Passwords are read from stdin, not
+command-line arguments. If an SSH password or key passphrase is also read from
+stdin, provide the proxy password on the first line and the SSH secret on the
+second line. These proxy protocols do not encrypt proxy credentials; use a
+trusted network. SSH host-key verification still applies to the target server.
 
-Saved GUI host profiles can also select Direct, SOCKS4, SOCKS4A, SOCKS5 or HTTP CONNECT under
-Outbound proxy. When a jump chain is configured, the proxy carries the initial
+Saved GUI host profiles can also select Direct, SOCKS4, SOCKS4A, SOCKS5 or HTTP
+CONNECT under Outbound proxy. HTTP CONNECT and SOCKS5 profiles accept a proxy
+username; dshell prompts for its password at connection time and keeps it in
+memory only. When a jump chain is configured, the proxy carries the initial
 connection to the first jump host; the remaining hops use SSH channels.
 
 Agent forwarding is off by default. Add `--forward-agent` only when the remote

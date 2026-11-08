@@ -38,7 +38,13 @@ use crate::terminal::{
     CursorStyle, MouseTrackingMode, TerminalEmulator, TerminalFrame, TerminalMouseButton,
     TerminalMouseEvent, TerminalRequest, TerminalSearchResult, TerminalSize, TerminalTheme,
 };
+
 use crate::zmodem::{self, ZmodemEvent, ZmodemReceiver, ZmodemSendStep, ZmodemSender};
+
+#[derive(Clone)]
+pub struct ProxyCredentials {
+    pub password: Zeroizing<String>,
+}
 
 #[derive(Clone)]
 pub enum Authentication {
@@ -60,6 +66,7 @@ pub enum Authentication {
     ViaProxy {
         authentication: Box<Authentication>,
         proxy: ProxySpec,
+        credentials: Option<ProxyCredentials>,
     },
     Agent,
 }
@@ -90,6 +97,7 @@ pub struct ConnectionSpec {
     pub authentication: Authentication,
     pub agent_forwarding: bool,
     pub proxy: Option<ProxySpec>,
+    pub proxy_credentials: Option<ProxyCredentials>,
     pub terminal_size: TerminalSize,
     /// Jump chain, ordered nearest-first: hops[0] is dialed directly from
     /// this machine, each later hop is dialed through the previous one, and
@@ -609,12 +617,13 @@ async fn connect_command_session(
     if host.trim().is_empty() || username.trim().is_empty() || port == 0 {
         bail!("A host, username, and valid port are required.");
     }
-    let (authentication, proxy) = match authentication {
+    let (authentication, proxy, proxy_credentials) = match authentication {
         Authentication::ViaProxy {
             authentication,
             proxy,
-        } => (*authentication, Some(proxy)),
-        authentication => (authentication, None),
+            credentials,
+        } => (*authentication, Some(proxy), credentials),
+        authentication => (authentication, None, None),
     };
     if matches!(
         authentication,
@@ -639,7 +648,8 @@ async fn connect_command_session(
     let mut session = timeout(Duration::from_secs(20), async {
         match proxy {
             Some(proxy) => {
-                let stream = connect_proxy_stream(&proxy, &host, port).await?;
+                let stream =
+                    connect_proxy_stream(&proxy, proxy_credentials.as_ref(), &host, port).await?;
                 client::connect_stream(config, stream, handler).await
             }
             None => client::connect(config, (host.as_str(), port), handler).await,
@@ -660,6 +670,7 @@ async fn connect_command_session(
 
 async fn connect_proxy_stream(
     proxy: &ProxySpec,
+    credentials: Option<&ProxyCredentials>,
     target_host: &str,
     target_port: u16,
 ) -> Result<tokio::net::TcpStream> {
@@ -668,6 +679,15 @@ async fn connect_proxy_stream(
     }
     if target_host.trim().is_empty() || target_host.chars().any(char::is_control) {
         bail!("Target host contains invalid control characters.");
+    }
+    if proxy.uses_password_authentication() && credentials.is_none() {
+        bail!("Proxy password is required for the configured username.");
+    }
+    if credentials.is_some()
+        && matches!(proxy.proxy_type, ProxyType::HttpConnect | ProxyType::Socks5)
+        && proxy.username.is_empty()
+    {
+        bail!("Proxy username is required when proxy password authentication is configured.");
     }
     let mut stream = tokio::net::TcpStream::connect((proxy.host.as_str(), proxy.port))
         .await
@@ -679,11 +699,33 @@ async fn connect_proxy_stream(
             } else {
                 format!("{target_host}:{target_port}")
             };
-            let request = format!(
-                "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
+            if proxy.username.contains(':') || proxy.username.chars().any(char::is_control) {
+                bail!("HTTP proxy username contains invalid characters.");
+            }
+            let mut request = Zeroizing::new(Vec::with_capacity(512));
+            request.extend_from_slice(
+                format!(
+                    "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
+                )
+                .as_bytes(),
             );
+            if !proxy.username.is_empty() || credentials.is_some() {
+                let password =
+                    credentials.map_or(&[][..], |credentials| credentials.password.as_bytes());
+                let mut raw = Zeroizing::new(Vec::with_capacity(
+                    proxy.username.len() + password.len() + 1,
+                ));
+                raw.extend_from_slice(proxy.username.as_bytes());
+                raw.push(b':');
+                raw.extend_from_slice(password);
+                let encoded = Zeroizing::new(data_encoding::BASE64.encode(&raw));
+                request.extend_from_slice(b"Proxy-Authorization: Basic ");
+                request.extend_from_slice(encoded.as_bytes());
+                request.extend_from_slice(b"\r\n");
+            }
+            request.extend_from_slice(b"\r\n");
             stream
-                .write_all(request.as_bytes())
+                .write_all(&request)
                 .await
                 .context("Could not send HTTP CONNECT request")?;
             let mut response = Vec::with_capacity(256);
@@ -715,6 +757,12 @@ async fn connect_proxy_stream(
             }
         }
         ProxyType::Socks4 | ProxyType::Socks4a => {
+            if credentials.is_some() {
+                bail!("SOCKS4 and SOCKS4A do not support password authentication.");
+            }
+            if proxy.username.len() > 255 || proxy.username.as_bytes().contains(&0) {
+                bail!("SOCKS4 user ID must be at most 255 bytes and cannot contain NUL.");
+            }
             let mut request = Vec::with_capacity(target_host.len() + 10);
             request.extend_from_slice(&[0x04, 0x01]);
             request.extend_from_slice(&target_port.to_be_bytes());
@@ -732,6 +780,7 @@ async fn connect_proxy_stream(
                         })
                         .context("SOCKS4 requires a locally resolved IPv4 target.")?;
                     request.extend_from_slice(&address.octets());
+                    request.extend_from_slice(proxy.username.as_bytes());
                     request.push(0);
                 }
                 ProxyType::Socks4a => {
@@ -741,7 +790,9 @@ async fn connect_proxy_stream(
                     {
                         bail!("Target host is not valid for SOCKS4A domain forwarding.");
                     }
-                    request.extend_from_slice(&[0, 0, 0, 1, 0]);
+                    request.extend_from_slice(&[0, 0, 0, 1]);
+                    request.extend_from_slice(proxy.username.as_bytes());
+                    request.push(0);
                     request.extend_from_slice(target_host.as_bytes());
                     request.push(0);
                 }
@@ -761,8 +812,14 @@ async fn connect_proxy_stream(
             }
         }
         ProxyType::Socks5 => {
+            let offers_userpass = !proxy.username.is_empty() || credentials.is_some();
+            let greeting: &[u8] = if offers_userpass {
+                &[0x05, 0x01, 0x02]
+            } else {
+                &[0x05, 0x01, 0x00]
+            };
             stream
-                .write_all(&[0x05, 0x01, 0x00])
+                .write_all(greeting)
                 .await
                 .context("Could not send SOCKS5 method negotiation")?;
             let mut method = [0u8; 2];
@@ -770,8 +827,45 @@ async fn connect_proxy_stream(
                 .read_exact(&mut method)
                 .await
                 .context("Could not read SOCKS5 method selection")?;
-            if method != [0x05, 0x00] {
-                bail!("SOCKS5 proxy requires an unsupported authentication method.");
+            if method[0] != 0x05 {
+                bail!("SOCKS5 proxy returned an invalid authentication method.");
+            }
+            match method[1] {
+                0x00 if !offers_userpass => {}
+                0x02 if offers_userpass => {
+                    if proxy.username.is_empty() {
+                        bail!("SOCKS5 username/password authentication requires a username.");
+                    }
+                    if proxy.username.len() > 255 {
+                        bail!("SOCKS5 username exceeds 255 bytes.");
+                    }
+                    let password = credentials.map_or(&[][..], |value| value.password.as_bytes());
+                    if password.len() > 255 {
+                        bail!("SOCKS5 password exceeds 255 bytes.");
+                    }
+                    let mut request = Zeroizing::new(Vec::with_capacity(
+                        3 + proxy.username.len() + password.len(),
+                    ));
+                    request.extend_from_slice(&[0x01, proxy.username.len() as u8]);
+                    request.extend_from_slice(proxy.username.as_bytes());
+                    request.push(password.len() as u8);
+                    request.extend_from_slice(password);
+                    stream
+                        .write_all(&request)
+                        .await
+                        .context("Could not send SOCKS5 credentials")?;
+                    let mut response = [0u8; 2];
+                    stream
+                        .read_exact(&mut response)
+                        .await
+                        .context("Could not read SOCKS5 authentication response")?;
+                    if response != [0x01, 0x00] {
+                        bail!("SOCKS5 proxy rejected the credentials.");
+                    }
+                }
+                0x00 => bail!("SOCKS5 proxy declined configured username/password authentication."),
+                0xff => bail!("SOCKS5 proxy offers no supported authentication methods."),
+                _ => bail!("SOCKS5 proxy requires an unsupported authentication method."),
             }
             let target = target_host.as_bytes();
             if target.is_empty() || target.len() > u8::MAX as usize || target.contains(&0) {
@@ -821,10 +915,11 @@ async fn connect_initial_session<H: Handler + Send + 'static>(
     port: u16,
     handler: H,
     proxy: Option<&ProxySpec>,
+    credentials: Option<&ProxyCredentials>,
 ) -> Result<client::Handle<H>> {
     match proxy {
         Some(proxy) => {
-            let stream = connect_proxy_stream(proxy, host, port).await?;
+            let stream = connect_proxy_stream(proxy, credentials, host, port).await?;
             client::connect_stream(config, stream, handler)
                 .await
                 .map_err(|error| anyhow!("{error:?}"))
@@ -1767,6 +1862,7 @@ async fn run_connection_attempt_with_known_hosts(
         authentication,
         agent_forwarding,
         proxy,
+        proxy_credentials,
         terminal_size,
         jump,
         keepalive_seconds,
@@ -1812,6 +1908,7 @@ async fn run_connection_attempt_with_known_hosts(
                         hop.port,
                         handler,
                         proxy.as_ref(),
+                        proxy_credentials.as_ref(),
                     )
                     .await
                     .with_context(|| format!("SSH jump host {} handshake failed", hop.host))?,
@@ -1869,9 +1966,16 @@ async fn run_connection_attempt_with_known_hosts(
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
-            session = connect_initial_session(config, &host, port, handler, proxy.as_ref())
-                .await
-                .context("SSH handshake failed")?;
+            session = connect_initial_session(
+                config,
+                &host,
+                port,
+                handler,
+                proxy.as_ref(),
+                proxy_credentials.as_ref(),
+            )
+            .await
+            .context("SSH handshake failed")?;
         }
 
         authenticate(&mut session, &username, authentication, &events).await?;
@@ -4279,17 +4383,17 @@ async fn run_connection_with_known_hosts(
 mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, MAX_SERVER_LISTENERS, MAX_SERVER_MOUNTS,
-        MAX_SERVER_SESSIONS, ProxySpec, ProxyType, ReconnectSettings, RemoteSftpOutput,
-        ServerPowerAction, ServiceAction, UiEvent, can_answer_with_password, connect_proxy_stream,
-        connection_info_for_key, is_known_host_key, is_retryable_reconnect_error,
-        parse_power_action, parse_process_action, parse_server_docker_containers,
-        parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
-        parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
-        parse_service_logs, power_action_command, process_termination_command, relay_agent_stream,
-        run_connection_with_known_hosts, run_remote_command, run_sftp_command, run_sftp_commands,
-        sanitize_zmodem_name, service_action_command, service_logs_command,
-        test_connection_with_known_hosts, valid_process_pid, valid_service_name,
-        wait_before_reconnect,
+        MAX_SERVER_SESSIONS, ProxyCredentials, ProxySpec, ProxyType, ReconnectSettings,
+        RemoteSftpOutput, ServerPowerAction, ServiceAction, UiEvent, can_answer_with_password,
+        connect_proxy_stream, connection_info_for_key, is_known_host_key,
+        is_retryable_reconnect_error, parse_power_action, parse_process_action,
+        parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
+        parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
+        parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
+        process_termination_command, relay_agent_stream, run_connection_with_known_hosts,
+        run_remote_command, run_sftp_command, run_sftp_commands, sanitize_zmodem_name,
+        service_action_command, service_logs_command, test_connection_with_known_hosts,
+        valid_process_pid, valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -4318,6 +4422,7 @@ mod tests {
         proxy_type: ProxyType,
         target_host: String,
         target_port: u16,
+        credentials: Option<(String, String)>,
     ) -> (ProxySpec, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -4325,6 +4430,9 @@ mod tests {
             proxy_type,
             host: address.ip().to_string(),
             port: address.port(),
+            username: credentials
+                .as_ref()
+                .map_or_else(String::new, |(username, _)| username.clone()),
         };
         let task = tokio::spawn(async move {
             let Ok((mut downstream, _)) = listener.accept().await else {
@@ -4342,6 +4450,13 @@ mod tests {
                     }
                     let request = String::from_utf8_lossy(&request);
                     request.starts_with(&format!("CONNECT {target_host}:{target_port} HTTP/1."))
+                        && credentials.as_ref().is_none_or(|(username, password)| {
+                            request.contains(&format!(
+                                "Proxy-Authorization: Basic {}",
+                                data_encoding::BASE64
+                                    .encode(format!("{username}:{password}").as_bytes())
+                            ))
+                        })
                 }
                 ProxyType::Socks4 => {
                     let mut request = [0u8; 9];
@@ -4380,14 +4495,49 @@ mod tests {
                     domain == target_host.as_bytes()
                 }
                 ProxyType::Socks5 => {
-                    let mut greeting = [0u8; 3];
-                    if downstream.read_exact(&mut greeting).await.is_err()
-                        || greeting != [0x05, 0x01, 0x00]
+                    let mut greeting_header = [0u8; 2];
+                    if downstream.read_exact(&mut greeting_header).await.is_err()
+                        || greeting_header[0] != 0x05
                     {
                         return;
                     }
-                    if downstream.write_all(&[0x05, 0x00]).await.is_err() {
+                    let mut methods = vec![0; usize::from(greeting_header[1])];
+                    if downstream.read_exact(&mut methods).await.is_err() {
                         return;
+                    }
+                    let auth = credentials.as_ref();
+                    let selected_method = if auth.is_some() { 0x02 } else { 0x00 };
+                    if !methods.contains(&selected_method)
+                        || downstream
+                            .write_all(&[0x05, selected_method])
+                            .await
+                            .is_err()
+                    {
+                        return;
+                    }
+                    if let Some((expected_username, expected_password)) = auth {
+                        let mut auth_header = [0u8; 2];
+                        if downstream.read_exact(&mut auth_header).await.is_err()
+                            || auth_header[0] != 0x01
+                        {
+                            return;
+                        }
+                        let mut actual_username = vec![0; usize::from(auth_header[1])];
+                        if downstream.read_exact(&mut actual_username).await.is_err() {
+                            return;
+                        }
+                        let mut password_length = [0u8; 1];
+                        if downstream.read_exact(&mut password_length).await.is_err() {
+                            return;
+                        }
+                        let mut actual_password = vec![0; usize::from(password_length[0])];
+                        if downstream.read_exact(&mut actual_password).await.is_err()
+                            || actual_username != expected_username.as_bytes()
+                            || actual_password != expected_password.as_bytes()
+                            || downstream.write_all(&[0x01, 0x00]).await.is_err()
+                        {
+                            return;
+                        }
                     }
                     let mut header = [0u8; 5];
                     if downstream.read_exact(&mut header).await.is_err()
@@ -4465,6 +4615,7 @@ mod tests {
             proxy_type: ProxyType::HttpConnect,
             host: "127.0.0.1".to_owned(),
             port: http_port,
+            username: String::new(),
         };
         let http_server = tokio::spawn(async move {
             let (mut stream, _) = http_listener.accept().await.unwrap();
@@ -4481,7 +4632,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let error = connect_proxy_stream(&http_proxy, "server.example.com", 22)
+        let error = connect_proxy_stream(&http_proxy, None, "server.example.com", 22)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("rejected the tunnel"));
@@ -4493,6 +4644,7 @@ mod tests {
             proxy_type: ProxyType::Socks5,
             host: "127.0.0.1".to_owned(),
             port: socks_port,
+            username: String::new(),
         };
         let socks_server = tokio::spawn(async move {
             let (mut stream, _) = socks_listener.accept().await.unwrap();
@@ -4501,11 +4653,125 @@ mod tests {
             assert_eq!(greeting, [0x05, 0x01, 0x00]);
             stream.write_all(&[0x05, 0x02]).await.unwrap();
         });
-        let error = connect_proxy_stream(&socks_proxy, "server.example.com", 22)
+        let error = connect_proxy_stream(&socks_proxy, None, "server.example.com", 22)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("unsupported authentication"));
         socks_server.await.unwrap();
+
+        let proxy_with_username = ProxySpec {
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            username: "proxy-user".to_owned(),
+        };
+        let error = connect_proxy_stream(&proxy_with_username, None, "server.example.com", 22)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Proxy password is required"));
+    }
+
+    #[tokio::test]
+    async fn authenticated_proxies_receive_credentials_without_socks5_downgrade() {
+        let username = "proxy-user";
+        let credentials = ProxyCredentials {
+            password: Zeroizing::new("proxy-password".to_owned()),
+        };
+
+        let socks_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let socks_port = socks_listener.local_addr().unwrap().port();
+        let socks_proxy = ProxySpec {
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_owned(),
+            port: socks_port,
+            username: username.to_owned(),
+        };
+        let socks_server = tokio::spawn(async move {
+            let (mut stream, _) = socks_listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x02]);
+            stream.write_all(&[0x05, 0x02]).await.unwrap();
+            let mut auth_header = [0u8; 2];
+            stream.read_exact(&mut auth_header).await.unwrap();
+            assert_eq!(auth_header[0], 0x01);
+            let mut actual_username = vec![0; usize::from(auth_header[1])];
+            stream.read_exact(&mut actual_username).await.unwrap();
+            assert_eq!(actual_username, username.as_bytes());
+            let mut password_length = [0u8; 1];
+            stream.read_exact(&mut password_length).await.unwrap();
+            let mut actual_password = vec![0; usize::from(password_length[0])];
+            stream.read_exact(&mut actual_password).await.unwrap();
+            assert_eq!(actual_password, b"proxy-password");
+            stream.write_all(&[0x01, 0x00]).await.unwrap();
+            let mut request_header = [0u8; 5];
+            stream.read_exact(&mut request_header).await.unwrap();
+            assert_eq!(request_header[..4], [0x05, 0x01, 0x00, 0x03]);
+            let mut target = vec![0; usize::from(request_header[4]) + 2];
+            stream.read_exact(&mut target).await.unwrap();
+            assert_eq!(&target[..target.len() - 2], b"ssh.example.com");
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 22])
+                .await
+                .unwrap();
+        });
+        let stream = connect_proxy_stream(&socks_proxy, Some(&credentials), "ssh.example.com", 22)
+            .await
+            .unwrap();
+        drop(stream);
+        socks_server.await.unwrap();
+
+        let http_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        let http_proxy = ProxySpec {
+            proxy_type: ProxyType::HttpConnect,
+            host: "127.0.0.1".to_owned(),
+            port: http_port,
+            username: username.to_owned(),
+        };
+        let expected_auth = data_encoding::BASE64.encode(b"proxy-user:proxy-password");
+        let http_server = tokio::spawn(async move {
+            let (mut stream, _) = http_listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.contains(&format!("Proxy-Authorization: Basic {expected_auth}")));
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let stream = connect_proxy_stream(&http_proxy, Some(&credentials), "ssh.example.com", 22)
+            .await
+            .unwrap();
+        drop(stream);
+        http_server.await.unwrap();
+
+        let downgrade_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let downgrade_port = downgrade_listener.local_addr().unwrap().port();
+        let downgrade_proxy = ProxySpec {
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_owned(),
+            port: downgrade_port,
+            username: username.to_owned(),
+        };
+        let downgrade_server = tokio::spawn(async move {
+            let (mut stream, _) = downgrade_listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x02]);
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+        });
+        let error =
+            connect_proxy_stream(&downgrade_proxy, Some(&credentials), "ssh.example.com", 22)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("declined configured"));
+        downgrade_server.await.unwrap();
     }
 
     #[tokio::test]
@@ -5030,6 +5296,7 @@ abc	img	name"
             authentication: Authentication::Password(Zeroizing::new("secret".to_owned())),
             agent_forwarding: false,
             proxy: None,
+            proxy_credentials: None,
             terminal_size: TerminalSize {
                 columns: 80,
                 rows: 24,
@@ -5121,6 +5388,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5606,6 +5874,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5740,6 +6009,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5954,6 +6224,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password.clone())),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6102,6 +6373,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password.clone())),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6264,6 +6536,7 @@ abc	img	name"
                     },
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6400,6 +6673,7 @@ abc	img	name"
                 },
                 agent_forwarding: false,
                 proxy: None,
+                proxy_credentials: None,
                 terminal_size: TerminalSize {
                     columns: 80,
                     rows: 24,
@@ -6477,6 +6751,7 @@ abc	img	name"
                     },
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6600,8 +6875,14 @@ abc	img	name"
             ProxyType::Socks5,
             ProxyType::HttpConnect,
         ] {
-            let (proxy, proxy_task) =
-                runtime.block_on(start_test_proxy(proxy_type, host.clone(), port));
+            let proxy_auth = matches!(proxy_type, ProxyType::Socks5 | ProxyType::HttpConnect)
+                .then(|| ("proxy-user".to_owned(), "proxy-password".to_owned()));
+            let (proxy, proxy_task) = runtime.block_on(start_test_proxy(
+                proxy_type,
+                host.clone(),
+                port,
+                proxy_auth.clone(),
+            ));
             let spec = ConnectionSpec {
                 host: host.clone(),
                 port,
@@ -6609,6 +6890,9 @@ abc	img	name"
                 authentication: Authentication::Password(Zeroizing::new(password.clone())),
                 agent_forwarding: false,
                 proxy: Some(proxy),
+                proxy_credentials: proxy_auth.map(|(_, password)| ProxyCredentials {
+                    password: Zeroizing::new(password),
+                }),
                 terminal_size: TerminalSize {
                     columns: 80,
                     rows: 24,
@@ -6755,8 +7039,17 @@ abc	img	name"
             ProxyType::Socks5,
             ProxyType::HttpConnect,
         ] {
-            let (proxy, proxy_task) =
-                runtime.block_on(start_test_proxy(proxy_type, host.clone(), port));
+            let proxy_auth = matches!(proxy_type, ProxyType::Socks5 | ProxyType::HttpConnect)
+                .then(|| ("proxy-user".to_owned(), "proxy-password".to_owned()));
+            let (proxy, proxy_task) = runtime.block_on(start_test_proxy(
+                proxy_type,
+                host.clone(),
+                port,
+                proxy_auth.clone(),
+            ));
+            let credentials = proxy_auth.map(|(_, password)| ProxyCredentials {
+                password: Zeroizing::new(password),
+            });
             let proxied_result = runtime.block_on(run_sftp_command(
                 host.clone(),
                 port,
@@ -6766,6 +7059,7 @@ abc	img	name"
                         password.clone(),
                     ))),
                     proxy,
+                    credentials,
                 },
                 SftpCommand::List(remote_root.clone()),
                 Some(known_hosts.clone()),
@@ -7187,6 +7481,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -7704,6 +7999,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -7902,6 +8198,7 @@ abc	img	name"
                     authentication: Authentication::Password(Zeroizing::new(password)),
                     agent_forwarding: false,
                     proxy: None,
+                    proxy_credentials: None,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,

@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-09，Windows/MSVC：`v0.1.62` 为 HTTP CONNECT 增加 Basic 代理认证、为 SOCKS5 增加用户名/密码认证。GUI 主机资料仅保存用户名，密码使用掩码输入并只在运行时内存存在；支持连接提示、测试连接、重试和分组批量启动。CLI exec/SFTP 使用 `--proxy-user` 与 `--proxy-password-stdin`，同时读 SSH 密码/密钥口令时 stdin 顺序为代理密码在前。秘密缓冲使用 `Zeroizing`；profile JSON/export、命令行参数和日志不包含代理密码。SOCKS5 配置认证时只协商用户名/密码方法，不接受匿名降级；HTTP CONNECT 与 SOCKS5 均不加密代理凭据，UI/README 已提示可信网络限制。SSH 目标 known_hosts 严格校验和跳板路由保持不变。验证：`cargo fmt --all`、`cargo check --locked --all-targets`、单测（127 library + 141 GUI + 14 CLI passed；14 Docker 专项由独立脚本运行）、硬约束脚本通过；Docker SSH 14/14，GUI 连接和 CLI SFTP 真实经认证 SOCKS5/HTTP CONNECT 以及 SOCKS4/SOCKS4A 完成会话。双二进制 Release 构建、Inno Setup 6.7.3 编译、静默 per-user 安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.62-x64.exe` 大小 11,254,791 字节，SHA-256 `DC9E5875CF42D7BB463BF0DAB7528DCA994C5FECFD25A373DF43733C104A77BC`；应用和 CLI 未签名。GUI/安装向导、DPI、IME、字形仍需隔离 Windows 桌面人工验收；GitHub Release 由用户手工发布。下一步：复核 `origin/main` 未移动后创建 conventional 冻结提交、`v0.1.62` 注释标签并推送。
+
 2026-11-09，Windows/MSVC：`v0.1.61` 扩展 CLI 和 GUI 保存主机的无认证出站代理至 SOCKS4/SOCKS4A。SOCKS4 在本机解析 IPv4 目标，SOCKS4A 将域名交由代理解析。验证：单测（126 library + 141 GUI + 13 CLI passed；14 Docker 专项 ignored）、硬约束脚本通过；Docker SSH 14/14，GUI 连接测试与 CLI SFTP 均经 SOCKS4、SOCKS4A、SOCKS5 和 HTTP CONNECT 完成握手/请求。双二进制 Release 构建、Inno Setup 6.7.3 编译和静默安装/卸载通过。安装包 `dist/installer/dshell-setup-v0.1.61-x64.exe` 大小 11,223,900 字节，SHA-256 `5344EB55DCEF3AFD3CF8195113B0BB1A3F9E773EFCBBB80CD83981DAB52D6AD1`；应用和 CLI 未签名。GUI/安装向导、DPI、IME、字形仍需隔离 Windows 桌面人工验收；GitHub Release 由用户手工上传。
 
 `v0.1.60` 的最终安装包重建结果：11,216,984 字节，SHA-256 `B8DD171B0115B20630EB2369D10388433E7100C8D093A15AC709DCF336C11D98`（取代下方早先候选构建值）。
