@@ -4,6 +4,10 @@ All notable changes to dshell are documented here.
 
 ## Unreleased
 
+No unreleased changes yet.
+
+## [0.1.44] - 2026-11-08
+
 ### Changed
 
 - Cleaner sidebar host interactions, following Xshell conventions: a
@@ -66,6 +70,21 @@ All notable changes to dshell are documented here.
   cannot be bypassed with Esc or the lock shortcut.
 - Add a multi-size Windows application icon, embed it into the executable,
   and reuse its terminal mark in the system tray.
+
+### Verification
+
+- Verified 2026-11-08 on Windows/MSVC: `cargo fmt --all` and
+  `scripts\verify-hard-constraints.ps1` passed; 256 unit tests passed and 11
+  Docker-only tests were skipped by that run.
+- `scripts\test-docker-ssh.ps1` passed all 11 integration tests.
+- `cargo build --release --locked --bin dshell` passed. Inno Setup 6.7.3
+  produced `dshell-setup-v0.1.44-x64.exe`; its SHA-256 is
+  `17AE94AEBFD93EE901428A60BB7224157D6D991478492D893E27525708779F08`.
+- `scripts\test-installer.ps1` passed silent per-user installation and
+  uninstallation in a temporary directory.
+- The executable and installer are unsigned because no Authenticode
+  certificate is configured. Installer wizard visuals, taskbar icon display,
+  DPI, IME and glyph alignment still need isolated Windows desktop checks.
 
 ## [0.1.43] - 2026-11-06
 

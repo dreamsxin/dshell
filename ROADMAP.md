@@ -243,6 +243,8 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 
 39. 托盘面板已交付：`tray-icon` 原生托盘 + muda 菜单（Open/New session/Quit），程序化 RGBA 图标，mpsc 通道桥接平台线程事件到 GPUI 前台轮询任务，`TrayBridge` 全局持窗口句柄。GUI 行为待人工验收。
 
+40. `v0.1.44` 首个 Windows 安装包候选已冻结：Inno Setup 6.7.3 per-user 安装脚本、品牌图标、静默安装/卸载 smoke test 与 SHA-256 清单已生成；单测 256 项、Docker SSH 11/11。安装包未签名，向导 GUI/DPI/IME 手工验收和 Authenticode 签名仍是公开发布前检查项，详见 `docs/INSTALLER_PLAN.md`。
+
 ## SSH 参考资料
 
 - [OpenBSD ssh_config(5)](https://man.openbsd.org/ssh_config.5)：主机配置、ProxyJump、keep-alive 与 StrictHostKeyChecking 的行为说明。

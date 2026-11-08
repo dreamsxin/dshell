@@ -8,9 +8,9 @@ Initial target: x64 Windows on MSVC. Keep the installer native and install the a
 
 ## Installer Choice
 
-Use Inno Setup for the first installer. The current product is a single native desktop application and needs a compact setup flow, per-user installation, Start Menu shortcuts, upgrade handling, and uninstall behavior. Inno Setup provides a script-controlled Windows Setup executable, configurable wizard appearance and icons, shortcuts, and uninstall support.
+Use Inno Setup 6.7.3 for the first installer. The current product is a single native desktop application and needs a compact setup flow, per-user installation, Start Menu shortcuts, upgrade handling, and uninstall behavior. Inno Setup provides a script-controlled Windows Setup executable, configurable wizard appearance and icons, shortcuts, and uninstall support.
 
-Before adopting it, review the current Inno Setup license against the project's distribution and commercial-use context. Its official site identifies it as open source and also requests a commercial license for commercial users.
+Inno Setup 6.7.3 is selected for this build. The project owner confirmed non-commercial open-source use, satisfying the builder-license review for this release.
 
 Keep MSIX as a later option for Microsoft Store or managed enterprise distribution. MSIX offers package identity and clean package lifecycle behavior, but it requires a valid trusted package signature; the signing and publisher identity are not currently configured. Do not build both formats for the first installer milestone.
 
@@ -51,6 +51,7 @@ The app has no selectable feature components, so omit a feature-selection page. 
 ## Acceptance Checks
 
 - Install as a standard user on a clean supported Windows VM without an elevated prompt.
+- Run `scripts\\test-installer.ps1` for a silent temporary-directory install/uninstall smoke test before isolated GUI testing.
 - Verify the icon in the Setup executable, installed executable, Start Menu shortcut, taskbar, and uninstall entry.
 - Verify first install, same-version repair, upgrade, cancellation, and uninstall.
 - Confirm host profiles, settings, SSH keys, logs, and `known_hosts` remain unchanged by installation and are preserved on uninstall.
@@ -59,10 +60,10 @@ The app has no selectable feature components, so omit a feature-selection page. 
 
 ## Decisions Before Implementation
 
-- Confirm `v0.1.44` as the first installer release after freezing the `Unreleased` changes. `v0.1.43` is already tagged and must not be replaced.
-- Confirm whether first release supports per-user installation only (recommended) or also all-users installation.
-- Confirm the Authenticode certificate and publisher display name, or explicitly approve an unsigned first installer.
-- Confirm whether the optional portable ZIP is part of the first release.
+- Release scope is frozen as `v0.1.44`; `v0.1.43` is already tagged and is not replaced.
+- First release supports x64 per-user installation only.
+- No Authenticode certificate is available for this candidate; the installer and EXE are unsigned. Decide whether to add a signing certificate before public publication.
+- The optional portable ZIP is not included in this first installer candidate.
 
 ## References
 
