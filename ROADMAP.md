@@ -20,7 +20,7 @@ dshell 的 UI 方向是：左侧主机导航，中间标签式工作区，终端
 
 Windows 桌面构建使用本地 SVG 源稿生成并嵌入 EXE 图标，系统托盘沿用同一终端标记。
 
-首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.52` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
+首个 Windows 安装包随 `v0.1.44` 已准备；`v0.1.53` 继续使用 Inno Setup per-user 安装，并安装 `dshell-cli.exe`。脚本、向导结构、升级/卸载语义和验收清单见 [docs/INSTALLER_PLAN.md](docs/INSTALLER_PLAN.md)；安装包未签名，Windows 桌面向导验收仍待完成。
 
 界面语言支持 English 与简体中文，语言选择随外观设置持久化；主机资料、认证模板和布局反馈也会跟随语言切换，远端终端输出保持原样，避免把命令结果或 TUI 内容误翻译。
 
@@ -257,6 +257,7 @@ G2 的登录脚本评价称赞可在成功登录后自动运行脚本，另一�
 46. `v0.1.50` 增加版本化 JSON SFTP batch file：最多 1 MiB、256 个操作，单一已认证 SSH/SFTP 会话中顺序执行，拒绝未知字段且不接受凭据字段。通配符匹配与条件/变量脚本仍未实现。
 47. `v0.1.51` 为 `dshell-cli sftp` 与 JSON batch 增加 `put-glob`/`get-glob`，支持最终路径段 `*`、`?`、`[class]` 匹配，父目录保持 literal，匹配项排序执行并过滤 symlink/special files。
 48. `v0.1.52` 为 CLI exec 增加显式 agent forwarding 请求：仅当传入 `--forward-agent` 才请求服务器打开 agent channel，并将协议流桥接到本机 agent；未授权 channel 明确拒绝。
+49. `v0.1.53` 为 GUI 主机资料增加可选 SSH agent forwarding；默认关闭，只在最终目标 shell 会话请求转发，跳板会话不启用。
 
 ## SSH 参考资料
 

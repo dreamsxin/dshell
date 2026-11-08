@@ -362,6 +362,7 @@ fn build_profile(
         } else {
             AuthMethod::PublicKey
         },
+        agent_forwarding: false,
         identity_file,
         proxy_jump: String::new(),
         forwards,

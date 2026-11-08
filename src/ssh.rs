@@ -78,6 +78,7 @@ pub struct ConnectionSpec {
     pub port: u16,
     pub username: String,
     pub authentication: Authentication,
+    pub agent_forwarding: bool,
     pub terminal_size: TerminalSize,
     /// Jump chain, ordered nearest-first: hops[0] is dialed directly from
     /// this machine, each later hop is dialed through the previous one, and
@@ -756,7 +757,7 @@ pub async fn run_sftp_commands(
     )
     .await?;
     let channel = timeout(Duration::from_secs(15), async {
-        let channel = session.channel_open_session().await?;
+        let mut channel = session.channel_open_session().await?;
         channel.request_subsystem(true, "sftp").await?;
         Ok::<_, russh::Error>(channel)
     })
@@ -1510,6 +1511,7 @@ async fn run_connection_attempt_with_known_hosts(
         port,
         username,
         authentication,
+        agent_forwarding,
         terminal_size,
         jump,
         keepalive_seconds,
@@ -1584,7 +1586,7 @@ async fn run_connection_attempt_with_known_hosts(
                 path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
                 remote_socket_forwards: Arc::clone(&remote_socket_targets),
-                agent_forward_allowed: false,
+                agent_forward_allowed: agent_forwarding,
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
@@ -1606,7 +1608,7 @@ async fn run_connection_attempt_with_known_hosts(
                 path: known_hosts_path,
                 remote_forwards: Arc::clone(&remote_targets),
                 remote_socket_forwards: Arc::clone(&remote_socket_targets),
-                agent_forward_allowed: false,
+                agent_forward_allowed: agent_forwarding,
                 forward_events: Some(forward_events.clone()),
                 events: Some(events.clone()),
             };
@@ -1643,7 +1645,7 @@ async fn run_connection_attempt_with_known_hosts(
             }
         };
 
-        let channel = session.channel_open_session().await?;
+        let mut channel = session.channel_open_session().await?;
         channel
             .request_pty(
                 true,
@@ -1655,6 +1657,17 @@ async fn run_connection_attempt_with_known_hosts(
                 &[],
             )
             .await?;
+        if agent_forwarding {
+            channel.agent_forward(true).await?;
+            match timeout(Duration::from_secs(5), channel.wait()).await {
+                Ok(Some(ChannelMsg::Success)) => {}
+                Ok(Some(ChannelMsg::Failure)) => {
+                    bail!("The SSH server denied agent forwarding.");
+                }
+                Ok(_) => bail!("The SSH server returned an invalid agent-forwarding response."),
+                Err(_) => bail!("Timed out waiting for agent-forwarding confirmation."),
+            }
+        }
         channel.request_shell(true).await?;
         Ok::<_, anyhow::Error>((session, channel, hop_handles, sftp_channel))
     };
@@ -4532,6 +4545,7 @@ abc	img	name"
             port: address.port(),
             username: "test".to_owned(),
             authentication: Authentication::Password(Zeroizing::new("secret".to_owned())),
+            agent_forwarding: false,
             terminal_size: TerminalSize {
                 columns: 80,
                 rows: 24,
@@ -4621,6 +4635,7 @@ abc	img	name"
                     port,
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5104,6 +5119,7 @@ abc	img	name"
                     port,
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5236,6 +5252,7 @@ abc	img	name"
                     port,
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5448,6 +5465,7 @@ abc	img	name"
                     port: 22,
                     username: username.clone(),
                     authentication: Authentication::Password(Zeroizing::new(password.clone())),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5594,6 +5612,7 @@ abc	img	name"
                     port: 22,
                     username: username.clone(),
                     authentication: Authentication::Password(Zeroizing::new(password.clone())),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5754,6 +5773,7 @@ abc	img	name"
                         interactive: false,
                         totp_secret: None,
                     },
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -5888,6 +5908,7 @@ abc	img	name"
                     identity_file,
                     passphrase: Zeroizing::new("definitely-the-wrong-passphrase".to_owned()),
                 },
+                agent_forwarding: false,
                 terminal_size: TerminalSize {
                     columns: 80,
                     rows: 24,
@@ -5963,6 +5984,7 @@ abc	img	name"
                         identity_file,
                         passphrase: Zeroizing::new(passphrase),
                     },
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6393,6 +6415,7 @@ abc	img	name"
                     port,
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -6908,6 +6931,7 @@ abc	img	name"
                     port,
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,
@@ -7104,6 +7128,7 @@ abc	img	name"
                     port,
                     username,
                     authentication: Authentication::Password(Zeroizing::new(password)),
+                    agent_forwarding: false,
                     terminal_size: TerminalSize {
                         columns: 80,
                         rows: 24,

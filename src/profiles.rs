@@ -11,10 +11,10 @@ use crate::forward::{ForwardKind, ForwardRuleSpec, validate_socket_path};
 use crate::groups::normalize_group_path;
 use crate::terminal::TerminalTheme;
 
-const DOCUMENT_VERSION: u8 = 11;
-const SUPPORTED_DOCUMENT_VERSIONS: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DOCUMENT_VERSION];
-const EXPORT_DOCUMENT_VERSION: u8 = 7;
-const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 7] = [1, 2, 3, 4, 5, 6, EXPORT_DOCUMENT_VERSION];
+const DOCUMENT_VERSION: u8 = 12;
+const SUPPORTED_DOCUMENT_VERSIONS: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, DOCUMENT_VERSION];
+const EXPORT_DOCUMENT_VERSION: u8 = 8;
+const SUPPORTED_EXPORT_DOCUMENT_VERSIONS: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, EXPORT_DOCUMENT_VERSION];
 pub const MAX_RECENT_CONNECTIONS: usize = 20;
 pub const MAX_FORWARD_RULES: usize = 32;
 pub const MAX_TAB_LABEL_CHARS: usize = 80;
@@ -256,6 +256,8 @@ pub struct HostProfile {
     pub favorite: bool,
     #[serde(default, skip_serializing_if = "AuthMethod::is_password")]
     pub auth_method: AuthMethod,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_forwarding: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub identity_file: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -727,6 +729,7 @@ mod tests {
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Password,
+            agent_forwarding: false,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -978,6 +981,7 @@ mod tests {
                 group: String::new(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
+                agent_forwarding: false,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -1107,6 +1111,7 @@ mod tests {
         let profile = HostProfile {
             terminal_theme: Some(TerminalTheme::SolarizedLight),
             tab_color: TabColor::Custom(0x12abef),
+            agent_forwarding: true,
             login_commands: LoginCommandSettings {
                 enabled: true,
                 commands: vec!["cd /srv/app".to_owned(), "uname -a".to_owned()],
@@ -1120,6 +1125,16 @@ mod tests {
 
         store.save(&data).unwrap();
         assert_eq!(store.load().unwrap().profiles, vec![profile]);
+    }
+
+    #[test]
+    fn legacy_profiles_default_agent_forwarding_to_disabled() {
+        let profile: HostProfile = serde_json::from_str(
+            r#"{"name":"prod","host":"prod.example.com","port":22,"username":"deploy"}"#,
+        )
+        .unwrap();
+
+        assert!(!profile.agent_forwarding);
     }
 
     #[test]

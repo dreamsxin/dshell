@@ -483,6 +483,10 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "Jump host" => "跳板机",
         "Keep-alive (seconds, 0 = off)" => "保活（秒，0 = 关闭）",
         "Reconnect after connection loss" => "连接中断后自动重连",
+        "Forward SSH agent to this host" => "将 SSH agent 转发到此主机",
+        "The remote host can request signatures from your local agent. Use only with trusted hosts." => {
+            "远端主机可请求本地 agent 签名。仅对可信主机启用。"
+        }
         "Retry interval (seconds)" => "重试间隔（秒）",
         "Maximum attempts" => "最大重试次数",
         "Run commands after login" => "登录后运行命令",

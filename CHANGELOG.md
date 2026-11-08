@@ -6,6 +6,37 @@ All notable changes to dshell are documented here.
 
 No unreleased changes yet.
 
+## [0.1.53] - 2026-11-09
+
+Adds opt-in SSH agent forwarding to GUI host profiles.
+
+### Added
+
+- Add a per-host SSH agent forwarding option, disabled by default and retained
+  in profile JSON and exports.
+- Request agent forwarding only on the final interactive shell session; jump
+  hosts remain excluded.
+- Show the permission scope in the host profile editor and refuse agent
+  channels unless forwarding was enabled for the connection.
+
+### Security Note
+
+An enabled remote account can request signatures from identities available in
+the local agent. Enable forwarding only for trusted hosts and accounts.
+
+### Verification
+
+- Verified on 2026-11-09 with `cargo fmt --all`,
+  `cargo check --locked --all-targets`, `cargo test --locked` (284 tests), and
+  `scripts\\verify-hard-constraints.ps1`.
+- `scripts\\test-docker-ssh.ps1` passed 13/13; `scripts\\test-installer.ps1`
+  passed silent per-user installation and uninstall.
+- Installer `dshell-setup-v0.1.53-x64.exe` is 11,126,325 bytes. SHA-256:
+  `A355F48D736E94603E90D6BD061275C1A7CC518B3DAF2D674FDE62F6878DFE5F`.
+- Installer and executables are unsigned.
+- GUI/profile editor visuals, DPI, IME and glyph checks remain manual work for
+  an isolated Windows desktop.
+
 ## [0.1.52] - 2026-11-09
 
 Adds opt-in SSH agent forwarding for command-line remote execution.

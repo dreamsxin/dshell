@@ -1,5 +1,5 @@
 #define AppName "dshell"
-#define AppVersion "0.1.52"
+#define AppVersion "0.1.53"
 #define AppExeName "dshell.exe"
 
 [Setup]
@@ -26,7 +26,7 @@ Compression=lzma2
 SolidCompression=yes
 CloseApplications=yes
 RestartApplications=no
-VersionInfoVersion=0.1.52.0
+VersionInfoVersion=0.1.53.0
 VersionInfoProductVersion={#AppVersion}
 VersionInfoProductName=dshell
 

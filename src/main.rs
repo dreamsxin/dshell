@@ -1416,6 +1416,7 @@ fn render_session_trace(session: &SshSession, host_key_info: Option<&ConnectionI
 #[derive(Clone, Debug, Default)]
 struct SessionLaunchSettings {
     auth_method: AuthMethod,
+    agent_forwarding: bool,
     identity_file: String,
     proxy_jump: String,
     terminal_theme: Option<TerminalTheme>,
@@ -1438,6 +1439,7 @@ impl SessionLaunchSettings {
             group: String::new(),
             favorite: false,
             auth_method: self.auth_method,
+            agent_forwarding: self.agent_forwarding,
             identity_file: self.identity_file.clone(),
             proxy_jump: self.proxy_jump.clone(),
             forwards: self.forwards.clone(),
@@ -2462,6 +2464,7 @@ fn update_sessions_for_profile(
         }
         session.profile_name = Some(updated.name.clone());
         session.launch_settings.terminal_theme = updated.terminal_theme;
+        session.launch_settings.agent_forwarding = updated.agent_forwarding;
     }
 }
 
@@ -2750,6 +2753,7 @@ mod session_tests {
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Agent,
+                agent_forwarding: false,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -2828,6 +2832,7 @@ mod session_tests {
             group: "Production".to_owned(),
             favorite: false,
             auth_method: AuthMethod::Password,
+            agent_forwarding: false,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -2953,6 +2958,7 @@ mod session_tests {
     fn duplicate_launch_profile_preserves_connection_settings_without_credentials() {
         let settings = SessionLaunchSettings {
             auth_method: AuthMethod::PublicKey,
+            agent_forwarding: true,
             identity_file: "~/.ssh/id_ed25519".to_owned(),
             proxy_jump: "bastion".to_owned(),
             terminal_theme: Some(TerminalTheme::SolarizedDark),
@@ -3007,6 +3013,7 @@ mod session_tests {
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Agent,
+            agent_forwarding: false,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -3077,6 +3084,7 @@ mod session_tests {
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Password,
+            agent_forwarding: false,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -4007,6 +4015,7 @@ echo"
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
+                agent_forwarding: false,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4066,6 +4075,7 @@ echo"
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
+                agent_forwarding: false,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4124,6 +4134,7 @@ echo"
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
+                agent_forwarding: false,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4167,6 +4178,7 @@ echo"
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Password,
+                agent_forwarding: false,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4253,6 +4265,7 @@ echo"
                 group: group.to_owned(),
                 favorite: false,
                 auth_method: AuthMethod::Agent,
+                agent_forwarding: false,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
                 forwards: Vec::new(),
@@ -4553,6 +4566,7 @@ struct AppView {
     profile_group: Entity<InputState>,
     profile_favorite: bool,
     profile_auto_reconnect: bool,
+    profile_agent_forwarding: bool,
     profile_login_commands_enabled: bool,
     profile_login_commands: Entity<InputState>,
     profile_notes: Entity<InputState>,
@@ -4980,6 +4994,7 @@ impl AppView {
             profile_group,
             profile_favorite: false,
             profile_auto_reconnect: false,
+            profile_agent_forwarding: false,
             profile_login_commands_enabled: false,
             profile_login_commands,
             profile_notes,
@@ -5688,6 +5703,7 @@ impl AppView {
             group: String::new(),
             favorite: false,
             auth_method: AuthMethod::Password,
+            agent_forwarding: false,
             identity_file: String::new(),
             proxy_jump: String::new(),
             forwards: Vec::new(),
@@ -6690,6 +6706,7 @@ impl AppView {
         Self::set_input_value(&self.reconnect_max_attempts, "5", window, cx);
         self.profile_favorite = false;
         self.profile_auto_reconnect = false;
+        self.profile_agent_forwarding = false;
         self.profile_login_commands_enabled = false;
         self.auth_method = AuthMethod::Password;
         self.applied_auth_profile = None;
@@ -6751,6 +6768,7 @@ impl AppView {
             cx,
         );
         self.profile_auto_reconnect = profile.reconnect.enabled;
+        self.profile_agent_forwarding = profile.agent_forwarding;
         self.profile_login_commands_enabled = profile.login_commands.enabled;
         Self::set_input_value(
             &self.profile_login_commands,
@@ -8279,6 +8297,7 @@ impl AppView {
             group,
             favorite: self.profile_favorite,
             auth_method: self.auth_method,
+            agent_forwarding: self.profile_agent_forwarding,
             identity_file: if self.auth_method == AuthMethod::PublicKey {
                 identity_file
             } else {
@@ -8474,6 +8493,7 @@ impl AppView {
             port,
             username,
             authentication,
+            agent_forwarding: false,
             terminal_size: self.terminal_size,
             jump: Vec::new(),
             keepalive_seconds,
@@ -8625,6 +8645,7 @@ impl AppView {
             .unwrap_or_default();
         let launch_settings = SessionLaunchSettings {
             auth_method: self.auth_method,
+            agent_forwarding: self.profile_agent_forwarding,
             identity_file: identity_file.clone(),
             proxy_jump: jump_name.clone(),
             terminal_theme: self.profile_terminal_theme,
@@ -8761,6 +8782,7 @@ impl AppView {
             port,
             username: username.clone(),
             authentication,
+            agent_forwarding: launch_settings.agent_forwarding,
             terminal_size,
             jump,
             keepalive_seconds,
@@ -11302,6 +11324,22 @@ impl AppView {
                             ),
                     )
                 })
+                .child(
+                    components::toggle_switch(
+                        &tokens,
+                        "profile-agent-forwarding",
+                        self.tr("Forward SSH agent to this host"),
+                        self.profile_agent_forwarding,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.profile_agent_forwarding = !this.profile_agent_forwarding;
+                        cx.notify();
+                    })),
+                )
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("The remote host can request signatures from your local agent. Use only with trusted hosts."),
+                ))
                 .child(
                     components::toggle_switch(
                         &tokens,
