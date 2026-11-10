@@ -554,8 +554,11 @@ SSH Client workflow.
   before the PTY and silently ignored by servers that do not accept
   them. The RDP-over-SSH shortcut turns out to be already implemented
   (Tunnels panel, Remote Desktop group); the gap audit document was
-  corrected accordingly, and PuTTY .ppk import stays deferred with an
-  evaluation note.
+  corrected accordingly. PuTTY .ppk import, X11 forwarding and
+  transfer scheduling/directory mirroring stay deferred with finalized
+  evaluation notes (hand-written protocol/key-conversion risk for the
+  former two; verification conditions unavailable here and a
+  destructive-mirror safety design for the latter).
 - Add Bitvise-style one-click public key installation: the credential
   prompt gains an "Install public key" action that logs in with the
   entered password and appends the selected identity file's public key
