@@ -128,6 +128,18 @@ pub struct RemoteCommandOutput {
     pub exit_status: Option<u32>,
 }
 
+impl RemoteCommandOutput {
+    /// The captured stdout as lossy UTF-8.
+    pub fn stdout_utf8_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    /// The captured stderr as lossy UTF-8.
+    pub fn stderr_utf8_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
+}
+
 #[derive(Debug)]
 pub enum RemoteSftpOutput {
     Listed {
@@ -1016,6 +1028,104 @@ pub async fn run_remote_command(
         .disconnect(Disconnect::ByApplication, "command completed", "en")
         .await;
     Ok(output)
+}
+
+const PUBLIC_KEY_INSTALL_MARKER: &str = "DSHELL_KEY_INSTALLED";
+const MAX_PUBLIC_KEY_LINE_BYTES: usize = 2048;
+
+/// Build the idempotent shell command that appends a public key to the
+/// current user's `~/.ssh/authorized_keys`. The key must be a single
+/// standard OpenSSH public-key line without shell metacharacters; it is
+/// embedded in single quotes and matched exactly (`grep -qxF`) so repeated
+/// installs do not duplicate the entry.
+pub fn authorized_keys_install_command(public_key: &str) -> Result<String> {
+    let key = public_key.trim();
+    if key.is_empty() {
+        bail!("A public key is required.");
+    }
+    if key.len() > MAX_PUBLIC_KEY_LINE_BYTES {
+        bail!("The public key is too long to install.");
+    }
+    if key
+        .chars()
+        .any(|c| c.is_control() || c == '\'' || c == '"' || c == '`' || c == '$')
+    {
+        bail!("The public key contains characters that cannot be installed safely.");
+    }
+    if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") && !key.starts_with("sk-") {
+        bail!("The public key does not look like an OpenSSH public key line.");
+    }
+    Ok(format!(
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys \
+         && grep -qxF '{key}' ~/.ssh/authorized_keys 2>/dev/null \
+         || printf '%s\\n' '{key}' >> ~/.ssh/authorized_keys; \
+         chmod 600 ~/.ssh/authorized_keys && echo {PUBLIC_KEY_INSTALL_MARKER}"
+    ))
+}
+
+/// Read an OpenSSH identity file and install its public key into the target
+/// account's `~/.ssh/authorized_keys`. The login itself uses the supplied
+/// authentication (typically password) — this is the classic Bitvise-style
+/// "first login with password, enable key logins afterwards" flow.
+pub async fn install_public_key(
+    identity_file: &str,
+    key_passphrase: &str,
+    host: String,
+    port: u16,
+    username: String,
+    login_authentication: Authentication,
+    known_hosts_path: Option<PathBuf>,
+) -> Result<String> {
+    let identity_path = expand_user_path(Path::new(identity_file));
+    let key_content = std::fs::read_to_string(&identity_path).with_context(|| {
+        format!(
+            "Could not read SSH identity file {}",
+            identity_path.display()
+        )
+    })?;
+    let key_content = key_content.strip_prefix('\u{FEFF}').unwrap_or(&key_content);
+    let passphrase_ref = (!key_passphrase.is_empty()).then_some(key_passphrase);
+    let key = decode_secret_key(key_content, passphrase_ref).with_context(|| {
+        format!(
+            "Could not load SSH identity file {}",
+            identity_path.display()
+        )
+    })?;
+    let public_key = key
+        .public_key()
+        .to_openssh()
+        .context("Could not encode the public key")?;
+    let command = authorized_keys_install_command(&public_key)?;
+    let output = run_remote_command(
+        host.clone(),
+        port,
+        username.clone(),
+        login_authentication,
+        command,
+        known_hosts_path,
+        false,
+    )
+    .await
+    .context("Could not connect to install the public key")?;
+    if output.exit_status != Some(0)
+        || !output
+            .stdout_utf8_lossy()
+            .contains(PUBLIC_KEY_INSTALL_MARKER)
+    {
+        bail!(
+            "The server rejected the public key installation.{}",
+            output
+                .stderr_utf8_lossy()
+                .lines()
+                .last()
+                .map(|line| format!(" Last error: {line}"))
+                .unwrap_or_default()
+        )
+    }
+    Ok(format!(
+        "Installed {} for {username}@{host}:{port}.",
+        public_key.split(' ').next().unwrap_or("key")
+    ))
 }
 
 pub async fn run_sftp_command(
@@ -4384,16 +4494,17 @@ mod tests {
     use super::{
         Authentication, ConnectionSpec, JumpSpec, MAX_SERVER_LISTENERS, MAX_SERVER_MOUNTS,
         MAX_SERVER_SESSIONS, ProxyCredentials, ProxySpec, ProxyType, ReconnectSettings,
-        RemoteSftpOutput, ServerPowerAction, ServiceAction, UiEvent, can_answer_with_password,
-        connect_proxy_stream, connection_info_for_key, is_known_host_key,
-        is_retryable_reconnect_error, parse_power_action, parse_process_action,
-        parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
-        parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
-        parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
-        process_termination_command, relay_agent_stream, run_connection_with_known_hosts,
-        run_remote_command, run_sftp_command, run_sftp_commands, sanitize_zmodem_name,
-        service_action_command, service_logs_command, test_connection_with_known_hosts,
-        valid_process_pid, valid_service_name, wait_before_reconnect,
+        RemoteSftpOutput, ServerPowerAction, ServiceAction, UiEvent,
+        authorized_keys_install_command, can_answer_with_password, connect_proxy_stream,
+        connection_info_for_key, is_known_host_key, is_retryable_reconnect_error,
+        parse_power_action, parse_process_action, parse_server_docker_containers,
+        parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
+        parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
+        parse_service_logs, power_action_command, process_termination_command, relay_agent_stream,
+        run_connection_with_known_hosts, run_remote_command, run_sftp_command, run_sftp_commands,
+        sanitize_zmodem_name, service_action_command, service_logs_command,
+        test_connection_with_known_hosts, valid_process_pid, valid_service_name,
+        wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -4798,6 +4909,21 @@ mod tests {
         };
         tokio::join!(remote_task, agent_task);
         relay.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn authorized_keys_install_command_validates_and_quotes_the_key() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB7wPmVpkpFbV0WpYq0O2Zq9mTest user@host";
+        let command = authorized_keys_install_command(key).unwrap();
+        assert!(command.contains(&format!("grep -qxF '{key}'")));
+        assert!(command.contains("mkdir -p ~/.ssh"));
+        assert!(command.contains("chmod 600 ~/.ssh/authorized_keys"));
+        assert!(command.contains("DSHELL_KEY_INSTALLED"));
+        // Injection attempts and malformed input are rejected outright.
+        assert!(authorized_keys_install_command("").is_err());
+        assert!(authorized_keys_install_command("malformed-key-line").is_err());
+        assert!(authorized_keys_install_command("ssh-ed25519 AAAA'; rm -rf ~ #").is_err());
+        assert!(authorized_keys_install_command("ssh-ed25519 AAAA$(evil)").is_err());
     }
 
     #[test]

@@ -727,6 +727,13 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "No terminal output to scan." => "无终端输出可扫描。",
         "Choose identity file" => "选择身份文件",
         "Test connection" => "测试连接",
+        "Install public key" => "安装公钥",
+        "Choose an identity file before installing its public key." => {
+            "请先选择身份文件，再安装其公钥。"
+        }
+        "Enter the login password to install the public key." => "请输入登录密码以安装公钥。",
+        "Installing the public key on {host}:{port}..." => "正在将公钥安装到 {host}:{port}……",
+        "Public key installation failed: {error}" => "公钥安装失败：{error}",
         "Testing connection to {host}:{port}..." => "正在测试连接 {host}:{port}...",
         "View visible screen as hex" => "以十六进制查看可见屏幕",
         "Set lock password" => "设置屏幕锁密码",

@@ -8742,6 +8742,96 @@ impl AppView {
         .detach();
     }
 
+    /// Bitvise-style one-click public key installation: log in with the
+    /// entered password and append the identity file's public key to the
+    /// account's authorized_keys so future logins can use the key.
+    fn install_public_key_from_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host.read(cx).value().trim().to_owned();
+        let port_text = self.port.read(cx).value().trim().to_owned();
+        let username = self.username.read(cx).value().trim().to_owned();
+        let identity_file = self.identity_file.read(cx).value().trim().to_owned();
+        let passphrase = Zeroizing::new(self.key_passphrase.read(cx).text().to_string());
+        let password = Zeroizing::new(self.password.read(cx).text().to_string());
+        if identity_file.is_empty() {
+            self.profile_message =
+                self.tr("Choose an identity file before installing its public key.");
+            cx.notify();
+            return;
+        }
+        if password.is_empty() {
+            self.profile_message = self.tr("Enter the login password to install the public key.");
+            cx.notify();
+            return;
+        }
+        let port = match port_text.parse::<u16>() {
+            Ok(port) if port > 0 && port <= 65535 => port,
+            _ => {
+                self.profile_message = self.tr("Port must be between 1 and 65535.");
+                cx.notify();
+                return;
+            }
+        };
+        if host.is_empty() || username.is_empty() {
+            self.profile_message = self.tr("Host and user are required.");
+            cx.notify();
+            return;
+        }
+        let authentication = match build_authentication(
+            AuthMethod::Password,
+            "",
+            password.clone(),
+            Zeroizing::new(String::new()),
+            Zeroizing::new(String::new()),
+        ) {
+            Ok(authentication) => authentication,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
+        Self::set_input_value(&self.password, "", window, cx);
+        self.profile_message = self
+            .tr("Installing the public key on {host}:{port}...")
+            .replace("{host}", &host)
+            .replace("{port}", &port.to_string());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            match ssh::install_public_key(
+                &identity_file,
+                passphrase.as_str(),
+                host,
+                port,
+                username,
+                authentication,
+                None,
+            )
+            .await
+            {
+                Ok(message) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.profile_message = String::new();
+                        view.show_toast(message, Tone::Success, cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.profile_message = String::new();
+                        view.show_toast(
+                            view.tr("Public key installation failed: {error}")
+                                .replace("{error}", &error.to_string()),
+                            Tone::Danger,
+                            cx,
+                        );
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn cache_credentials_for_session(
         &mut self,
         key: CredentialCacheKey,
@@ -12458,6 +12548,20 @@ impl AppView {
             )
             .on_click(cx.listener(|this, _, window, cx| {
                 this.test_current_connection(window, cx);
+            })),
+        );
+        let identity_ready = !self.identity_file.read(cx).value().trim().is_empty();
+        footer = footer.child(
+            components::button(
+                &tokens,
+                "credential-prompt-install-key",
+                self.tr("Install public key"),
+                ButtonKind::Ghost,
+                ButtonSize::Regular,
+            )
+            .disabled(!identity_ready)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.install_public_key_from_prompt(window, cx);
             })),
         );
         if group_batch_prompt {

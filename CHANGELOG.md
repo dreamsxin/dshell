@@ -546,6 +546,14 @@ SSH Client workflow.
 
 ### Added
 
+- Add Bitvise-style one-click public key installation: the credential
+  prompt gains an "Install public key" action that logs in with the
+  entered password and appends the selected identity file's public key
+  to the account's authorized_keys (idempotent, validated command
+  builder with unit tests).
+- Enable SSH transport compression (zlib) by turning on russh's
+  flate2 feature; sessions now negotiate compression with the server
+  instead of being limited to "none".
 - Fix the terminal rendering in a proportional font: the default font
   family "monospace" is a GDI generic alias that DirectWrite does not
   resolve, so the terminal silently fell back to a proportional font
