@@ -284,6 +284,8 @@ pub fn section_header(tokens: &ThemeTokens, text: impl Into<SharedString>) -> Di
     div()
         .pt(px(tokens::SPACE_2))
         .px(px(tokens::SPACE_1))
+        .whitespace_nowrap()
+        .overflow_hidden()
         .text_size(px(tokens::FONT_CAPTION))
         .font_semibold()
         .text_color(tokens.text_secondary)
@@ -399,14 +401,14 @@ impl SidebarRow {
                 .gap(px(2.0))
                 .child(
                     div()
-                        .overflow_hidden()
+                        .truncate()
                         .text_size(px(tokens::FONT_BODY))
                         .text_color(tokens.text_primary)
                         .child(self.title),
                 )
                 .child(
                     div()
-                        .overflow_hidden()
+                        .truncate()
                         .text_size(px(tokens::FONT_CAPTION))
                         .text_color(tokens.text_secondary)
                         .child(self.subtitle),
@@ -537,10 +539,11 @@ pub fn collapsible_header_with_actions(
         .text_size(px(tokens::FONT_BODY))
         .font_semibold()
         .text_color(tokens.text_primary)
-        .child(label.into())
+        .child(div().flex_1().min_w_0().truncate().child(label.into()))
         .child(
             div()
                 .flex()
+                .flex_shrink_0()
                 .items_center()
                 .gap(px(tokens::SPACE_1))
                 .child(

@@ -523,6 +523,8 @@ SSH Client workflow.
 
 ### Changed
 
+- Sidebar rows, subtitles and group headers now truncate with an
+  ellipsis instead of wrapping, so a narrow sidebar keeps its layout.
 - Cleaner sidebar host interactions, following Xshell conventions: a
   single click now only selects a host row and a double click connects
   (or focuses the live session), so a stray click no longer opens a

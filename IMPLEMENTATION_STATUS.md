@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-11，Windows/MSVC：修复侧栏窄宽度下文字换行错乱。`SidebarRow` 标题与副标题、组头标签、区头（FAVORITES/RECENT）改为 `truncate()`（nowrap + overflow hidden + 省略号）——窄侧栏（最小 200px）下行内文字单行省略而非换行挤压布局；组头标签 flex_1 min_w_0 截断、操作图标组 flex_shrink_0 不再挤压标签。仅 UI 组件改动，无状态/交互行为变化。验证：`cargo fmt --all`、硬约束脚本通过（lib 131 + main 141 + cli 14）。窄宽度显示效果需人工验收（拖动侧栏分隔线到最小宽度观察行/组头/区头）。
+
 2026-11-11，Windows/MSVC：Bitvise 功能审计定稿。`docs/BITVISE_GAP_ANALYSIS.md` 剩余两个候选项写入与 ppk 导入同等力度的定稿暂缓理由：①X11 转发——russh 暴露 `request_x11` 与通道回调，但正确客户端还须手写 MIT-MAGIC-COOKIE-1 校验/替换（安全敏感，错误实现泄露本地 X 凭据或破坏会话）、依赖 Windows 原生不带的本机 X server（本环境无法端到端验证）并管理每会话 DISPLAY 状态；裸转发会迫使用户关闭 X 访问控制。过渡方案 VcXsrv + OpenSSH `ssh -X`。②传输调度/目录镜像同步——镜像需双侧递归变更检测、冲突策略与删除传播（破坏性，与"覆盖必确认"姿态冲突），周期后台写入无法在本环境长时自动化验证；既有一次性递归传输 + 脚本录制覆盖组合场景。至此审计定稿：24 项中 21 ✅、4 项暂缓（每项均含定稿理由：GSSAPI/Kerberos、ppk 导入、X11 转发、传输调度）、2 项超出范围或有意保留差异。纯文档变更，无代码改动。
 
 2026-11-11，Windows/MSVC：Bitvise 对齐第二批。①主机密钥管理器：Settings 面板新增 "Manage host keys" 模态（仓库惯例 modal chrome、Esc 关闭），`ssh.rs` 新增 `KnownHostEntry`/`parse_known_hosts_entries`（模式字段容错 `@marker`、`pattern keytype blob comment` 行形、无法解析的 blob 保留声明算法但指纹置空）/`read_known_host_entries`/`remove_known_host_lines`（按 0 基行号移除并重写文件）/`user_known_hosts_path`；逐条删除需两步确认，删除后即时重载并提示。②环境变量注入：`HostProfile.env_vars` + `profiles::parse_env_vars`（名称限 ASCII 字母/数字/下划线 ≤64B、值无控制字符 ≤1KiB、大小写不敏感去重、≤16 条，validate_profiles 保存校验）；会话编辑器新增 "Environment variables" 多行输入并贯通 load/save/new/recent/to_profile 快照；连接时在 PTY 请求前 fire-and-forget `request_env`（`set_env(false,..)`，服务器不接受则忽略）；连接测试同样下发以便验证。③RDP over SSH 复核确认已实现（Tunnels 面板 Remote Desktop 分组 + mstsc），差距审计文档已更正；ppk 导入维持暂缓并写入评估结论。新增 2 项单测（known_hosts 解析、env 解析）。验证：`cargo fmt --all`、硬约束脚本通过（lib 131 + main 141 + cli 14）、Docker SSH 套件通过（14/14，Docker Desktop 已启动；含两跳链、公钥安装、SFTP、转发与终端路径）。主机密钥管理器、环境变量注入需人工验收。
