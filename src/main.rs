@@ -47,7 +47,7 @@ use profiles::{
     AuthMethod, HostData, HostProfile, LoginCommandSettings, MAX_FORWARD_RULES,
     MAX_TAB_LABEL_CHARS, ProfileStore, RecentConnection, ReconnectSettings, TabColor,
     export_profiles as export_host_profiles, import_profiles as import_host_profiles,
-    parse_custom_tab_color_hex, parse_login_commands, record_recent,
+    parse_custom_tab_color_hex, parse_login_commands, record_recent, remove_recent,
 };
 use settings::{
     AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore,
@@ -217,6 +217,24 @@ enum SidebarDragData {
 struct DragPreview {
     title: SharedString,
     tokens: ThemeTokens,
+}
+
+/// Context-menu target for a sidebar row: a saved host profile or a recent
+/// connection entry.
+#[derive(Clone)]
+enum HostRowMenu {
+    Saved(HostProfile),
+    Recent(RecentConnection),
+}
+
+#[derive(Clone)]
+struct HostRowMenuState {
+    menu: HostRowMenu,
+    /// Window coordinates of the right click that opened the menu.
+    x: f32,
+    y: f32,
+    /// Two-step delete confirmation for saved host rows.
+    confirm_delete: bool,
 }
 
 impl Render for DragPreview {
@@ -4793,6 +4811,7 @@ struct AppView {
     layout_menu_visible: bool,
     session_tab_group_menu_visible: bool,
     tab_menu_session: Option<u64>,
+    host_row_menu: Option<HostRowMenuState>,
     search_visible: bool,
     search_message: String,
     search_target: Option<SearchTarget>,
@@ -5228,6 +5247,7 @@ impl AppView {
             layout_menu_visible: false,
             session_tab_group_menu_visible: false,
             tab_menu_session: None,
+            host_row_menu: None,
             search_visible: false,
             search_message: String::new(),
             search_target: None,
@@ -5577,6 +5597,7 @@ impl AppView {
         self.menu_visible = false;
         self.layout_menu_visible = false;
         self.tab_menu_session = None;
+        self.host_row_menu = None;
         self.session_switcher_visible = false;
         self.request_overlay_focus();
         cx.notify();
@@ -10137,6 +10158,7 @@ impl AppView {
             self.layout_menu_visible = false;
             self.session_tab_group_menu_visible = false;
             self.tab_menu_session = None;
+            self.host_row_menu = None;
             self.request_overlay_focus();
         } else {
             self.overlay_focus_pending = false;
@@ -10160,6 +10182,7 @@ impl AppView {
             self.menu_visible = false;
             self.session_tab_group_menu_visible = false;
             self.tab_menu_session = None;
+            self.host_row_menu = None;
             self.request_overlay_focus();
         } else {
             self.overlay_focus_pending = false;
@@ -10185,8 +10208,83 @@ impl AppView {
         self.menu_visible = false;
         self.layout_menu_visible = false;
         self.session_tab_group_menu_visible = false;
+        self.host_row_menu = None;
         self.request_overlay_focus();
         cx.notify();
+    }
+
+    /// Open the sidebar row context menu anchored at the right-click point.
+    fn open_host_row_menu(
+        &mut self,
+        menu: HostRowMenu,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = window.viewport_size();
+        let x = position
+            .x
+            .as_f32()
+            .min((viewport.width.as_f32() - ui_tokens::MENU_WIDTH).max(0.0));
+        let y = position
+            .y
+            .as_f32()
+            .min((viewport.height.as_f32() - 320.0).max(0.0));
+        self.host_row_menu = Some(HostRowMenuState {
+            menu,
+            x,
+            y,
+            confirm_delete: false,
+        });
+        self.menu_visible = false;
+        self.layout_menu_visible = false;
+        self.session_tab_group_menu_visible = false;
+        self.tab_menu_session = None;
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn close_host_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host_row_menu.take().is_some() {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
+    /// Remove one recent entry and persist the shortened list.
+    fn remove_recent_entry(
+        &mut self,
+        entry: &RecentConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut recent = self.recent.clone();
+        profiles::remove_recent(&mut recent, &entry.host, entry.port, &entry.username);
+        if let Err(error) = self.save_workspace(self.profiles.clone(), recent) {
+            self.profile_message = error;
+            cx.notify();
+            return;
+        }
+        self.close_host_row_menu(window, cx);
+        self.show_toast(
+            self.tr("Removed from recent connections."),
+            Tone::Success,
+            cx,
+        );
+    }
+
+    /// Drop every recent connection and persist the empty list.
+    fn clear_recent(&mut self, cx: &mut Context<Self>) {
+        if self.recent.is_empty() {
+            return;
+        }
+        if let Err(error) = self.save_workspace(self.profiles.clone(), Vec::new()) {
+            self.profile_message = error;
+            cx.notify();
+            return;
+        }
+        self.show_toast(self.tr("Recent connections cleared."), Tone::Success, cx);
     }
 
     fn toggle_session_input_lock(&mut self, session_id: u64, cx: &mut Context<Self>) {
@@ -12728,6 +12826,7 @@ impl AppView {
         let connect_profile = profile.clone();
         let row_profile = profile.clone();
         let edit_profile = profile.clone();
+        let menu_profile = profile.clone();
         let disconnect_session = live_session;
         // Primary hover action: connect, or disconnect when a session for
         // this host is already live.
@@ -12819,6 +12918,18 @@ impl AppView {
                     }
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_host_row_menu(
+                        HostRowMenu::Saved(menu_profile.clone()),
+                        event.position,
+                        window,
+                        cx,
+                    );
+                }),
+            )
             .on_drag(
                 SidebarDragData::Host {
                     name: drag_name,
@@ -12848,6 +12959,7 @@ impl AppView {
         let connect_entry = entry.clone();
         let row_entry = entry.clone();
         let form_entry = entry.clone();
+        let menu_entry = entry.clone();
         let live_session = self.session_for_target(&entry.host, entry.port, &entry.username);
         let primary = components::icon_button(
             tokens,
@@ -12908,6 +13020,18 @@ impl AppView {
                         cx.stop_propagation();
                         this.connect_recent_entry(&row_entry, window, cx);
                     }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_host_row_menu(
+                        HostRowMenu::Recent(menu_entry.clone()),
+                        event.position,
+                        window,
+                        cx,
+                    );
                 }),
             )
             .into_any_element()
@@ -20482,8 +20606,26 @@ impl AppView {
             }
 
             if !self.recent.is_empty() {
-                profile_list =
-                    profile_list.child(components::section_header(tokens, self.tr("RECENT")));
+                profile_list = profile_list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(components::section_header(tokens, self.tr("RECENT")))
+                        .child(
+                            components::icon_button(
+                                tokens,
+                                "clear-recent",
+                                IconName::Delete,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Clear recent connections"),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.clear_recent(cx);
+                            })),
+                        ),
+                );
                 for (index, entry) in self.recent.iter().enumerate() {
                     profile_list =
                         profile_list.child(self.recent_host_row(tokens, index, entry, cx));
@@ -22905,6 +23047,328 @@ impl AppView {
                     .absolute()
                     .top(px(ui_tokens::COMMAND_BAR_HEIGHT + ui_tokens::TAB_BAR_HEIGHT))
                     .right(px(ui_tokens::SPACE_2))
+                    .child(menu),
+            )
+            .into_any_element()
+    }
+
+    /// Right-click menu for sidebar host and recent rows, anchored at the
+    /// click position.
+    fn host_row_menu_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(state) = self.host_row_menu.clone() else {
+            return div().into_any_element();
+        };
+        let confirm_delete = state.confirm_delete;
+        let mut menu = div()
+            .id("host-row-menu")
+            .occlude()
+            .on_any_mouse_down(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .flex()
+            .flex_col()
+            .gap(px(ui_tokens::SPACE_1))
+            .w(px(ui_tokens::MENU_WIDTH))
+            .max_h(px(ui_tokens::MENU_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .p(px(ui_tokens::SPACE_2))
+            .border_1()
+            .border_color(tokens.border_strong)
+            .rounded(px(ui_tokens::RADIUS_PANEL))
+            .shadow_lg()
+            .bg(tokens.surface_overlay)
+            .text_color(tokens.text_primary);
+        match state.menu {
+            HostRowMenu::Saved(profile) => {
+                let live = self.session_for_target(&profile.host, profile.port, &profile.username);
+                let connect_target = profile.clone();
+                let edit_target = profile.clone();
+                let favorite_profile = profile.clone();
+                let delete_target = profile.clone();
+                menu = menu
+                    .child(
+                        components::panel_header(tokens, profile.name.clone()).child(
+                            components::icon_button(
+                                tokens,
+                                "host-menu-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close"),
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.close_host_row_menu(window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .child(if let Some(id) = live {
+                        menu_item(
+                            tokens,
+                            "host-menu-show",
+                            IconName::SquareTerminal,
+                            self.tr("Show session"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.host_row_menu = None;
+                                this.select_session(id, window, cx);
+                                window.focus(&this.terminal_focus);
+                            },
+                        ))
+                    } else {
+                        menu_item(
+                            tokens,
+                            "host-menu-connect",
+                            IconName::ArrowRight,
+                            self.tr("Connect to host"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                let profile = connect_target.clone();
+                                this.host_row_menu = None;
+                                this.connect_saved_profile(&profile, window, cx);
+                            },
+                        ))
+                    });
+                if let Some(id) = live {
+                    menu = menu.child(
+                        menu_item(
+                            tokens,
+                            "host-menu-disconnect",
+                            IconName::CircleX,
+                            self.tr("Disconnect"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.host_row_menu = None;
+                                this.disconnect_session(id, cx);
+                                window.focus(&this.terminal_focus);
+                            },
+                        )),
+                    );
+                }
+                let favorite_profile = profile.clone();
+                menu = menu
+                    .child(
+                        menu_item(
+                            tokens,
+                            "host-menu-edit",
+                            IconName::Settings2,
+                            self.tr("Edit host"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                let profile = edit_target.clone();
+                                this.host_row_menu = None;
+                                this.load_profile(&profile, window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        menu_item(
+                            tokens,
+                            "host-menu-favorite",
+                            IconName::Star,
+                            if profile.favorite {
+                                self.tr("Remove favorite")
+                            } else {
+                                self.tr("Add favorite")
+                            },
+                            "",
+                            profile.favorite,
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_favorite(&favorite_profile.name, cx);
+                            // Keep the menu open so several actions can be
+                            // applied; it closes on click-away or Esc.
+                            if let Some(state) = this.host_row_menu.as_mut() {
+                                state.menu = HostRowMenu::Saved(
+                                    this.profiles
+                                        .iter()
+                                        .find(|candidate| {
+                                            candidate
+                                                .name
+                                                .eq_ignore_ascii_case(&favorite_profile.name)
+                                        })
+                                        .cloned()
+                                        .unwrap_or(favorite_profile.clone()),
+                                );
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        menu_item(
+                            tokens,
+                            "host-menu-delete",
+                            IconName::Delete,
+                            if confirm_delete {
+                                self.tr("Click again to delete this host")
+                            } else {
+                                self.tr("Delete host")
+                            },
+                            "",
+                            confirm_delete,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                if !confirm_delete {
+                                    if let Some(state) = this.host_row_menu.as_mut() {
+                                        state.confirm_delete = true;
+                                    }
+                                    cx.notify();
+                                    return;
+                                }
+                                this.host_row_menu = None;
+                                this.selected_profile = Some(delete_target.name.clone());
+                                this.delete_profile(window, cx);
+                            },
+                        )),
+                    );
+            }
+            HostRowMenu::Recent(entry) => {
+                let live = self.session_for_target(&entry.host, entry.port, &entry.username);
+                let connect_entry = entry.clone();
+                let form_entry = entry.clone();
+                let remove_entry = entry.clone();
+                menu = menu
+                    .child(
+                        components::panel_header(tokens, entry.name.clone()).child(
+                            components::icon_button(
+                                tokens,
+                                "recent-menu-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close"),
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.close_host_row_menu(window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .child(if let Some(id) = live {
+                        menu_item(
+                            tokens,
+                            "recent-menu-show",
+                            IconName::SquareTerminal,
+                            self.tr("Show session"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.host_row_menu = None;
+                                this.select_session(id, window, cx);
+                                window.focus(&this.terminal_focus);
+                            },
+                        ))
+                    } else {
+                        menu_item(
+                            tokens,
+                            "recent-menu-connect",
+                            IconName::ArrowRight,
+                            self.tr("Connect to host"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                let entry = connect_entry.clone();
+                                this.host_row_menu = None;
+                                this.connect_recent_entry(&entry, window, cx);
+                            },
+                        ))
+                    })
+                    .child(
+                        menu_item(
+                            tokens,
+                            "recent-menu-form",
+                            IconName::Settings2,
+                            self.tr("Load into the connection form"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                let entry = form_entry.clone();
+                                this.host_row_menu = None;
+                                this.load_recent(&entry, window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        menu_item(
+                            tokens,
+                            "recent-menu-remove",
+                            IconName::Delete,
+                            self.tr("Remove from recent"),
+                            "",
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                let entry = remove_entry.clone();
+                                this.remove_recent_entry(&entry, window, cx);
+                            },
+                        )),
+                    );
+            }
+        }
+
+        div()
+            .id("host-row-menu-overlay")
+            .absolute()
+            .size_full()
+            .occlude()
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_host_row_menu(window, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_host_row_menu(window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    this.close_host_row_menu(window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(state.x))
+                    .top(px(state.y))
                     .child(menu),
             )
             .into_any_element()
@@ -26000,6 +26464,9 @@ impl Render for AppView {
         }
         if self.tab_menu_session.is_some() {
             root = root.child(self.tab_menu_overlay(&tokens, cx));
+        }
+        if self.host_row_menu.is_some() {
+            root = root.child(self.host_row_menu_overlay(&tokens, cx));
         }
         if self.session_switcher_visible {
             root = root.child(self.session_switcher_overlay(&tokens, cx));

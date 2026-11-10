@@ -611,6 +611,16 @@ pub fn record_recent(recent: &mut Vec<RecentConnection>, entry: RecentConnection
     recent.truncate(MAX_RECENT_CONNECTIONS);
 }
 
+/// Drop one recent entry identified by its connection target. Returns
+/// whether an entry was removed.
+pub fn remove_recent(recent: &mut Vec<RecentConnection>, host: &str, port: u16, username: &str) {
+    recent.retain(|candidate| {
+        !(candidate.host.eq_ignore_ascii_case(host)
+            && candidate.port == port
+            && candidate.username == username)
+    });
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -1538,5 +1548,43 @@ mod tests {
             );
         }
         assert_eq!(entries.len(), MAX_RECENT_CONNECTIONS);
+    }
+
+    #[test]
+    fn remove_recent_drops_only_the_matching_target() {
+        let mut entries = Vec::new();
+        record_recent(
+            &mut entries,
+            RecentConnection {
+                name: "prod".to_owned(),
+                host: "one.example.com".to_owned(),
+                port: 22,
+                username: "root".to_owned(),
+                last_used_unix: 0,
+                last_local_directory: String::new(),
+                last_remote_directory: String::new(),
+            },
+        );
+        record_recent(
+            &mut entries,
+            RecentConnection {
+                name: "staging".to_owned(),
+                host: "ONE.example.com".to_owned(),
+                port: 2200,
+                username: "root".to_owned(),
+                last_used_unix: 0,
+                last_local_directory: String::new(),
+                last_remote_directory: String::new(),
+            },
+        );
+
+        remove_recent(&mut entries, "one.example.com", 22, "root");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].host, "ONE.example.com");
+        // Same host but different port/user must survive.
+        remove_recent(&mut entries, "ONE.example.com", 22, "root");
+        assert_eq!(entries.len(), 1);
+        remove_recent(&mut entries, "one.example.com", 2200, "root");
+        assert!(entries.is_empty());
     }
 }

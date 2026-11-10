@@ -534,6 +534,10 @@ SSH Client workflow.
   target (focusing a live session, reusing a matching saved profile or
   asking for credentials) instead of only opening the connection
   form; loading the form stays available as the row's second action.
+  Host and recent rows gain a right-click context menu (connect or
+  show/disconnect the session, edit, favorite, two-step delete;
+  connect, load into form, remove from recent) and the RECENT header
+  gains a clear-all button.
 - Make destructive confirmation dialogs keyboard-safe: pressing Enter no
   longer invokes process termination, service control or server power actions.
 - Make Alt+1..9 follow the visible tab order when session tabs are filtered,
