@@ -47,7 +47,7 @@ use profiles::{
     AuthMethod, HostData, HostProfile, LoginCommandSettings, MAX_FORWARD_RULES,
     MAX_TAB_LABEL_CHARS, ProfileStore, RecentConnection, ReconnectSettings, TabColor,
     export_profiles as export_host_profiles, import_profiles as import_host_profiles,
-    parse_custom_tab_color_hex, parse_login_commands, record_recent, remove_recent,
+    parse_custom_tab_color_hex, parse_env_vars, parse_login_commands, record_recent, remove_recent,
 };
 use settings::{
     AppSettings, DEFAULT_FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, SettingsStore,
@@ -225,6 +225,14 @@ struct DragPreview {
 enum HostRowMenu {
     Saved(HostProfile),
     Recent(RecentConnection),
+}
+
+/// State of the host key manager modal: the parsed known_hosts entries
+/// plus the armed two-step deletion target.
+struct HostKeyManagerState {
+    entries: Vec<ssh::KnownHostEntry>,
+    message: String,
+    confirm_delete: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -1451,6 +1459,7 @@ struct SessionLaunchSettings {
     reconnect: ReconnectSettings,
     forwards: Vec<ForwardRuleSpec>,
     login_commands: LoginCommandSettings,
+    env_vars: Vec<String>,
 }
 
 impl SessionLaunchSettings {
@@ -1467,6 +1476,7 @@ impl SessionLaunchSettings {
             favorite: false,
             auth_method: self.auth_method,
             agent_forwarding: self.agent_forwarding,
+            env_vars: self.env_vars.clone(),
             proxy: self.proxy.clone(),
             identity_file: self.identity_file.clone(),
             proxy_jump: self.proxy_jump.clone(),
@@ -2785,6 +2795,7 @@ mod session_tests {
                 favorite: false,
                 auth_method: AuthMethod::Agent,
                 agent_forwarding: false,
+                env_vars: Vec::new(),
                 proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
@@ -2865,6 +2876,7 @@ mod session_tests {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            env_vars: Vec::new(),
             proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
@@ -3003,6 +3015,7 @@ mod session_tests {
         let settings = SessionLaunchSettings {
             auth_method: AuthMethod::PublicKey,
             agent_forwarding: true,
+            env_vars: Vec::new(),
             proxy: None,
             identity_file: "~/.ssh/id_ed25519".to_owned(),
             proxy_jump: "bastion".to_owned(),
@@ -3059,6 +3072,7 @@ mod session_tests {
             favorite: false,
             auth_method: AuthMethod::Agent,
             agent_forwarding: false,
+            env_vars: Vec::new(),
             proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
@@ -3131,6 +3145,7 @@ mod session_tests {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            env_vars: Vec::new(),
             proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
@@ -4063,6 +4078,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                env_vars: Vec::new(),
                 proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
@@ -4124,6 +4140,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                env_vars: Vec::new(),
                 proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
@@ -4184,6 +4201,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                env_vars: Vec::new(),
                 proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
@@ -4229,6 +4247,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                env_vars: Vec::new(),
                 proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
@@ -4317,6 +4336,7 @@ echo"
                 favorite: false,
                 auth_method: AuthMethod::Agent,
                 agent_forwarding: false,
+                env_vars: Vec::new(),
                 proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
@@ -4626,6 +4646,7 @@ struct AppView {
     proxy_password: Entity<InputState>,
     profile_login_commands_enabled: bool,
     profile_login_commands: Entity<InputState>,
+    profile_env_vars: Entity<InputState>,
     profile_notes: Entity<InputState>,
     auth_method: AuthMethod,
     auth_profiles: Vec<AuthProfile>,
@@ -4812,6 +4833,7 @@ struct AppView {
     session_tab_group_menu_visible: bool,
     tab_menu_session: Option<u64>,
     host_row_menu: Option<HostRowMenuState>,
+    host_key_manager: Option<HostKeyManagerState>,
     search_visible: bool,
     search_message: String,
     search_target: Option<SearchTarget>,
@@ -4834,6 +4856,7 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search saved hosts"));
         let profile_group = cx.new(|cx| InputState::new(window, cx).placeholder("Ungrouped"));
         let profile_login_commands = cx.new(|cx| InputState::new(window, cx).multi_line());
+        let profile_env_vars = cx.new(|cx| InputState::new(window, cx).multi_line().rows(3));
         let profile_notes = cx.new(|cx| InputState::new(window, cx).multi_line().rows(4));
         let group_editor_name = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let identity_file =
@@ -5067,6 +5090,7 @@ impl AppView {
             proxy_password,
             profile_login_commands_enabled: false,
             profile_login_commands,
+            profile_env_vars,
             profile_notes,
             auth_method: AuthMethod::Password,
             auth_profiles,
@@ -5248,6 +5272,7 @@ impl AppView {
             session_tab_group_menu_visible: false,
             tab_menu_session: None,
             host_row_menu: None,
+            host_key_manager: None,
             search_visible: false,
             search_message: String::new(),
             search_target: None,
@@ -5837,6 +5862,7 @@ impl AppView {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            env_vars: Vec::new(),
             proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
@@ -6825,6 +6851,7 @@ impl AppView {
         self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.profile_login_commands, "", window, cx);
+        Self::set_input_value(&self.profile_env_vars, "", window, cx);
         Self::set_input_value(&self.profile_notes, "", window, cx);
         Self::set_input_value(&self.host, "", window, cx);
         Self::set_input_value(&self.port, "22", window, cx);
@@ -6942,6 +6969,12 @@ impl AppView {
         Self::set_input_value(
             &self.profile_login_commands,
             &profile.login_commands.commands.join("\n"),
+            window,
+            cx,
+        );
+        Self::set_input_value(
+            &self.profile_env_vars,
+            &profile.env_vars.join("\n"),
             window,
             cx,
         );
@@ -7125,6 +7158,7 @@ impl AppView {
         self.profile_terminal_theme = None;
         Self::set_input_value(&self.profile_group, "", window, cx);
         Self::set_input_value(&self.profile_login_commands, "", window, cx);
+        Self::set_input_value(&self.profile_env_vars, "", window, cx);
         Self::set_input_value(&self.profile_notes, "", window, cx);
         Self::set_input_value(&self.host, &entry.host, window, cx);
         Self::set_input_value(&self.port, &entry.port.to_string(), window, cx);
@@ -8402,6 +8436,14 @@ impl AppView {
             cx.notify();
             return;
         }
+        let env_vars = match parse_env_vars(&self.profile_env_vars.read(cx).text().to_string()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let previous_profile = self
             .selected_profile
             .as_ref()
@@ -8479,6 +8521,7 @@ impl AppView {
             favorite: self.profile_favorite,
             auth_method: self.auth_method,
             agent_forwarding: self.profile_agent_forwarding,
+            env_vars,
             proxy: proxy.clone(),
             identity_file: if self.auth_method == AuthMethod::PublicKey {
                 identity_file
@@ -8696,12 +8739,21 @@ impl AppView {
             Err(_) => 0,
         };
         let theme = effective_terminal_theme(self.profile_terminal_theme, self.settings.theme);
+        let env_vars = match parse_env_vars(&self.profile_env_vars.read(cx).text().to_string()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let spec = ConnectionSpec {
             host: host.clone(),
             port,
             username,
             authentication,
             agent_forwarding: false,
+            env_vars,
             proxy,
             proxy_credentials,
             terminal_size: self.terminal_size,
@@ -8963,9 +9015,18 @@ impl AppView {
             .as_ref()
             .map(|profile| profile.forwards.clone())
             .unwrap_or_default();
+        let env_vars = match parse_env_vars(&self.profile_env_vars.read(cx).text().to_string()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.profile_message = self.tr(&error);
+                cx.notify();
+                return;
+            }
+        };
         let launch_settings = SessionLaunchSettings {
             auth_method: self.auth_method,
             agent_forwarding: self.profile_agent_forwarding,
+            env_vars: env_vars.clone(),
             proxy: proxy.clone(),
             identity_file: identity_file.clone(),
             proxy_jump: jump_name.clone(),
@@ -9112,6 +9173,7 @@ impl AppView {
             username: username.clone(),
             authentication,
             agent_forwarding: launch_settings.agent_forwarding,
+            env_vars,
             proxy: launch_settings.proxy.clone(),
             proxy_credentials,
             terminal_size,
@@ -10362,6 +10424,82 @@ impl AppView {
             Tone::Success,
             cx,
         );
+    }
+
+    /// Open the host key manager with the current known_hosts entries.
+    fn open_host_key_manager(&mut self, cx: &mut Context<Self>) {
+        let result = ssh::user_known_hosts_path()
+            .map_err(|error| error.to_string())
+            .and_then(|path| {
+                ssh::read_known_host_entries(&path).map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(entries) => {
+                self.host_key_manager = Some(HostKeyManagerState {
+                    entries,
+                    message: String::new(),
+                    confirm_delete: None,
+                });
+            }
+            Err(error) => {
+                self.host_key_manager = Some(HostKeyManagerState {
+                    entries: Vec::new(),
+                    message: error,
+                    confirm_delete: None,
+                });
+            }
+        }
+        self.request_overlay_focus();
+        cx.notify();
+    }
+
+    fn close_host_key_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host_key_manager.take().is_some() {
+            self.overlay_focus_pending = false;
+            window.focus(&self.terminal_focus);
+            cx.notify();
+        }
+    }
+
+    /// Remove one known_hosts line (two-step confirmed by the modal) and
+    /// reload the entry list from disk.
+    fn remove_known_host_entry(
+        &mut self,
+        line_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.host_key_manager.as_mut() else {
+            return;
+        };
+        if state.confirm_delete != Some(line_index) {
+            state.confirm_delete = Some(line_index);
+            cx.notify();
+            return;
+        }
+        let result = ssh::user_known_hosts_path()
+            .and_then(|path| ssh::remove_known_host_lines(&path, &[line_index]));
+        match result {
+            Ok(removed) => {
+                let entries = ssh::user_known_hosts_path()
+                    .and_then(|path| ssh::read_known_host_entries(&path))
+                    .unwrap_or_default();
+                let Some(state) = self.host_key_manager.as_mut() else {
+                    return;
+                };
+                state.entries = entries;
+                state.confirm_delete = None;
+                state.message = format!("{removed} known_hosts line(s) removed.");
+            }
+            Err(error) => {
+                if let Some(state) = self.host_key_manager.as_mut() {
+                    state.confirm_delete = None;
+                    state.message = format!("{error:#}");
+                }
+            }
+        }
+        window.focus(&self.overlay_focus);
+        cx.notify();
     }
 
     /// Drop every recent connection and persist the empty list.
@@ -11878,6 +12016,16 @@ impl AppView {
                 .child(components::help_text(
                     &tokens,
                     self.tr("Enter one command per line. Enabled commands run once in the visible terminal after the first successful login; reconnects do not replay them. Do not include passwords or other secrets."),
+                ))
+                .child(components::label_text(&tokens, self.tr("Environment variables")))
+                .child(
+                    TextInput::new(&self.profile_env_vars)
+                        .h(px(60.))
+                        .w_full(),
+                )
+                .child(components::help_text(
+                    &tokens,
+                    self.tr("One NAME=value pair per line, requested on the session channel before the shell starts. Servers that do not accept environment variables ignore them."),
                 ))
                 .child(components::label_text(&tokens, self.tr("Notes")))
                 .child(
@@ -20376,6 +20524,23 @@ impl AppView {
                                 self.tr("Reconnect the sessions that were active when dshell last exited. Only sessions matching a saved host profile are restored; credentials are never saved."),
                             ))
                             .child(
+                                components::button(
+                                    &tokens,
+                                    "settings-manage-host-keys",
+                                    self.tr("Manage host keys"),
+                                    ButtonKind::Secondary,
+                                    ButtonSize::Small,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_host_key_manager(cx);
+                                    window.activate_window();
+                                })),
+                            )
+                            .child(components::help_text(
+                                &tokens,
+                                self.tr("List the host keys recorded in the user's OpenSSH known_hosts file with their fingerprints, and remove individual entries after an explicit confirmation."),
+                            ))
+                            .child(
                                 components::toggle_switch(
                                     &tokens,
                                     "settings-copy-on-select",
@@ -23152,6 +23317,157 @@ impl AppView {
                     .top(px(ui_tokens::COMMAND_BAR_HEIGHT + ui_tokens::TAB_BAR_HEIGHT))
                     .right(px(ui_tokens::SPACE_2))
                     .child(menu),
+            )
+            .into_any_element()
+    }
+
+    /// Host key manager modal: lists known_hosts entries with fingerprints
+    /// and a two-step per-entry removal.
+    fn host_key_manager_overlay(
+        &mut self,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(state) = self.host_key_manager.as_ref() else {
+            return div().into_any_element();
+        };
+        let confirm_delete = state.confirm_delete;
+        let mut list = div()
+            .id("host-key-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .gap(px(ui_tokens::SPACE_1))
+            .overflow_y_scroll();
+        if state.entries.is_empty() {
+            list = list.child(components::help_text(
+                tokens,
+                self.tr("No host keys are recorded in the user's known_hosts file."),
+            ));
+        }
+        for entry in &state.entries {
+            let line_index = entry.line_index;
+            let fingerprint = if entry.fingerprint.is_empty() {
+                self.tr("Unrecognized key format").to_string()
+            } else {
+                entry.fingerprint.clone()
+            };
+            let key_type = if entry.key_type.is_empty() {
+                self.tr("Unknown").to_string()
+            } else {
+                entry.key_type.clone()
+            };
+            let armed = confirm_delete == Some(line_index);
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(ui_tokens::SPACE_2))
+                .min_w_0();
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_size(px(ui_tokens::FONT_BODY))
+                            .text_color(tokens.text_primary)
+                            .child(entry.host_pattern.clone()),
+                    )
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_size(px(ui_tokens::FONT_CAPTION))
+                            .text_color(tokens.text_secondary)
+                            .child(format!("{key_type} · {fingerprint}")),
+                    ),
+            );
+            row = row.child(
+                components::button(
+                    tokens,
+                    ("host-key-delete", line_index),
+                    if armed {
+                        self.tr("Click again to remove")
+                    } else {
+                        self.tr("Remove")
+                    },
+                    if armed {
+                        ButtonKind::Danger
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    ButtonSize::Small,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.remove_known_host_entry(line_index, window, cx);
+                })),
+            );
+            list = list.child(row);
+        }
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .gap(px(ui_tokens::SPACE_2))
+            .child(list);
+        if !state.message.is_empty() {
+            body = body.child(components::help_text(tokens, state.message.clone()));
+        }
+        body = body.child(components::help_text(
+            tokens,
+            self.tr("Entries come from the user's OpenSSH known_hosts file. Removal takes effect immediately and cannot be undone."),
+        ));
+
+        components::modal_overlay(tokens, "host-key-manager-overlay")
+            .track_focus(&self.overlay_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                    cx.stop_propagation();
+                    this.close_host_key_manager(window, cx);
+                }
+            }))
+            .child(
+                components::modal_panel(tokens, "host-key-manager-panel")
+                    .w(px(ui_tokens::MODAL_WIDTH_KEYGEN))
+                    .h(px(420.))
+                    .child(
+                        components::modal_header(tokens, self.tr("Manage host keys")).child(
+                            components::icon_button(
+                                tokens,
+                                "host-key-manager-close",
+                                IconName::Close,
+                                ButtonKind::Ghost,
+                                ButtonSize::Small,
+                                self.tr("Close"),
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.close_host_key_manager(window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .child(body)
+                    .child(
+                        components::modal_footer(tokens).child(
+                            components::button(
+                                tokens,
+                                "host-key-manager-done",
+                                self.tr("Close"),
+                                ButtonKind::Secondary,
+                                ButtonSize::Regular,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.close_host_key_manager(window, cx);
+                                },
+                            )),
+                        ),
+                    ),
             )
             .into_any_element()
     }
@@ -26571,6 +26887,9 @@ impl Render for AppView {
         }
         if self.host_row_menu.is_some() {
             root = root.child(self.host_row_menu_overlay(&tokens, cx));
+        }
+        if self.host_key_manager.is_some() {
+            root = root.child(self.host_key_manager_overlay(&tokens, cx));
         }
         if self.session_switcher_visible {
             root = root.child(self.session_switcher_overlay(&tokens, cx));

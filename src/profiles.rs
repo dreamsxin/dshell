@@ -23,6 +23,9 @@ pub const MAX_TAB_LABEL_CHARS: usize = 80;
 pub const MAX_LOGIN_COMMANDS: usize = 16;
 pub const MAX_LOGIN_COMMAND_BYTES: usize = 1024;
 pub const MAX_LOGIN_COMMAND_TOTAL_BYTES: usize = 4096;
+pub const MAX_ENV_VARS: usize = 16;
+pub const MAX_ENV_NAME_BYTES: usize = 64;
+pub const MAX_ENV_VALUE_BYTES: usize = 1024;
 const MAX_LOGIN_COMMAND_TEXT_BYTES: usize = MAX_LOGIN_COMMAND_TOTAL_BYTES + MAX_LOGIN_COMMANDS;
 const MAX_RECENT_DIRECTORY_BYTES: usize = 4096;
 pub const MIN_RECONNECT_INTERVAL_SECONDS: u16 = 1;
@@ -302,6 +305,8 @@ pub struct HostProfile {
     pub auth_method: AuthMethod,
     #[serde(default, skip_serializing_if = "is_false")]
     pub agent_forwarding: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_vars: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxySpec>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -611,6 +616,60 @@ pub fn record_recent(recent: &mut Vec<RecentConnection>, entry: RecentConnection
     recent.truncate(MAX_RECENT_CONNECTIONS);
 }
 
+/// Parse the editor text of one environment variable per line into
+/// `NAME=value` entries. Names must be non-empty, control-free and use the
+/// common shell variable alphabet; values must be control-free and short
+/// enough for a `request_env` payload.
+pub fn parse_env_vars(text: &str) -> Result<Vec<String>, String> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            return Err(format!("Environment variable {line:?} must be NAME=value."));
+        };
+        let name = name.trim();
+        if name.is_empty()
+            || name.len() > MAX_ENV_NAME_BYTES
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(format!(
+                "Environment variable name {name:?} must be 1-{MAX_ENV_NAME_BYTES} ASCII letters, digits or underscores."
+            ));
+        }
+        if value.chars().any(char::is_control) || value.len() > MAX_ENV_VALUE_BYTES {
+            return Err(format!(
+                "Environment variable {name} has an empty or invalid value."
+            ));
+        }
+        if value.is_empty() {
+            return Err(format!(
+                "Environment variable {name} needs a non-empty value."
+            ));
+        }
+        if entries
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "Environment variable {name} is defined more than once."
+            ));
+        }
+        entries.push((name.to_owned(), value.to_owned()));
+        if entries.len() > MAX_ENV_VARS {
+            return Err(format!(
+                "At most {MAX_ENV_VARS} environment variables are supported."
+            ));
+        }
+    }
+    Ok(entries
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect())
+}
+
 /// Drop one recent entry identified by its connection target. Returns
 /// whether an entry was removed.
 pub fn remove_recent(recent: &mut Vec<RecentConnection>, host: &str, port: u16, username: &str) {
@@ -762,6 +821,16 @@ fn validate_profiles(profiles: &[HostProfile]) -> Result<(), String> {
             .login_commands
             .validate()
             .map_err(|error| format!("Host profile {}: {error}", profile.name))?;
+        parse_env_vars(&profile.env_vars.join(
+            "
+",
+        ))
+        .map_err(|error| {
+            format!(
+                "Host profile {} has invalid environment variables: {error}",
+                profile.name
+            )
+        })?;
         validate_forward_rules(profile)?;
     }
     Ok(())
@@ -808,6 +877,7 @@ mod tests {
             favorite: false,
             auth_method: AuthMethod::Password,
             agent_forwarding: false,
+            env_vars: Vec::new(),
             proxy: None,
             identity_file: String::new(),
             proxy_jump: String::new(),
@@ -1061,6 +1131,7 @@ mod tests {
                 favorite: false,
                 auth_method: AuthMethod::Password,
                 agent_forwarding: false,
+                env_vars: Vec::new(),
                 proxy: None,
                 identity_file: String::new(),
                 proxy_jump: String::new(),
@@ -1192,6 +1263,7 @@ mod tests {
             terminal_theme: Some(TerminalTheme::SolarizedLight),
             tab_color: TabColor::Custom(0x12abef),
             agent_forwarding: true,
+            env_vars: Vec::new(),
             proxy: Some(ProxySpec {
                 proxy_type: ProxyType::HttpConnect,
                 host: "proxy.example.com".to_owned(),
@@ -1586,5 +1658,57 @@ mod tests {
         assert_eq!(entries.len(), 1);
         remove_recent(&mut entries, "one.example.com", 2200, "root");
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_env_vars_validates_names_values_and_duplicates() {
+        assert!(parse_env_vars("").unwrap().is_empty());
+        assert_eq!(
+            parse_env_vars("LANG=en_US.UTF-8").unwrap(),
+            vec!["LANG=en_US.UTF-8".to_owned()]
+        );
+        assert_eq!(
+            parse_env_vars(
+                "  A=B  
+
+C=1_2 "
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+        // Missing '=' separator.
+        assert!(parse_env_vars("NOSEPARATOR").is_err());
+        // Invalid names.
+        assert!(parse_env_vars("has space=x").is_err());
+        assert!(parse_env_vars("=empty-name").is_err());
+        assert!(parse_env_vars("bad-char!=x").is_err());
+        // Empty values are rejected.
+        assert!(parse_env_vars("NAME=").is_err());
+        // Control characters in values are rejected.
+        assert!(parse_env_vars(&format!("NAME=a{}b", char::from(0x01))).is_err());
+        // Duplicate names are rejected regardless of case.
+        assert!(
+            parse_env_vars(
+                "NAME=a
+name=b"
+            )
+            .is_err()
+        );
+        // Values may contain '=' characters.
+        assert_eq!(
+            parse_env_vars("FLAGS=--foo=bar").unwrap(),
+            vec!["FLAGS=--foo=bar".to_owned()]
+        );
+        // More than the supported number of entries is rejected.
+        let many: String = (0..17)
+            .map(|index| {
+                format!(
+                    "V{index}=1
+"
+                )
+            })
+            .collect();
+        assert!(parse_env_vars(&many).is_err());
     }
 }

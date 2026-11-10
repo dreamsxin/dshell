@@ -727,6 +727,24 @@ pub fn translate<'a>(language: Language, key: &'a str) -> Cow<'a, str> {
         "No terminal output to scan." => "无终端输出可扫描。",
         "Choose identity file" => "选择身份文件",
         "Test connection" => "测试连接",
+        "Environment variables" => "环境变量",
+        "One NAME=value pair per line, requested on the session channel before the shell starts. Servers that do not accept environment variables ignore them." => {
+            "每行一个 NAME=value，在 shell 启动前通过会话通道请求。不接受环境变量的服务器会忽略。"
+        }
+        "Manage host keys" => "管理主机密钥",
+        "List the host keys recorded in the user's OpenSSH known_hosts file with their fingerprints, and remove individual entries after an explicit confirmation." => {
+            "列出用户 OpenSSH known_hosts 中记录的主机密钥及其指纹，经显式确认后可移除单个条目。"
+        }
+        "No host keys are recorded in the user's known_hosts file." => {
+            "用户 known_hosts 文件中还没有主机密钥记录。"
+        }
+        "Unrecognized key format" => "无法识别的密钥格式",
+        "Unknown" => "未知",
+        "Click again to remove" => "再次点击确认移除",
+        "Remove" => "移除",
+        "Entries come from the user's OpenSSH known_hosts file. Removal takes effect immediately and cannot be undone." => {
+            "条目来自用户的 OpenSSH known_hosts 文件。移除立即生效且不可撤销。"
+        }
         "Install public key" => "安装公钥",
         "Choose an identity file before installing its public key." => {
             "请先选择身份文件，再安装其公钥。"

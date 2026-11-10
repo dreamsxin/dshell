@@ -546,6 +546,16 @@ SSH Client workflow.
 
 ### Added
 
+- Add the Bitvise-parity batch 2: a host key manager in Settings lists
+  the user's known_hosts entries with host pattern, key algorithm and
+  SHA256 fingerprint and removes individual entries after an explicit
+  two-step confirmation; per-host environment variables ("NAME=value"
+  lines in the session editor) are requested on the session channel
+  before the PTY and silently ignored by servers that do not accept
+  them. The RDP-over-SSH shortcut turns out to be already implemented
+  (Tunnels panel, Remote Desktop group); the gap audit document was
+  corrected accordingly, and PuTTY .ppk import stays deferred with an
+  evaluation note.
 - Add Bitvise-style one-click public key installation: the credential
   prompt gains an "Install public key" action that logs in with the
   entered password and appends the selected identity file's public key

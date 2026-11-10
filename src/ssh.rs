@@ -103,6 +103,9 @@ pub struct ConnectionSpec {
     /// this machine, each later hop is dialed through the previous one, and
     /// the target is dialed through the last hop. Empty connects directly.
     pub jump: Vec<JumpSpec>,
+    /// `NAME=value` environment variables requested on the session channel
+    /// before the PTY. Servers that do not accept them ignore the requests.
+    pub env_vars: Vec<String>,
     pub keepalive_seconds: u16,
     pub reconnect: ReconnectSettings,
     pub theme: TerminalTheme,
@@ -609,6 +612,115 @@ where
     tokio::io::copy_bidirectional(&mut forwarded, &mut agent)
         .await
         .context("SSH agent forwarding channel closed with an I/O error")
+}
+
+/// One parsed line of the user's known_hosts file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnownHostEntry {
+    /// 0-based index of the line in the file, used for removal.
+    pub line_index: usize,
+    /// The host pattern (may be hashed or carry an `@` marker prefix).
+    pub host_pattern: String,
+    /// The key algorithm name (for example `ssh-ed25519`), or empty when
+    /// the key blob could not be parsed.
+    pub key_type: String,
+    /// The SHA256 fingerprint (`SHA256:...`), or empty when unparsable.
+    pub fingerprint: String,
+}
+
+/// Parse known_hosts content into displayable entries. Unparsable lines
+/// (unknown formats, broken blobs) are still listed so the user can see
+/// and remove them; empty and comment lines are skipped.
+pub fn parse_known_hosts_entries(content: &str) -> Vec<KnownHostEntry> {
+    let mut entries = Vec::new();
+    for (line_index, line) in content.lines().enumerate() {
+        let line = line.trim_end_matches('\n');
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let mut first = fields.next().unwrap_or_default().to_owned();
+        if first.starts_with('@') {
+            // Marker entry (for example @cert-authority): the host pattern
+            // follows the marker.
+            first = fields.next().unwrap_or_default().to_owned();
+        }
+        if first.is_empty() {
+            continue;
+        }
+        // Standard line shape: pattern keytype base64-blob [comment].
+        let mut key_type = String::new();
+        let mut blob = fields.next().unwrap_or_default();
+        if blob.starts_with("ssh-") || blob.starts_with("ecdsa-") || blob.starts_with("sk-") {
+            key_type = blob.to_owned();
+            blob = fields.next().unwrap_or_default();
+        }
+        let fingerprint = match russh::keys::parse_public_key_base64(blob) {
+            Ok(key) => {
+                if key_type.is_empty() {
+                    key_type = key.algorithm().as_str().to_owned();
+                }
+                key.fingerprint(russh::keys::HashAlg::Sha256).to_string()
+            }
+            Err(_) => String::new(),
+        };
+        entries.push(KnownHostEntry {
+            line_index,
+            host_pattern: first,
+            key_type,
+            fingerprint,
+        });
+    }
+    entries
+}
+
+/// Read and parse the user's known_hosts file. A missing file yields no
+/// entries.
+pub fn read_known_host_entries(path: &Path) -> Result<Vec<KnownHostEntry>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "Could not read known_hosts file {}",
+                path.display()
+            )));
+        }
+    };
+    Ok(parse_known_hosts_entries(&content))
+}
+
+/// Rewrite the known_hosts file without the given line indices (0-based
+/// file lines). Returns how many lines were removed. Lines are identified
+/// by their file index, not by content, so duplicates stay distinct.
+pub fn remove_known_host_lines(path: &Path, line_indices: &[usize]) -> Result<usize> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Could not read known_hosts file {}", path.display()))?;
+    let kept: Vec<&str> = content
+        .lines()
+        .enumerate()
+        .filter(|(index, _)| !line_indices.contains(index))
+        .map(|(_, line)| line)
+        .collect();
+    let removed = content.lines().count() - kept.len();
+    let mut output = kept.join(
+        "
+",
+    );
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    std::fs::write(path, output)
+        .with_context(|| format!("Could not update known_hosts file {}", path.display()))?;
+    Ok(removed)
+}
+
+/// The user's default known_hosts file path.
+pub fn user_known_hosts_path() -> Result<PathBuf> {
+    default_known_hosts_path()
 }
 
 fn default_known_hosts_path() -> Result<PathBuf> {
@@ -1970,6 +2082,7 @@ async fn run_connection_attempt_with_known_hosts(
         port,
         username,
         authentication,
+        env_vars,
         agent_forwarding,
         proxy,
         proxy_credentials,
@@ -2117,6 +2230,15 @@ async fn run_connection_attempt_with_known_hosts(
         };
 
         let mut channel = session.channel_open_session().await?;
+        // Environment variables are requested before the PTY; servers that
+        // do not accept them silently ignore the fire-and-forget requests.
+        for entry in &env_vars {
+            if let Some((name, value)) = entry.split_once('=') {
+                channel
+                    .set_env(false, name.to_owned(), value.to_owned())
+                    .await?;
+            }
+        }
         channel
             .request_pty(
                 true,
@@ -4497,14 +4619,14 @@ mod tests {
         RemoteSftpOutput, ServerPowerAction, ServiceAction, UiEvent,
         authorized_keys_install_command, can_answer_with_password, connect_proxy_stream,
         connection_info_for_key, is_known_host_key, is_retryable_reconnect_error,
-        parse_power_action, parse_process_action, parse_server_docker_containers,
-        parse_server_listeners, parse_server_metrics, parse_server_network, parse_server_processes,
-        parse_server_services, parse_server_sessions, parse_server_storage, parse_service_action,
-        parse_service_logs, power_action_command, process_termination_command, relay_agent_stream,
-        run_connection_with_known_hosts, run_remote_command, run_sftp_command, run_sftp_commands,
-        sanitize_zmodem_name, service_action_command, service_logs_command,
-        test_connection_with_known_hosts, valid_process_pid, valid_service_name,
-        wait_before_reconnect,
+        parse_known_hosts_entries, parse_power_action, parse_process_action,
+        parse_server_docker_containers, parse_server_listeners, parse_server_metrics,
+        parse_server_network, parse_server_processes, parse_server_services, parse_server_sessions,
+        parse_server_storage, parse_service_action, parse_service_logs, power_action_command,
+        process_termination_command, relay_agent_stream, run_connection_with_known_hosts,
+        run_remote_command, run_sftp_command, run_sftp_commands, sanitize_zmodem_name,
+        service_action_command, service_logs_command, test_connection_with_known_hosts,
+        valid_process_pid, valid_service_name, wait_before_reconnect,
     };
     use crate::forward::{ForwardCommand, ForwardEvent, ForwardKind, ForwardRuleSpec};
     use crate::sftp::{SftpCommand, SftpEvent};
@@ -4909,6 +5031,36 @@ mod tests {
         };
         tokio::join!(remote_task, agent_task);
         relay.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn parse_known_hosts_entries_extracts_patterns_and_fingerprints() {
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
+        let content_text = "# comment line
+
+
+prod.example.com ssh-ed25519 "
+            .to_owned()
+            + blob
+            + " user@host
+@cert-authority *.zone ssh-rsa "
+            + blob
+            + "
+broken-entry ssh-ed25519 not-base64!
+";
+        let entries = parse_known_hosts_entries(&content_text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].host_pattern, "prod.example.com");
+        assert_eq!(entries[0].line_index, 3);
+        assert_eq!(entries[0].key_type, "ssh-ed25519");
+        assert!(entries[0].fingerprint.starts_with("SHA256:"));
+        assert_eq!(entries[1].host_pattern, "*.zone");
+        assert_eq!(entries[1].key_type, "ssh-rsa");
+        assert_eq!(entries[2].host_pattern, "broken-entry");
+        // The declared algorithm survives even when the blob is unparsable;
+        // only the fingerprint stays empty.
+        assert_eq!(entries[2].key_type, "ssh-ed25519");
+        assert_eq!(entries[2].fingerprint, "");
     }
 
     #[test]
@@ -5428,6 +5580,7 @@ abc	img	name"
                 rows: 24,
             },
             jump: Vec::new(),
+            env_vars: Vec::new(),
             keepalive_seconds: 0,
             reconnect: ReconnectSettings::default(),
             theme: TerminalTheme::Default,
@@ -5520,6 +5673,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -6006,6 +6160,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -6141,6 +6296,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -6344,6 +6500,7 @@ abc	img	name"
                 let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
                     forward_test_channels();
                 let spec = ConnectionSpec {
+                    env_vars: Vec::new(),
                     host: "127.0.0.1".to_owned(),
                     port: 22,
                     username: username.clone(),
@@ -6493,6 +6650,7 @@ abc	img	name"
                 let (forward_commands, _forward_command_tx, forward_events, _forward_event_rx) =
                     forward_test_channels();
                 let spec = ConnectionSpec {
+                    env_vars: Vec::new(),
                     host: "127.0.0.1".to_owned(),
                     port: 22,
                     username: username.clone(),
@@ -6668,6 +6826,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -6805,6 +6964,7 @@ abc	img	name"
                     rows: 24,
                 },
                 jump: Vec::new(),
+                env_vars: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
                 theme: TerminalTheme::Default,
@@ -6883,6 +7043,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -7024,6 +7185,7 @@ abc	img	name"
                     rows: 24,
                 },
                 jump: Vec::new(),
+                env_vars: Vec::new(),
                 keepalive_seconds: 0,
                 reconnect: ReconnectSettings::default(),
                 theme: TerminalTheme::Default,
@@ -7613,6 +7775,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -8131,6 +8294,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,
@@ -8330,6 +8494,7 @@ abc	img	name"
                         rows: 24,
                     },
                     jump: Vec::new(),
+                    env_vars: Vec::new(),
                     keepalive_seconds: 0,
                     reconnect: ReconnectSettings::default(),
                     theme: TerminalTheme::Default,

@@ -29,11 +29,11 @@
 | 功能 | 理由 |
 |------|------|
 | GSSAPI / Kerberos (SSPI) 认证 | russh 无 GSSAPI 支持；需要手写 Windows SSPI FFI 绑定与 SPNEGO 令牌交换，工程量大且无法在此环境验证域环境 |
-| PuTTY .ppk 导入 | 需手写 PPK v2/v3 私钥格式转换（v3 为 bcrypt KDF + AES-256-CTR），错误实现会导致静默密钥损坏；用户可用 PuTTYgen 一次性转换为 OpenSSH 格式 |
-| 主机密钥管理器（列表/删除 known_hosts 条目） | 需要重写用户 known_hosts；仓库硬约束对 known_hosts 写入极其保守，仅在用户显式确认时执行。如需保留 Bitvise 体验，下一轮以显式确认对话框实现 |
+| PuTTY .ppk 导入 | ❌ 维持暂缓（评估结论 2026-11-11）：v3 需要 bcrypt-AES KDF 解密 + 私有 blob 到 OpenSSH 线格式的手写转换，错误实现会静默损坏密钥材料且无法在本环境验证 PuTTYgen 互操作；一次性转换方案（PuTTYgen → OpenSSH）已覆盖全部算法。如后续有强需求，建议以 `ssh-keygen -i` 外部调用实现而非手写解析 |
+| 主机密钥管理器（列表/删除 known_hosts 条目） | ✅ 2026-11-11 新增：Settings 面板 "Manage host keys" 弹窗列出条目（模式/算法/SHA256 指纹），两步确认后按行移除并即时重写 known_hosts（用户显式驱动，与主机密钥信任对话框同一安全模式） |
 | X11 转发 | russh 支持 `RequestX11`，但 Windows 无原生 X server 生态，可用性依赖用户自装 VcXsrv 等，暂缓 |
-| 环境变量注入（`set_env`） | russh 支持，但绝大多数服务器默认不 `AcceptEnv`，成功率低；候选项 |
-| RDP over SSH 快捷方式 | 可用 Tunnels 面板手动建本地转发到 3389 后启动 mstsc；后续可在转发行加"打开 RDP"动作 |
+| 环境变量注入（`set_env`） | ✅ 2026-11-11 新增：资料 "Environment variables" 编辑器（`NAME=value` 解析器校验名称字符/长度/重复/上限），连接时在 PTY 请求前 fire-and-forget `request_env`（服务器不接受时静默忽略，与 OpenSSH 行为一致） |
+| RDP over SSH 快捷方式 | ✅ 已实现（Tunnels 面板 Remote Desktop 分组：目标主机/端口 + "Open Remote Desktop" 按钮，临时 127.0.0.1 本地转发 + mstsc 启动；此前审计有误，2026-11-11 复核更正） |
 | 传输调度 / 目录镜像同步 | 候选项 |
 | Bitvise SSH Server 组件 | 独立产品，超出 SSH 客户端范围 |
 
@@ -44,4 +44,4 @@
 
 ## 覆盖率
 
-按上表 24 项功能：19 ✅、7 暂缓/候选（其中 2 项超出范围或有意保留差异）。2026-11-11 审计。
+按上表 24 项功能：21 ✅、5 暂缓/候选（ppk 导入维持暂缓含评估结论；X11 与传输调度为候选项；2 项超出范围或有意保留差异）。2026-11-11 第二批更新。
