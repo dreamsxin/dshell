@@ -2,6 +2,8 @@
 
 ## 当前切片
 
+2026-11-11，Windows/MSVC：Windows 主机连接说明与 RDP 定位澄清（用户问询驱动，纯文档）。用户创建新主机时未见到 RDP 协议选择——确认产品定位：连接层仅 SSH；目标 Windows 机器启用内置 OpenSSH Server（`Add-WindowsCapability` + 防火墙规则）后即可被 dshell 正常连接（PowerShell/CMD 终端，SFTP/隧道/服务器面板/ZMODEM 接收全功能可用）；RDP 非连接协议，已有能力为 RDP-over-SSH 隧道（Tunnels 面板 Remote Desktop 分组 + mstsc）。与用户确认保持现状：原生 RDP 会话不纳入路线。README 新增 "Connecting to Windows hosts" 小节（OpenSSH Server 启用步骤 + RDP 定位 + 隧道指引），范围说明改为"原生 RDP 协议客户端不在范围（RDP 经隧道由 Windows 远程桌面客户端完成）"；差距审计设计差异区补充 RDP 定位条目。纯文档变更，无代码改动，无需重建。
+
 2026-11-11，Windows/MSVC：修复侧栏窄宽度下文字换行错乱。`SidebarRow` 标题与副标题、组头标签、区头（FAVORITES/RECENT）改为 `truncate()`（nowrap + overflow hidden + 省略号）——窄侧栏（最小 200px）下行内文字单行省略而非换行挤压布局；组头标签 flex_1 min_w_0 截断、操作图标组 flex_shrink_0 不再挤压标签。仅 UI 组件改动，无状态/交互行为变化。验证：`cargo fmt --all`、硬约束脚本通过（lib 131 + main 141 + cli 14）。窄宽度显示效果需人工验收（拖动侧栏分隔线到最小宽度观察行/组头/区头）。
 
 2026-11-11，Windows/MSVC：Bitvise 功能审计定稿。`docs/BITVISE_GAP_ANALYSIS.md` 剩余两个候选项写入与 ppk 导入同等力度的定稿暂缓理由：①X11 转发——russh 暴露 `request_x11` 与通道回调，但正确客户端还须手写 MIT-MAGIC-COOKIE-1 校验/替换（安全敏感，错误实现泄露本地 X 凭据或破坏会话）、依赖 Windows 原生不带的本机 X server（本环境无法端到端验证）并管理每会话 DISPLAY 状态；裸转发会迫使用户关闭 X 访问控制。过渡方案 VcXsrv + OpenSSH `ssh -X`。②传输调度/目录镜像同步——镜像需双侧递归变更检测、冲突策略与删除传播（破坏性，与"覆盖必确认"姿态冲突），周期后台写入无法在本环境长时自动化验证；既有一次性递归传输 + 脚本录制覆盖组合场景。至此审计定稿：24 项中 21 ✅、4 项暂缓（每项均含定稿理由：GSSAPI/Kerberos、ppk 导入、X11 转发、传输调度）、2 项超出范围或有意保留差异。纯文档变更，无代码改动。

@@ -41,6 +41,7 @@
 
 - 凭据持久化：Bitvise 可加密保存密码；dshell 的安全约束是**凭据绝不写盘**（仅内存 Zeroizing），不在此对齐。
 - 域集成：Bitvise 深度集成 Windows 账户；dshell 为通用 SSH 客户端。
+- RDP 协议：dshell 不实现 RDP 协议客户端、不提供协议选择器（连接层仅 SSH）；Windows 主机经 OpenSSH Server 以 SSH 连接，RDP 需求由 RDP-over-SSH 隧道 + 系统 mstsc 完成（2026-11-11 与用户确认保持现状，原生 RDP 会话不纳入路线）。
 
 ## 覆盖率
 

@@ -84,6 +84,31 @@ which also offers to remember the main window's size and position across runs.
 
 ## Run
 
+### Connecting to Windows hosts
+
+dshell is an SSH client: the connection layer speaks SSH only, and Windows
+machines are reached over SSH after enabling the built-in OpenSSH server on
+the target. On the Windows machine (administrator PowerShell):
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Start-Service sshd
+Set-Service sshd -StartupType Automatic
+New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+```
+
+Save the host in dshell with the machine's address and an administrator
+account and the terminal session runs PowerShell or `cmd.exe` over the
+standard VT stream. All dshell features (SFTP, tunnels, server panels, ZMODEM
+receive side) work against Windows OpenSSH.
+
+RDP is not a connection protocol in dshell and there is no protocol
+selector. When a Windows machine's `3389` port is reachable from an SSH
+server you are connected to (a bastion or another Windows host with
+OpenSSH), the Tunnels panel's Remote Desktop group tunnels `3389` through
+that session and launches the Windows Remote Desktop client (`mstsc.exe`) —
+the RDP protocol itself stays with Windows. See the Tunnels section below.
+
 The server host key must already be present in the current user's OpenSSH
 known_hosts file. Unknown or changed keys are rejected. Verify a key out of
 band before adding it to known_hosts.
@@ -579,8 +604,9 @@ dshell targets the daily Xshell-style workflow as an open-source, native
 application: session management with groups and recents, tabbed and split
 terminals, an inspector for transfers/tunnels/connection/logging, SFTP with
 resume, local/remote/SOCKS5 forwarding, timestamped logs with a replay timeline,
-and Ed25519/RSA/ECDSA key generation. Telnet, Rlogin, Serial and RDP are outside
-the current scope. See [ROADMAP.md](ROADMAP.md) for the capability matrix and
+and Ed25519/RSA/ECDSA key generation. Telnet, Rlogin, Serial and a native RDP
+protocol client are outside the current scope (RDP is used through the
+Windows Remote Desktop client over the tunneling feature). See [ROADMAP.md](ROADMAP.md) for the capability matrix and
 remaining work.
 
 ## Test and Verify
